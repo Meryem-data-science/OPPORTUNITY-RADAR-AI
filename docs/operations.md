@@ -5,6 +5,27 @@ development server runs with `npm run dev` from `apps/web` after dependencies
 are installed. No deployment, scheduled collection, or external integration is
 currently operational.
 
+## Scale AI source dry-run
+
+After installing Python dependencies, run the first source collector explicitly
+in read-only dry-run mode:
+
+```bash
+python -m services.collector.cli.collect_source \
+  --source scale_ai_greenhouse --limit 3 --dry-run
+```
+
+It queries the unauthenticated public Greenhouse board using the `scaleai`
+token from `config/sources.yaml`, logs counts, and prints candidate summaries
+without descriptions or credentials. `--limit` controls only returned/displayed
+items. No Phase 1.1 command writes to SQLite or Turso.
+
+The real-network smoke test is opt-in and skipped otherwise:
+
+```bash
+RUN_LIVE_SOURCE_TEST=1 pytest -q tests/live/test_scale_ai_greenhouse.py -s
+```
+
 ## Structured logging
 
 The Python service writes one JSON object per event. Every record includes an

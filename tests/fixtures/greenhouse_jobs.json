@@ -1,0 +1,12 @@
+{
+  "fixture_notice": "TEST FIXTURE — NON PRODUCTION DATA",
+  "jobs": [
+    {
+      "id": 12345,
+      "title": "Test Data Engineer",
+      "location": {"name": "Test City"},
+      "content": "<p>TEST FIXTURE — NON PRODUCTION DATA</p>",
+      "absolute_url": "https://example.test/jobs/12345"
+    }
+  ]
+}

@@ -1,2 +1,11 @@
-# Future catalogue of real opportunity sources. No source is configured yet.
-sources: []
+# Verified public opportunity source catalogue.
+sources:
+  - id: scale_ai_greenhouse
+    type: greenhouse
+    enabled: true
+    category: jobs
+    country: null
+    frequency_minutes: 120
+    status: active
+    organization: Scale AI
+    board_token: scaleai
