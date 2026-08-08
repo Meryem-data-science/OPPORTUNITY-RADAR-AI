@@ -55,6 +55,24 @@ RUN_TURSO_LIVE_TEST=1 DATABASE_BACKEND=turso pytest tests/live
 
 No remote migration or write is performed by this test.
 
+## Web health
+
+The Next.js server reads `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` directly
+from its process environment. These values must never be committed or given a
+`NEXT_PUBLIC_` prefix. Start the application and manually check the read-only
+health endpoint with real credentials:
+
+```bash
+cd apps/web
+TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... npm run dev
+curl http://localhost:3000/api/health
+```
+
+`GET /api/health` returns HTTP 200 after connectivity, Foundation schema, and
+migration checks pass; otherwise it returns HTTP 503 without driver errors or
+credentials. `/health` renders the same real result. Web-to-Turso validation
+must be performed manually outside Codex.
+
 ## Configured migrations
 
 Apply pending migrations to the configured SQLite backend with:

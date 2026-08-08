@@ -14,10 +14,14 @@ connection.
 
 ## Turso
 
-The Turso path uses the official `libsql` client and receives its database URL
+The Python Turso path uses the official `libsql` client and receives its database URL
 and authentication token only from validated `Settings`. The connection layer
 is prepared. Remote connectivity and `SELECT 1` have been validated manually;
-applying the shared schema remotely remains an explicit, separate operation.
+the shared Foundation schema has also been applied and verified manually.
+
+The Next.js server uses `@libsql/client` with `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN`. Its health service performs only `SELECT` statements and
+does not expose either setting to browser code or health responses.
 
 ## Migrations
 
@@ -38,6 +42,12 @@ is opened and no remote write is attempted. Real Turso migration application
 has not been performed in Codex Cloud and must be validated manually in WSL.
 
 ## Healthcheck
+
+The Web application exposes a server-rendered `/health` page and
+`GET /api/health`. Both use the same read-only service to verify `SELECT 1`,
+the four Foundation tables in `sqlite_schema`, and migration version `0001`.
+The API returns HTTP 200 only when every check passes, and HTTP 503 with a
+sanitized response otherwise.
 
 Run the configured backend healthcheck with:
 
@@ -73,6 +83,6 @@ opportunities.
 
 ## Not yet implemented
 
-- Applied and verified remote Turso migrations.
+- Live Web-to-Turso health validation (requires manual credentials outside Codex).
 - Real source and opportunity data.
 - Collectors, matching, or an application-facing database API.

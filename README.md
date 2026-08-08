@@ -12,7 +12,7 @@ This repository currently contains only:
 - validated runtime configuration loaded from environment variables;
 - SQLite/Turso connection selection with a read-only database healthcheck;
 - shared transactional migrations and read-only schema verification;
-- a minimal Next.js and TypeScript landing page;
+- a minimal Next.js application with a real, read-only Turso health page;
 - empty configuration contracts and initial documentation;
 - foundation tests and continuous-integration checks.
 
@@ -61,9 +61,8 @@ development or validation:
 python -m services.collector.cli.migrate --database /tmp/opportunity-radar.db
 ```
 
-Turso / libSQL remains the planned production storage target. Remote health
-connectivity has been validated manually, but no remote migration has been
-applied or verified yet.
+Turso / libSQL is the production storage target. Remote connectivity and the
+Foundation migration have been validated manually outside Codex.
 
 Check the configured database connection with a read-only `SELECT 1`:
 
@@ -90,4 +89,17 @@ npm run dev
 ```
 
 The development server is available at <http://localhost:3000> by default.
-Use `npm run lint` and `npm run build` for frontend validation.
+The server-rendered `/health` page and JSON `GET /api/health` endpoint perform
+read-only connectivity, Foundation schema, and migration-version checks. Set
+`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server process before
+starting Next.js, then validate the API manually:
+
+```bash
+TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... npm run dev
+curl http://localhost:3000/api/health
+```
+
+Never commit either credential. They are server-only variables; no
+`NEXT_PUBLIC_` database setting is used. Use `npm test`, `npm run lint`, and
+`npm run build` for frontend validation. Live Web-to-Turso validation is still
+required outside Codex.
