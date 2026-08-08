@@ -26,21 +26,53 @@ def test_factory_selects_sqlite_and_connection_closes(tmp_path) -> None:
     )
 
     connection = connect_configured_database(settings)
+
     assert isinstance(connection, sqlite3.Connection)
     assert connection.execute("SELECT 1").fetchone() == (1,)
+
     connection.close()
 
     with pytest.raises(sqlite3.ProgrammingError):
         connection.execute("SELECT 1")
 
 
-def test_factory_selects_turso_and_passes_validated_credentials(monkeypatch) -> None:
+def test_sqlite_connection_creates_missing_parent_directory(tmp_path) -> None:
+    database_path = tmp_path / "missing" / "nested" / "connection.db"
+
+    assert not database_path.parent.exists()
+
+    settings = Settings(
+        environment=ApplicationEnvironment.TEST,
+        database_backend=DatabaseBackend.SQLITE,
+        sqlite_database_path=database_path,
+    )
+
+    connection = connect_configured_database(settings)
+
+    try:
+        assert database_path.parent.is_dir()
+        assert database_path.is_file()
+        assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_factory_selects_turso_and_passes_validated_credentials(
+    monkeypatch,
+) -> None:
     calls: list[dict[str, str]] = []
     expected_connection = object()
+
     fake_libsql = SimpleNamespace(
         connect=lambda **kwargs: calls.append(kwargs) or expected_connection
     )
-    monkeypatch.setattr(turso, "import_module", lambda name: fake_libsql)
+
+    monkeypatch.setattr(
+        turso,
+        "import_module",
+        lambda name: fake_libsql,
+    )
+
     settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.TURSO,
@@ -70,6 +102,7 @@ def test_turso_connection_error_does_not_expose_secret(monkeypatch) -> None:
         "import_module",
         lambda name: SimpleNamespace(connect=fail_connection),
     )
+
     settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.TURSO,
@@ -85,14 +118,23 @@ def test_turso_connection_error_does_not_expose_secret(monkeypatch) -> None:
 
 def test_missing_libsql_only_blocks_turso(monkeypatch, tmp_path) -> None:
     def missing_libsql(name: str) -> None:
-        raise ModuleNotFoundError("No module named 'libsql'", name="libsql")
+        raise ModuleNotFoundError(
+            "No module named 'libsql'",
+            name="libsql",
+        )
 
-    monkeypatch.setattr(turso, "import_module", missing_libsql)
+    monkeypatch.setattr(
+        turso,
+        "import_module",
+        missing_libsql,
+    )
+
     sqlite_settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.SQLITE,
         sqlite_database_path=tmp_path / "connection.db",
     )
+
     turso_settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.TURSO,
