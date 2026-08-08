@@ -16,8 +16,26 @@ connection.
 
 The Turso path uses the official `libsql` client and receives its database URL
 and authentication token only from validated `Settings`. The connection layer
-is prepared, but real remote connectivity still requires opt-in live validation
-with real credentials.
+is prepared. Remote connectivity and `SELECT 1` have been validated manually;
+applying the shared schema remotely remains an explicit, separate operation.
+
+## Migrations
+
+SQLite and Turso use the same ordered files in `migrations/`. The runner splits
+each SQL script into complete statements, starts a transaction, executes the
+statements, records the version in `schema_migrations`, and commits. An error
+causes a rollback and the version is not recorded.
+
+The configured migration command is:
+
+```bash
+python -m services.collector.cli.migrate_configured --apply
+```
+
+SQLite requires only `--apply`. Turso additionally requires
+`RUN_TURSO_LIVE_MIGRATION=1`; without both explicit permissions, no connection
+is opened and no remote write is attempted. Real Turso migration application
+has not been performed in Codex Cloud and must be validated manually in WSL.
 
 ## Healthcheck
 
@@ -30,9 +48,17 @@ python -m services.collector.cli.db_health
 It opens the selected connection, executes only `SELECT 1`, verifies the
 result, and closes the connection. It creates no schema and writes no data.
 
+After migrations, verify the four foundation tables without writing data:
+
+```bash
+python -m services.collector.cli.db_schema
+```
+
 ## Currently implemented
 
 - Ordered, transactional SQL migrations tracked in `schema_migrations`.
+- A shared SQLite/Turso migration runner and configured migration CLI.
+- Read-only foundation schema verification.
 - SQLite and Turso connection selection with explicit dependency errors.
 - A local SQLite connection with foreign-key enforcement.
 - Foundation tables: `sources`, `opportunities`, and `opportunity_sources`.
@@ -47,6 +73,6 @@ opportunities.
 
 ## Not yet implemented
 
-- Validated live Turso connectivity and real Turso credentials.
+- Applied and verified remote Turso migrations.
 - Real source and opportunity data.
 - Collectors, matching, or an application-facing database API.

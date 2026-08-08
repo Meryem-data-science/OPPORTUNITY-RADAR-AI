@@ -20,7 +20,10 @@ class DatabaseConnection(Protocol):
 
 def connect_database(database: str | Path) -> sqlite3.Connection:
     """Open an explicit SQLite database path with foreign keys enabled."""
-    connection = sqlite3.connect(database)
+    database_path = Path(database)
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
 

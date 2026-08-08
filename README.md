@@ -11,6 +11,7 @@ This repository currently contains only:
 - structured JSON logging for the Python service;
 - validated runtime configuration loaded from environment variables;
 - SQLite/Turso connection selection with a read-only database healthcheck;
+- shared transactional migrations and read-only schema verification;
 - a minimal Next.js and TypeScript landing page;
 - empty configuration contracts and initial documentation;
 - foundation tests and continuous-integration checks.
@@ -60,14 +61,25 @@ development or validation:
 python -m services.collector.cli.migrate --database /tmp/opportunity-radar.db
 ```
 
-Turso / libSQL remains the planned production storage target; no remote
-database migration or live connection has been validated yet.
+Turso / libSQL remains the planned production storage target. Remote health
+connectivity has been validated manually, but no remote migration has been
+applied or verified yet.
 
 Check the configured database connection with a read-only `SELECT 1`:
 
 ```bash
 python -m services.collector.cli.db_health
 ```
+
+Apply migrations to the configured backend and verify the foundation schema:
+
+```bash
+python -m services.collector.cli.migrate_configured --apply
+python -m services.collector.cli.db_schema
+```
+
+Remote Turso migration additionally requires the explicit
+`RUN_TURSO_LIVE_MIGRATION=1` safeguard and has not been run from Codex Cloud.
 
 ## Web setup
 
