@@ -37,7 +37,7 @@ while loading settings. Supported variables are:
 
 `.env.example` documents names and local defaults but contains no credential.
 Secrets must be supplied through the process environment. Turso connectivity
-and network credential validation are not implemented yet.
+has been validated manually; credential contents are not otherwise validated.
 
 ## Database health and live test
 
@@ -54,3 +54,28 @@ RUN_TURSO_LIVE_TEST=1 DATABASE_BACKEND=turso pytest tests/live
 ```
 
 No remote migration or write is performed by this test.
+
+## Configured migrations
+
+Apply pending migrations to the configured SQLite backend with:
+
+```bash
+python -m services.collector.cli.migrate_configured --apply
+```
+
+For Turso, the same command refuses to connect unless both `--apply` and
+`RUN_TURSO_LIVE_MIGRATION=1` are present. Migration logs contain only the
+backend, applied count, and error type—not the Turso URL or token.
+
+`python -m services.collector.cli.db_schema` performs a read-only check for
+`schema_migrations`, `sources`, `opportunities`, and `opportunity_sources`.
+
+The write-enabled live migration test is disabled by default. Manual WSL
+validation requires real settings and `RUN_TURSO_LIVE_MIGRATION_TEST=1`:
+
+```bash
+RUN_TURSO_LIVE_MIGRATION_TEST=1 DATABASE_BACKEND=turso \
+  pytest tests/live/test_turso_migrations.py
+```
+
+Codex Cloud does not run this test or apply migrations to Turso.

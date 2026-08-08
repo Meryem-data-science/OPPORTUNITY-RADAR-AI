@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from services.collector.database.connection import connect_database
-from services.collector.database.migrations import apply_migrations
+from services.collector.database.migrations import MigrationError, apply_migrations
 
 
 EXPECTED_TABLES = {
@@ -92,7 +92,7 @@ def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path) -> None:
     )
 
     with connect_database(tmp_path / "unit.db") as connection:
-        with pytest.raises(sqlite3.Error):
+        with pytest.raises(MigrationError):
             apply_migrations(connection, migrations_directory)
 
         recorded = connection.execute(
