@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opportunity-radar"
+version = "0.1.0"
+description = "Foundation for the Opportunity Radar AI data service"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = ["libsql>=0.1.11,<0.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10"]
+
+[tool.setuptools.packages.find]
+include = ["services*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["."]
+testpaths = ["tests"]
