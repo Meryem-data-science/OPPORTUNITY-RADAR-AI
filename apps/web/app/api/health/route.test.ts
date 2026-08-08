@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { createHealthResponse } from "./route";
+import { createHealthResponse } from "./response";
 
 describe("GET /api/health", () => {
   it("returns 200 when healthy", async () => {
