@@ -11,6 +11,7 @@ htmlcov/
 venv/
 
 # Local SQLite databases
+.data/
 *.db
 *.db-*
 *.sqlite

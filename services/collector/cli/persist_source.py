@@ -2,13 +2,11 @@
 
 import argparse
 from collections.abc import Sequence
-import os
 
 from services.collector.cli.collect_source import positive_limit
 from services.collector.collectors.greenhouse import GreenhouseCollector
 from services.collector.config import DatabaseBackend, load_settings
-from services.collector.database.connection import connect_configured_database
-from services.collector.database.opportunities import persist_opportunities
+from services.collector.database.opportunities import persist_configured_opportunities
 from services.collector.logging_config import get_logger
 from services.collector.sources import get_enabled_source
 
@@ -44,11 +42,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         selected = candidates[: args.limit]
         settings = load_settings()
         backend = settings.database_backend.value
-        if (
-            settings.database_backend is DatabaseBackend.TURSO
-            and os.environ.get("RUN_TURSO_LIVE_PERSIST") != "1"
-        ):
-            raise PermissionError("Turso persistence requires RUN_TURSO_LIVE_PERSIST=1")
+        if settings.database_backend is DatabaseBackend.TURSO:
+            raise PermissionError(
+                "Remote Turso opportunity writes are disabled in Phase 1"
+            )
 
         logger.info(
             "Source persistence started.",
@@ -60,11 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "database_backend": backend,
             },
         )
-        connection = connect_configured_database(settings)
-        try:
-            summary = persist_opportunities(connection, source, selected)
-        finally:
-            connection.close()
+        summary = persist_configured_opportunities(settings, source, selected)
     except Exception as error:
         logger.error(
             "Source persistence failed.",
@@ -84,8 +77,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_id": source.id,
             "items_collected": len(candidates),
             "items_selected": len(selected),
-            "created": summary.created,
-            "updated": summary.updated,
+            "items_created": summary.created,
+            "items_updated": summary.updated,
             "database_backend": backend,
         },
     )

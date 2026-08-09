@@ -145,7 +145,11 @@ class TursoHttpConnection:
         return parameters
 
     def _pipeline(self, request: dict[str, Any]) -> TursoResult:
-        payload = {"baton": self._baton, "requests": [request]}
+        document = self._post_pipeline([request])
+        return self._parse_pipeline_response(document, request["type"])
+
+    def _post_pipeline(self, requests: list[dict[str, Any]]) -> Any:
+        payload = {"baton": self._baton, "requests": requests}
         try:
             response = self._client.post(self._endpoint, json=payload)
             response.raise_for_status()
@@ -161,7 +165,7 @@ class TursoHttpConnection:
             document = response.json()
         except ValueError as error:
             raise TursoProtocolError("Turso returned invalid JSON") from error
-        return self._parse_pipeline_response(document, request["type"])
+        return document
 
     def _parse_pipeline_response(self, document: Any, request_type: str) -> TursoResult:
         if not isinstance(document, dict):

@@ -5,10 +5,14 @@ import sqlite3
 import pytest
 
 from services.collector.database import opportunities
+from services.collector.database.connection import connect_database
+from services.collector.database.migrations import apply_migrations
 from services.collector.database.opportunities import (
     OpportunityPersistenceError,
+    persist_configured_opportunities,
     persist_opportunities,
 )
+from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.models.opportunity import OpportunityCandidate
 from services.collector.sources import SourceConfig
 
@@ -145,3 +149,55 @@ def test_batch_error_rolls_back_every_write(connection, monkeypatch) -> None:
     assert isinstance(raised.value.__cause__, RuntimeError)
     for table in ("sources", "opportunities", "opportunity_sources"):
         assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def turso_settings() -> Settings:
+    return Settings(
+        environment=ApplicationEnvironment.TEST,
+        database_backend=DatabaseBackend.TURSO,
+        turso_database_url="libsql://fixture.invalid",
+        turso_auth_token="TEST_ONLY_SECRET",
+    )
+
+
+def test_configured_sqlite_persists_to_requested_file(tmp_path) -> None:
+    path = tmp_path / "nested" / "operational.db"
+    connection = connect_database(path)
+    try:
+        apply_migrations(connection)
+    finally:
+        connection.close()
+    settings = Settings(
+        environment=ApplicationEnvironment.TEST,
+        database_backend=DatabaseBackend.SQLITE,
+        sqlite_database_path=path,
+    )
+
+    summary = persist_configured_opportunities(settings, source(), [candidate()])
+
+    assert (summary.created, summary.updated) == (1, 0)
+    connection = sqlite3.connect(path)
+    try:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0] == 1
+        )
+    finally:
+        connection.close()
+
+
+def test_turso_opportunity_write_is_refused_before_connecting(monkeypatch) -> None:
+    connected = False
+
+    def unexpected_connection(settings):
+        nonlocal connected
+        connected = True
+
+    monkeypatch.setattr(
+        opportunities, "connect_configured_database", unexpected_connection
+    )
+    with pytest.raises(
+        OpportunityPersistenceError, match="disabled in Phase 1"
+    ) as raised:
+        persist_configured_opportunities(turso_settings(), source(), [candidate()])
+    assert connected is False
+    assert "TEST_ONLY_SECRET" not in str(raised.value)

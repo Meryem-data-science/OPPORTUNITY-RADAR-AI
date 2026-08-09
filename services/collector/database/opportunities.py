@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Iterable
 
+from services.collector.config import DatabaseBackend, Settings
 from services.collector.database.connection import DatabaseConnection
+from services.collector.database.connection import connect_configured_database
 from services.collector.models.opportunity import OpportunityCandidate
 from services.collector.sources import SourceConfig
 
@@ -32,7 +34,12 @@ def _utc_now() -> str:
 
 
 def _upsert_source(connection: DatabaseConnection, source: SourceConfig) -> None:
-    connection.execute(
+    statement, parameters = _source_upsert_statement(source)
+    connection.execute(statement, parameters)
+
+
+def _source_upsert_statement(source: SourceConfig) -> tuple[str, tuple[object, ...]]:
+    return (
         """
         INSERT INTO sources (
             id, type, enabled, category, country, frequency_minutes, status
@@ -185,7 +192,6 @@ def persist_opportunities(
     batch = list(candidates)
     if any(candidate.source_id != source.id for candidate in batch):
         raise OpportunityPersistenceError("candidate source_id does not match source")
-
     created = 0
     updated = 0
     connection.execute("BEGIN")
@@ -216,3 +222,23 @@ def persist_opportunities(
             "opportunity batch persistence failed"
         ) from error
     return PersistenceSummary(created=created, updated=updated)
+
+
+def persist_configured_opportunities(
+    settings: Settings,
+    source: SourceConfig,
+    candidates: Iterable[OpportunityCandidate],
+) -> PersistenceSummary:
+    """Persist to operational Phase 1 SQLite; reject remote opportunity writes."""
+    batch = list(candidates)
+    if any(candidate.source_id != source.id for candidate in batch):
+        raise OpportunityPersistenceError("candidate source_id does not match source")
+    if settings.database_backend is DatabaseBackend.TURSO:
+        raise OpportunityPersistenceError(
+            "Remote Turso opportunity writes are disabled in Phase 1"
+        )
+    connection = connect_configured_database(settings)
+    try:
+        return persist_opportunities(connection, source, batch)
+    finally:
+        connection.close()

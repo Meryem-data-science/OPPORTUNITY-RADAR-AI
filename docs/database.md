@@ -1,8 +1,8 @@
 # Database
 
-The production storage target is **Turso / libSQL**. Phase 0.2A uses Python's
-standard-library `sqlite3` module only for local development and real schema
-validation; SQLite is not presented as the final production connection.
+Phase 1 operational storage is a persistent local **SQLite** database. The
+earlier Turso/libSQL Foundation read-only experiment remains available, but
+remote opportunity writes are disabled and do not block product development.
 
 Runtime settings select the `sqlite` or `turso` connection backend.
 
@@ -14,10 +14,10 @@ connection.
 
 ## Turso
 
-The Python Turso path uses the official `libsql` client and receives its database URL
-and authentication token only from validated `Settings`. The connection layer
-is prepared. Remote connectivity and `SELECT 1` have been validated manually;
-the shared Foundation schema has also been applied and verified manually.
+Read-only Python health and schema operations may still use SQL over HTTP.
+Remote Turso opportunity writes are disabled in Phase 1 after failed live
+transport validations. Operational Phase 1 opportunity storage is the
+configured persistent local SQLite database.
 
 The Next.js server uses `@libsql/client` with `TURSO_DATABASE_URL` and
 `TURSO_AUTH_TOKEN`. Its health service performs only `SELECT` statements and
