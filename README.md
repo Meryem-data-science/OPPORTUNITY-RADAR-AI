@@ -63,7 +63,13 @@ python -m services.collector.cli.collect_source \
   --source scale_ai_greenhouse --limit 3 --dry-run
 ```
 
-Persist at most one collected opportunity to the configured database:
+Apply the existing migrations before the first write to a configured database:
+
+```bash
+python -m services.collector.cli.migrate_configured --apply
+```
+
+Then persist at most one collected opportunity:
 
 ```bash
 python -m services.collector.cli.persist_source \

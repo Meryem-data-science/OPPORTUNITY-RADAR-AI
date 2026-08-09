@@ -26,7 +26,7 @@ def test_sqlite_persistence_is_same_source_idempotent(tmp_path) -> None:
         canonical_title="TEST ONLY SQLite Opportunity",
         organization=source.organization,
         location=None,
-        description=None,
+        description="é" * 12_001,
         published_at=None,
         source_url="https://example.invalid/jobs/TEST-REAL-SQLITE-1",
         application_url="https://example.invalid/jobs/TEST-REAL-SQLITE-1",
@@ -54,6 +54,9 @@ def test_sqlite_persistence_is_same_source_idempotent(tmp_path) -> None:
         stored_url = connection.execute(
             "SELECT source_url FROM opportunity_sources"
         ).fetchone()[0]
+        stored_description = connection.execute(
+            "SELECT description FROM opportunities"
+        ).fetchone()[0]
     finally:
         connection.close()
 
@@ -61,5 +64,7 @@ def test_sqlite_persistence_is_same_source_idempotent(tmp_path) -> None:
     assert (second.created, second.updated) == (0, 1)
     assert counts == {"sources": 1, "opportunities": 1, "opportunity_sources": 1}
     assert stored_url == candidate.source_url
+    assert stored_description == candidate.description
+    assert len(stored_description) == 12_001
     assert new_first_seen == first_seen
     assert new_last_seen >= old_last_seen

@@ -1,7 +1,6 @@
 """Tests for backend-specific connection selection."""
 
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +13,7 @@ from services.collector.database import turso
 from services.collector.database.connection import connect_configured_database
 from services.collector.database.turso import (
     DatabaseConnectionError,
-    DatabaseDependencyError,
+    TursoHttpConnection,
 )
 
 
@@ -57,20 +56,13 @@ def test_sqlite_connection_creates_missing_parent_directory(tmp_path) -> None:
         connection.close()
 
 
-def test_factory_selects_turso_and_passes_validated_credentials(
-    monkeypatch,
-) -> None:
-    calls: list[dict[str, str]] = []
-    expected_connection = object()
-
-    fake_libsql = SimpleNamespace(
-        connect=lambda **kwargs: calls.append(kwargs) or expected_connection
-    )
-
+def test_factory_selects_turso_http_adapter(monkeypatch) -> None:
+    expected_client = object()
+    calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        turso,
-        "import_module",
-        lambda name: fake_libsql,
+        turso.httpx,
+        "Client",
+        lambda **kwargs: calls.append(kwargs) or expected_client,
     )
 
     settings = Settings(
@@ -82,26 +74,14 @@ def test_factory_selects_turso_and_passes_validated_credentials(
 
     connection = connect_configured_database(settings)
 
-    assert connection is expected_connection
-    assert calls == [
-        {
-            "database": "libsql://fixture.invalid",
-            "auth_token": "TEST_ONLY_SECRET",
-        }
-    ]
+    assert isinstance(connection, TursoHttpConnection)
+    assert connection._endpoint == "https://fixture.invalid/v2/pipeline"
+    assert calls[0]["headers"] == {"Authorization": "Bearer TEST_ONLY_SECRET"}
+    assert isinstance(calls[0]["timeout"], turso.httpx.Timeout)
 
 
-def test_turso_connection_error_does_not_expose_secret(monkeypatch) -> None:
+def test_turso_connection_error_does_not_expose_secret() -> None:
     secret = "TEST_ONLY_SECRET"
-
-    def fail_connection(**kwargs) -> None:
-        raise RuntimeError(f"Driver failed with {kwargs['auth_token']}")
-
-    monkeypatch.setattr(
-        turso,
-        "import_module",
-        lambda name: SimpleNamespace(connect=fail_connection),
-    )
 
     settings = Settings(
         environment=ApplicationEnvironment.TEST,
@@ -110,25 +90,13 @@ def test_turso_connection_error_does_not_expose_secret(monkeypatch) -> None:
         turso_auth_token=secret,
     )
 
-    with pytest.raises(DatabaseConnectionError) as error:
-        connect_configured_database(settings)
+    connection = connect_configured_database(settings)
 
-    assert secret not in str(error.value)
+    assert secret not in repr(connection)
+    connection.close()
 
 
-def test_missing_libsql_only_blocks_turso(monkeypatch, tmp_path) -> None:
-    def missing_libsql(name: str) -> None:
-        raise ModuleNotFoundError(
-            "No module named 'libsql'",
-            name="libsql",
-        )
-
-    monkeypatch.setattr(
-        turso,
-        "import_module",
-        missing_libsql,
-    )
-
+def test_invalid_turso_url_does_not_affect_sqlite(tmp_path) -> None:
     sqlite_settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.SQLITE,
@@ -138,12 +106,12 @@ def test_missing_libsql_only_blocks_turso(monkeypatch, tmp_path) -> None:
     turso_settings = Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.TURSO,
-        turso_database_url="libsql://fixture.invalid",
+        turso_database_url="https://fixture.invalid",
         turso_auth_token="TEST_ONLY_SECRET",
     )
 
     sqlite_connection = connect_configured_database(sqlite_settings)
     sqlite_connection.close()
 
-    with pytest.raises(DatabaseDependencyError, match="libsql"):
+    with pytest.raises(DatabaseConnectionError, match="libsql"):
         connect_configured_database(turso_settings)
