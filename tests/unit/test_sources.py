@@ -55,3 +55,21 @@ def test_disabled_source_is_rejected(tmp_path: Path) -> None:
 def test_invalid_source_configuration_is_explicit(tmp_path: Path, source: str) -> None:
     with pytest.raises(SourceConfigurationError):
         load_source_registry(write_registry(tmp_path, source))
+
+def test_duplicate_source_ids_are_rejected(tmp_path: Path) -> None:
+    path = write_registry(
+        tmp_path,
+        "  - id: duplicate\n"
+        "    type: greenhouse\n"
+        "    enabled: true\n"
+        "    organization: First\n"
+        "    board_token: first\n"
+        "  - id: duplicate\n"
+        "    type: greenhouse\n"
+        "    enabled: true\n"
+        "    organization: Second\n"
+        "    board_token: second\n",
+    )
+
+    with pytest.raises(SourceConfigurationError, match="duplicate source id"):
+        load_source_registry(path)

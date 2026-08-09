@@ -83,7 +83,18 @@ def load_source_registry(path: Path = DEFAULT_SOURCE_REGISTRY) -> list[SourceCon
         ) from error
     if not isinstance(document, dict) or not isinstance(document.get("sources"), list):
         raise SourceConfigurationError("source registry must contain a sources list")
-    return [SourceConfig.from_mapping(item) for item in document["sources"]]
+
+    sources: list[SourceConfig] = []
+    source_ids: set[str] = set()
+
+    for item in document["sources"]:
+        source = SourceConfig.from_mapping(item)
+        if source.id in source_ids:
+            raise SourceConfigurationError(f"duplicate source id: {source.id}")
+        source_ids.add(source.id)
+        sources.append(source)
+
+    return sources
 
 
 def get_enabled_source(
