@@ -5,6 +5,30 @@ development server runs with `npm run dev` from `apps/web` after dependencies
 are installed. No deployment, scheduled collection, or external integration is
 currently operational.
 
+## Local read-only opportunity API
+
+Start the Phase 1 FastAPI service against the existing configured SQLite
+database (the API does not apply migrations or collect/write data):
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m uvicorn services.api.main:app \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+Read up to five most recently observed visible, active opportunities:
+
+```bash
+curl "http://127.0.0.1:8000/api/opportunities?limit=5"
+```
+
+The response contains summary fields and a total count, but never the full
+description. `original_url` selects the stored application URL first, then the
+stored source URL, then the stored canonical URL. This is a local Phase 1
+service and is not documented as a production deployment.
+
 ## Scale AI source dry-run
 
 After installing Python dependencies, run the first source collector explicitly
