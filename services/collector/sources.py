@@ -6,7 +6,6 @@ from typing import Any
 
 import yaml
 
-
 DEFAULT_SOURCE_REGISTRY = Path("config/sources.yaml")
 
 
@@ -31,6 +30,10 @@ class SourceConfig:
     enabled: bool
     organization: str
     board_token: str
+    category: str | None = None
+    country: str | None = None
+    frequency_minutes: int | None = None
+    status: str = "active"
 
     @classmethod
     def from_mapping(cls, value: Any) -> "SourceConfig":
@@ -42,6 +45,10 @@ class SourceConfig:
         enabled = value.get("enabled")
         organization = value.get("organization")
         board_token = value.get("board_token")
+        category = value.get("category")
+        country = value.get("country")
+        frequency_minutes = value.get("frequency_minutes")
+        status = value.get("status", "active")
         if not isinstance(source_id, str) or not source_id.strip():
             raise SourceConfigurationError("source id must be a non-empty string")
         if source_type != "greenhouse":
@@ -60,12 +67,35 @@ class SourceConfig:
             raise SourceConfigurationError(
                 f"source {source_id!r} organization must be a non-empty string"
             )
+        for field_name, field_value in (("category", category), ("country", country)):
+            if field_value is not None and (
+                not isinstance(field_value, str) or not field_value.strip()
+            ):
+                raise SourceConfigurationError(
+                    f"source {source_id!r} {field_name} must be null or a non-empty string"
+                )
+        if frequency_minutes is not None and (
+            isinstance(frequency_minutes, bool)
+            or not isinstance(frequency_minutes, int)
+            or frequency_minutes <= 0
+        ):
+            raise SourceConfigurationError(
+                f"source {source_id!r} frequency_minutes must be null or a positive integer"
+            )
+        if not isinstance(status, str) or not status.strip():
+            raise SourceConfigurationError(
+                f"source {source_id!r} status must be a non-empty string"
+            )
         return cls(
             id=source_id.strip(),
             type=source_type,
             enabled=enabled,
             organization=organization.strip(),
             board_token=board_token.strip(),
+            category=category.strip() if category is not None else None,
+            country=country.strip() if country is not None else None,
+            frequency_minutes=frequency_minutes,
+            status=status.strip(),
         )
 
 

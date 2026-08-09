@@ -18,7 +18,29 @@ python -m services.collector.cli.collect_source \
 It queries the unauthenticated public Greenhouse board using the `scaleai`
 token from `config/sources.yaml`, logs counts, and prints candidate summaries
 without descriptions or credentials. `--limit` controls only returned/displayed
-items. No Phase 1.1 command writes to SQLite or Turso.
+items. This dry-run command never writes to SQLite or Turso.
+
+## Bounded source persistence
+
+The separate write command requires explicit permission and a strictly positive
+write limit:
+
+```bash
+python -m services.collector.cli.persist_source \
+  --source scale_ai_greenhouse --limit 1 --apply
+```
+
+`--limit 1` means at most one collected candidate is written. When
+`DATABASE_BACKEND=turso`, the command refuses to connect unless
+`RUN_TURSO_LIVE_PERSIST=1` is also set. A batch transaction includes the source
+upsert, opportunity writes, and source-occurrence writes and rolls back on any
+error. Logs contain counts and the backend name, not descriptions, database
+URLs, tokens, or complete upstream responses.
+
+The optional live write test additionally requires
+`RUN_TURSO_LIVE_PERSIST_TEST=1`, real Turso settings, and both Turso selections.
+It intentionally retains the real business record and is idempotent by
+`(source_id, source_url)`.
 
 The real-network smoke test is opt-in and skipped otherwise:
 
