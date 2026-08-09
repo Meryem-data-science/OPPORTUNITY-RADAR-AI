@@ -80,6 +80,21 @@ python -m services.collector.cli.persist_source \
 python -m services.collector.cli.list_opportunities --limit 5
 ```
 
+The normal automatic orchestration command processes every enabled, active
+configured source in one run:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+python -m services.collector.cli.run_radar --once --apply
+python -m services.collector.cli.list_opportunities --limit 5
+```
+
+`run_radar` is the operational orchestration entry point. `persist_source`
+remains available as a bounded manual/debug tool. Neither command applies
+migrations implicitly.
+
 The listing is read-only and shows persisted offers without printing their full
 descriptions. Current idempotence uses `(source_id, source_url)` for repeat
 observations from the same source; it is not multi-source deduplication. Remote
