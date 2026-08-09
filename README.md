@@ -13,10 +13,11 @@ This repository currently contains only:
 - SQLite/Turso connection selection with a read-only database healthcheck;
 - shared transactional migrations and read-only schema verification;
 - a minimal Next.js application with a real, read-only Turso health page;
-- empty configuration contracts and initial documentation;
+- a first read-only Scale AI Greenhouse collector and dry-run CLI;
+- configuration contracts and initial documentation;
 - foundation tests and continuous-integration checks.
 
-Collection, matching, deduplication, Gmail integration, application tracking,
+Database persistence of collected opportunities, matching, deduplication, Gmail integration, application tracking,
 recommendations, NLP, and machine learning are **Planned**. They are not
 implemented in this phase.
 
@@ -52,6 +53,13 @@ Run the service shell from the repository root:
 
 ```bash
 python -m services.collector.main
+```
+
+Dry-run the public Scale AI Greenhouse source without database persistence:
+
+```bash
+python -m services.collector.cli.collect_source \
+  --source scale_ai_greenhouse --limit 3 --dry-run
 ```
 
 Apply the SQL migrations to an explicit local SQLite database used for

@@ -8,7 +8,11 @@ version = "0.1.0"
 description = "Foundation for the Opportunity Radar AI data service"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = ["libsql>=0.1.11,<0.2"]
+dependencies = [
+    "httpx>=0.27,<1",
+    "libsql>=0.1.11,<0.2",
+    "PyYAML>=6.0,<7",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<10"]
