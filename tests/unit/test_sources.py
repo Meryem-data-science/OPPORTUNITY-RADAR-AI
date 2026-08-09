@@ -25,6 +25,32 @@ def test_load_valid_source_registry() -> None:
     assert sources[0].id == "scale_ai_greenhouse"
     assert sources[0].board_token == "scaleai"
     assert sources[0].organization == "Scale AI"
+    assert sources[0].category == "jobs"
+    assert sources[0].country is None
+    assert sources[0].frequency_minutes == 120
+    assert sources[0].status == "active"
+
+
+@pytest.mark.parametrize("frequency", [0, -1, True])
+def test_invalid_frequency_is_rejected(tmp_path: Path, frequency: object) -> None:
+    path = write_registry(
+        tmp_path,
+        "  - id: test\n    type: greenhouse\n    enabled: true\n"
+        "    organization: Test\n    board_token: test\n"
+        f"    frequency_minutes: {str(frequency).lower()}\n",
+    )
+    with pytest.raises(SourceConfigurationError, match="frequency_minutes"):
+        load_source_registry(path)
+
+
+def test_empty_status_is_rejected(tmp_path: Path) -> None:
+    path = write_registry(
+        tmp_path,
+        "  - id: test\n    type: greenhouse\n    enabled: true\n"
+        "    organization: Test\n    board_token: test\n    status: ''\n",
+    )
+    with pytest.raises(SourceConfigurationError, match="status"):
+        load_source_registry(path)
 
 
 def test_unknown_source_is_explicit() -> None:
@@ -55,6 +81,7 @@ def test_disabled_source_is_rejected(tmp_path: Path) -> None:
 def test_invalid_source_configuration_is_explicit(tmp_path: Path, source: str) -> None:
     with pytest.raises(SourceConfigurationError):
         load_source_registry(write_registry(tmp_path, source))
+
 
 def test_duplicate_source_ids_are_rejected(tmp_path: Path) -> None:
     path = write_registry(

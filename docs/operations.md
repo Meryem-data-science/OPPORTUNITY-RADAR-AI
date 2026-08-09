@@ -18,7 +18,35 @@ python -m services.collector.cli.collect_source \
 It queries the unauthenticated public Greenhouse board using the `scaleai`
 token from `config/sources.yaml`, logs counts, and prints candidate summaries
 without descriptions or credentials. `--limit` controls only returned/displayed
-items. No Phase 1.1 command writes to SQLite or Turso.
+items. This dry-run command never writes to SQLite or Turso.
+
+## Bounded source persistence
+
+Phase 1 uses a persistent, configurable local SQLite database. Prepare it once,
+then persist and list real collected offers:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+python -m services.collector.cli.persist_source \
+  --source scale_ai_greenhouse --limit 1 --apply
+python -m services.collector.cli.list_opportunities --limit 5
+```
+
+`--limit 1` means at most one collected candidate is written. The SQLite batch
+transaction includes the source upsert, opportunity writes,
+and source-occurrence writes and rolls back on any error. The listing command
+is read-only, accepts limits from 1 to 100, and omits full descriptions. Remote
+Turso opportunity writes are explicitly disabled in Phase 1 after failed live
+transport validations; Turso read-only health checks remain available.
+
+The real Greenhouse-to-SQLite persistence test is opt-in:
+
+```bash
+RUN_LIVE_SQLITE_OPPORTUNITY_TEST=1 \
+  pytest -q tests/live/test_sqlite_greenhouse_opportunity_persistence.py -s
+```
 
 The real-network smoke test is opt-in and skipped otherwise:
 

@@ -14,10 +14,11 @@ This repository currently contains only:
 - shared transactional migrations and read-only schema verification;
 - a minimal Next.js application with a real, read-only Turso health page;
 - a first read-only Scale AI Greenhouse collector and dry-run CLI;
+- transactional persistence of bounded collector batches to operational SQLite;
 - configuration contracts and initial documentation;
 - foundation tests and continuous-integration checks.
 
-Database persistence of collected opportunities, matching, deduplication, Gmail integration, application tracking,
+Multi-source deduplication, matching, Gmail integration, application tracking,
 recommendations, NLP, and machine learning are **Planned**. They are not
 implemented in this phase.
 
@@ -62,6 +63,29 @@ python -m services.collector.cli.collect_source \
   --source scale_ai_greenhouse --limit 3 --dry-run
 ```
 
+Configure the persistent operational Phase 1 SQLite database and apply its
+existing migration before the first write:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+Then persist at most one collected opportunity:
+
+```bash
+python -m services.collector.cli.persist_source \
+  --source scale_ai_greenhouse --limit 1 --apply
+python -m services.collector.cli.list_opportunities --limit 5
+```
+
+The listing is read-only and shows persisted offers without printing their full
+descriptions. Current idempotence uses `(source_id, source_url)` for repeat
+observations from the same source; it is not multi-source deduplication. Remote
+Turso opportunity writes are disabled in Phase 1; its Foundation read-only
+health experiment remains available.
+
 Apply the SQL migrations to an explicit local SQLite database used for
 development or validation:
 
@@ -69,8 +93,9 @@ development or validation:
 python -m services.collector.cli.migrate --database /tmp/opportunity-radar.db
 ```
 
-Turso / libSQL is the production storage target. Remote connectivity and the
-Foundation migration have been validated manually outside Codex.
+Turso / libSQL read-only connectivity and the Foundation migration were
+validated manually outside Codex. Remote opportunity writes are disabled for
+Phase 1; the operational opportunity database is configured SQLite.
 
 Check the configured database connection with a read-only `SELECT 1`:
 

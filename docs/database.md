@@ -1,8 +1,8 @@
 # Database
 
-The production storage target is **Turso / libSQL**. Phase 0.2A uses Python's
-standard-library `sqlite3` module only for local development and real schema
-validation; SQLite is not presented as the final production connection.
+Phase 1 operational storage is a persistent local **SQLite** database. The
+earlier Turso/libSQL Foundation read-only experiment remains available, but
+remote opportunity writes are disabled and do not block product development.
 
 Runtime settings select the `sqlite` or `turso` connection backend.
 
@@ -14,10 +14,10 @@ connection.
 
 ## Turso
 
-The Python Turso path uses the official `libsql` client and receives its database URL
-and authentication token only from validated `Settings`. The connection layer
-is prepared. Remote connectivity and `SELECT 1` have been validated manually;
-the shared Foundation schema has also been applied and verified manually.
+Read-only Python health and schema operations may still use SQL over HTTP.
+Remote Turso opportunity writes are disabled in Phase 1 after failed live
+transport validations. Operational Phase 1 opportunity storage is the
+configured persistent local SQLite database.
 
 The Next.js server uses `@libsql/client` with `TURSO_DATABASE_URL` and
 `TURSO_AUTH_TOKEN`. Its health service performs only `SELECT` statements and
@@ -81,8 +81,23 @@ python -m services.collector.cli.db_schema
 The foundation migration creates schema only and inserts no sources or
 opportunities.
 
+## Opportunity persistence
+
+The collector persistence layer uses the shared connection protocol and one
+transaction per batch. It upserts configured source metadata, then creates or
+refreshes opportunities and their source occurrences. New currently visible
+offers use status `visible`, `is_active = 1`, and one UTC observation timestamp
+for `discovered_at`, `first_seen_at`, and `last_seen_at`; unknown enrichment and
+score columns remain `NULL`. Existing occurrences preserve discovery and first
+seen timestamps and preserve optional values when a later response supplies
+`NULL`.
+
+Same-source idempotence currently looks up `(source_id, source_url)` in
+`opportunity_sources`. Migration `0001` has no unique constraint for that pair,
+so concurrent-write protection and multi-source deduplication remain future
+work.
+
 ## Not yet implemented
 
 - Live Web-to-Turso health validation (requires manual credentials outside Codex).
-- Real source and opportunity data.
-- Collectors, matching, or an application-facing database API.
+- Matching or an application-facing database API.
