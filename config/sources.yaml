@@ -18,3 +18,12 @@ sources:
     status: active
     organization: Artefact
     board_token: artefact
+  - id: linkedin_job_alert_email
+    type: gmail_linkedin_alert
+    enabled: true
+    category: jobs
+    country: null
+    frequency_minutes: 60
+    status: active
+    gmail_query: "newer_than:7d from:linkedin.com"
+    gmail_message_limit: 50

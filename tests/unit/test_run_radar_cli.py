@@ -42,3 +42,15 @@ def test_cli_handles_expected_agent_error(monkeypatch):
         raise ValueError("invalid configuration")
     monkeypatch.setattr(run_radar.RadarAgent, "run_once", fail)
     assert run_radar.main(["--once", "--apply"]) == 1
+
+
+def test_cli_passes_repeatable_source_filter(monkeypatch):
+    built = []
+    class Agent:
+        def __init__(self, **kwargs):
+            built.append(kwargs)
+        def run_once(self):
+            return summary()
+    monkeypatch.setattr(run_radar, "RadarAgent", Agent)
+    assert run_radar.main(["--once", "--apply", "--source", "one", "--source", "two"]) == 0
+    assert built == [{"source_ids": ["one", "two"]}]

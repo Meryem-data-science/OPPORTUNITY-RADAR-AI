@@ -16,8 +16,18 @@ Repeat observations use `(source_id, source_url)` as their current identity and
 refresh the existing opportunity without changing its first-seen timestamp.
 This is same-source idempotence only, not multi-source deduplication.
 
-Phase 2.2A adds a separate generic Gmail API intake foundation. It uses local
-user OAuth with the single `gmail.readonly` scope and can normalize matching
-messages into transient plain-text/HTML values for a safe CLI summary. Gmail is
-not yet an `OpportunityCandidate` source: no LinkedIn/Indeed parsing, database
-persistence, RadarAgent integration, or API exposure is part of this phase.
+LinkedIn Job Alerts are an operational pipeline source with id
+`linkedin_job_alert_email`. They are collected **via alert email**, never by
+scraping or opening a LinkedIn job page. The source uses official Gmail API
+`list`/`get` reads under the single `gmail.readonly` scope. Its non-secret
+catalogue settings are query `newer_than:7d from:linkedin.com` and message limit
+`50`; the subject is not required.
+
+The dedicated collector parses transient `GmailMessageCandidate` values, then
+deduplicates repeated numeric LinkedIn job IDs across all messages in the run.
+Only `OpportunityCandidate` values with canonical
+`https://www.linkedin.com/jobs/view/<JOB_ID>` URLs reach RadarAgent and the
+existing persistence layer. Email bodies, message/thread IDs, snippets, and
+tracking query strings are not persisted. The generic API and web UI therefore
+handle persisted LinkedIn opportunities like all other opportunities. There is
+no automatic application, LinkedIn page scraping, or scheduled execution.

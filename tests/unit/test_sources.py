@@ -21,7 +21,7 @@ def write_registry(tmp_path: Path, source: str) -> Path:
 
 def test_load_valid_source_registry() -> None:
     sources = load_source_registry(Path("config/sources.yaml"))
-    assert len(sources) == 2
+    assert len(sources) == 3
     assert len({source.id for source in sources}) == len(sources)
 
     by_id = {source.id: source for source in sources}
@@ -38,6 +38,32 @@ def test_load_valid_source_registry() -> None:
     assert artefact.country is None
     assert artefact.frequency_minutes == 120
     assert artefact.status == "active"
+
+    linkedin = by_id["linkedin_job_alert_email"]
+    assert linkedin.type == "gmail_linkedin_alert"
+    assert linkedin.organization is None
+    assert linkedin.board_token is None
+    assert linkedin.gmail_query == "newer_than:7d from:linkedin.com"
+    assert linkedin.gmail_message_limit == 50
+
+
+def test_gmail_linkedin_source_requires_query_and_bounded_non_boolean_limit(tmp_path):
+    valid = (
+        "  - id: linkedin_job_alert_email\n    type: gmail_linkedin_alert\n"
+        "    enabled: true\n    gmail_query: from:linkedin.com\n    gmail_message_limit: 50\n"
+    )
+    source = load_source_registry(write_registry(tmp_path, valid))[0]
+    assert source.organization is None and source.board_token is None
+
+    for invalid, expected in (
+        (valid.replace("    gmail_query: from:linkedin.com\n", ""), "gmail_query"),
+        (valid.replace("    gmail_message_limit: 50\n", ""), "gmail_message_limit"),
+        (valid.replace("50", "0"), "gmail_message_limit"),
+        (valid.replace("50", "101"), "gmail_message_limit"),
+        (valid.replace("50", "true"), "gmail_message_limit"),
+    ):
+        with pytest.raises(SourceConfigurationError, match=expected):
+            load_source_registry(write_registry(tmp_path, invalid))
 
 
 @pytest.mark.parametrize("frequency", [0, -1, True])

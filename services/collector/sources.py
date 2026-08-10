@@ -28,12 +28,14 @@ class SourceConfig:
     id: str
     type: str
     enabled: bool
-    organization: str
-    board_token: str
+    organization: str | None = None
+    board_token: str | None = None
     category: str | None = None
     country: str | None = None
     frequency_minutes: int | None = None
     status: str = "active"
+    gmail_query: str | None = None
+    gmail_message_limit: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Any) -> "SourceConfig":
@@ -49,9 +51,11 @@ class SourceConfig:
         country = value.get("country")
         frequency_minutes = value.get("frequency_minutes")
         status = value.get("status", "active")
+        gmail_query = value.get("gmail_query")
+        gmail_message_limit = value.get("gmail_message_limit")
         if not isinstance(source_id, str) or not source_id.strip():
             raise SourceConfigurationError("source id must be a non-empty string")
-        if source_type != "greenhouse":
+        if source_type not in {"greenhouse", "gmail_linkedin_alert"}:
             raise SourceConfigurationError(
                 f"source {source_id!r} has unsupported type {source_type!r}"
             )
@@ -59,14 +63,25 @@ class SourceConfig:
             raise SourceConfigurationError(
                 f"source {source_id!r} enabled must be a boolean"
             )
-        if not isinstance(board_token, str) or not board_token.strip():
-            raise SourceConfigurationError(
-                f"source {source_id!r} board_token must be a non-empty string"
-            )
-        if not isinstance(organization, str) or not organization.strip():
-            raise SourceConfigurationError(
-                f"source {source_id!r} organization must be a non-empty string"
-            )
+        if source_type == "greenhouse":
+            for field_name, field_value in (("organization", organization), ("board_token", board_token)):
+                if not isinstance(field_value, str) or not field_value.strip():
+                    raise SourceConfigurationError(
+                        f"source {source_id!r} {field_name} must be a non-empty string"
+                    )
+        else:
+            if not isinstance(gmail_query, str) or not gmail_query.strip():
+                raise SourceConfigurationError(
+                    f"source {source_id!r} gmail_query must be a non-empty string"
+                )
+            if (
+                isinstance(gmail_message_limit, bool)
+                or not isinstance(gmail_message_limit, int)
+                or not 1 <= gmail_message_limit <= 100
+            ):
+                raise SourceConfigurationError(
+                    f"source {source_id!r} gmail_message_limit must be an integer between 1 and 100"
+                )
         for field_name, field_value in (("category", category), ("country", country)):
             if field_value is not None and (
                 not isinstance(field_value, str) or not field_value.strip()
@@ -90,12 +105,14 @@ class SourceConfig:
             id=source_id.strip(),
             type=source_type,
             enabled=enabled,
-            organization=organization.strip(),
-            board_token=board_token.strip(),
+            organization=organization.strip() if isinstance(organization, str) else None,
+            board_token=board_token.strip() if isinstance(board_token, str) else None,
             category=category.strip() if category is not None else None,
             country=country.strip() if country is not None else None,
             frequency_minutes=frequency_minutes,
             status=status.strip(),
+            gmail_query=gmail_query.strip() if isinstance(gmail_query, str) else None,
+            gmail_message_limit=gmail_message_limit,
         )
 
 

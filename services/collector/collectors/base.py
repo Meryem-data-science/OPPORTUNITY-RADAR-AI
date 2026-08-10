@@ -1,9 +1,15 @@
 """Minimal contract shared by external opportunity collectors."""
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol
 
 from services.collector.models.opportunity import OpportunityCandidate
+
+
+class OpportunityCollector(Protocol):
+    """The minimal capability required by the radar orchestrator."""
+
+    def collect(self) -> list[OpportunityCandidate]: ...
 
 
 class BaseCollector(ABC):
