@@ -1,5 +1,3 @@
-import logging
-
 from services.collector.agent import RadarAgent
 from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCollector
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
@@ -39,7 +37,6 @@ def test_linkedin_email_to_radar_to_sqlite_is_idempotent(tmp_path):
         source,
         gmail_client_factory=lambda unused: FakeGmailClient(),
         configuration_loader=lambda: object(),
-        logger=logging.getLogger("test.linkedin.integration"),
     )
     agent = RadarAgent(
         source_loader=lambda: [source],

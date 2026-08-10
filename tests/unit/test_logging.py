@@ -7,7 +7,7 @@ import json
 import pytest
 
 from services.collector import main as collector_main
-from services.collector.logging_config import configure_logging, get_logger
+from services.collector.logging_config import JsonFormatter, configure_logging, get_logger
 
 
 def _emit(message: str, **extra: object) -> dict[str, object]:
@@ -81,6 +81,29 @@ def test_repeated_configuration_does_not_duplicate_handlers() -> None:
     logger.info("Once", extra={"event": "single_event"})
 
     assert len(stream.getvalue().splitlines()) == 1
+
+
+def test_configuration_replaces_handler_with_a_closed_stream() -> None:
+    first_stream = StringIO()
+    service_logger = configure_logging(first_stream)
+    first_stream.close()
+
+    second_stream = StringIO()
+    configured = configure_logging(second_stream)
+    get_logger("services.collector.test", second_stream).info(
+        "After closed stream", extra={"event": "stream_rebound"}
+    )
+
+    marked_handlers = [
+        handler
+        for handler in configured.handlers
+        if handler.name == "opportunity_radar_json"
+    ]
+    assert configured is service_logger
+    assert len(marked_handlers) == 1
+    assert marked_handlers[0].stream is second_stream
+    assert isinstance(marked_handlers[0].formatter, JsonFormatter)
+    assert json.loads(second_stream.getvalue())["event"] == "stream_rebound"
 
 
 def test_main_emits_service_initialized_json(capsys) -> None:
