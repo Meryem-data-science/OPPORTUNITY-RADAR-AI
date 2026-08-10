@@ -21,14 +21,23 @@ def write_registry(tmp_path: Path, source: str) -> Path:
 
 def test_load_valid_source_registry() -> None:
     sources = load_source_registry(Path("config/sources.yaml"))
-    assert len(sources) == 1
-    assert sources[0].id == "scale_ai_greenhouse"
-    assert sources[0].board_token == "scaleai"
-    assert sources[0].organization == "Scale AI"
-    assert sources[0].category == "jobs"
-    assert sources[0].country is None
-    assert sources[0].frequency_minutes == 120
-    assert sources[0].status == "active"
+    assert len(sources) == 2
+    assert len({source.id for source in sources}) == len(sources)
+
+    by_id = {source.id: source for source in sources}
+    scale_ai = by_id["scale_ai_greenhouse"]
+    assert scale_ai.board_token == "scaleai"
+    assert scale_ai.organization == "Scale AI"
+
+    artefact = by_id["artefact_greenhouse"]
+    assert artefact.type == "greenhouse"
+    assert artefact.enabled is True
+    assert artefact.board_token == "artefact"
+    assert artefact.organization == "Artefact"
+    assert artefact.category == "jobs"
+    assert artefact.country is None
+    assert artefact.frequency_minutes == 120
+    assert artefact.status == "active"
 
 
 @pytest.mark.parametrize("frequency", [0, -1, True])
