@@ -21,3 +21,19 @@ user OAuth with the single `gmail.readonly` scope and can normalize matching
 messages into transient plain-text/HTML values for a safe CLI summary. Gmail is
 not yet an `OpportunityCandidate` source: no LinkedIn/Indeed parsing, database
 persistence, RadarAgent integration, or API exposure is part of this phase.
+
+## ReKrute public discovery (Phase 2.3A)
+
+`rekrute_public` is a Morocco-first, public web source with no configured
+organization: the real employer is read from each offer page. Its dedicated
+collector uses identified, read-only HTTP GET requests only. It performs no
+login, candidate session, browser automation, application submission, or
+database persistence.
+
+Every run first fetches and parses ReKrute's `robots.txt` and fails closed when
+the policy is unavailable, unusable, or denies either the configured search
+path or any selected offer path. Discovery is limited to direct links on one
+parameterized search page whose path ends in a reliable numeric offer ID.
+External hosts, tracking query parameters, non-offer links, and duplicate links
+are discarded. At most 20 detail pages can be selected, with a default probe
+limit of three and a configurable pause between detail requests.

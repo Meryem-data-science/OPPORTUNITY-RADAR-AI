@@ -28,8 +28,8 @@ class SourceConfig:
     id: str
     type: str
     enabled: bool
-    organization: str
-    board_token: str
+    organization: str | None = None
+    board_token: str | None = None
     category: str | None = None
     country: str | None = None
     frequency_minutes: int | None = None
@@ -51,7 +51,7 @@ class SourceConfig:
         status = value.get("status", "active")
         if not isinstance(source_id, str) or not source_id.strip():
             raise SourceConfigurationError("source id must be a non-empty string")
-        if source_type != "greenhouse":
+        if source_type not in {"greenhouse", "rekrute"}:
             raise SourceConfigurationError(
                 f"source {source_id!r} has unsupported type {source_type!r}"
             )
@@ -59,11 +59,15 @@ class SourceConfig:
             raise SourceConfigurationError(
                 f"source {source_id!r} enabled must be a boolean"
             )
-        if not isinstance(board_token, str) or not board_token.strip():
+        if source_type == "greenhouse" and (
+            not isinstance(board_token, str) or not board_token.strip()
+        ):
             raise SourceConfigurationError(
                 f"source {source_id!r} board_token must be a non-empty string"
             )
-        if not isinstance(organization, str) or not organization.strip():
+        if source_type == "greenhouse" and (
+            not isinstance(organization, str) or not organization.strip()
+        ):
             raise SourceConfigurationError(
                 f"source {source_id!r} organization must be a non-empty string"
             )
@@ -90,8 +94,8 @@ class SourceConfig:
             id=source_id.strip(),
             type=source_type,
             enabled=enabled,
-            organization=organization.strip(),
-            board_token=board_token.strip(),
+            organization=organization.strip() if isinstance(organization, str) else None,
+            board_token=board_token.strip() if isinstance(board_token, str) else None,
             category=category.strip() if category is not None else None,
             country=country.strip() if country is not None else None,
             frequency_minutes=frequency_minutes,

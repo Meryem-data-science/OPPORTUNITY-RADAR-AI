@@ -83,6 +83,34 @@ token from `config/sources.yaml`, logs counts, and prints candidate summaries
 without descriptions or credentials. `--limit` controls only returned/displayed
 items. This dry-run command never writes to SQLite or Turso.
 
+## Bounded ReKrute public probe
+
+The Phase 2.3A probe reads one parameterized public results page and at most
+three public offer pages by default. It uses the identifiable
+`OpportunityRadarAI/0.1 (+educational-project; public-readonly)` user agent,
+checks `https://www.rekrute.com/robots.txt` before search or detail collection,
+and refuses to crawl when permission cannot be established. It has no login,
+credentials, browser automation, application action, or persistence path.
+
+```bash
+python -m services.collector.cli.rekrute_probe \
+  --query data-engineer --limit 3
+```
+
+Output contains a status/count line and safe candidate summaries only. Full
+descriptions and raw HTML are never printed. `--limit` is restricted to 1–20;
+the collector visits no result pagination and follows only conforming offer
+links discovered on that single search page. The live test is opt-in:
+
+```bash
+RUN_LIVE_REKRUTE_TEST=1 pytest -q tests/live/test_rekrute_public.py -s
+```
+
+It performs the same fail-closed robots preflight and reads at most two detail
+pages. This WSL validation remains outstanding in cloud runs. This slice
+returns transient `OpportunityCandidate` values only and does not write to
+SQLite, Turso, or any other store.
+
 ## Bounded source persistence
 
 Phase 1 uses a persistent, configurable local SQLite database. Prepare it once,

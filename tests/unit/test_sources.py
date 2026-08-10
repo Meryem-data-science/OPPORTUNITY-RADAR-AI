@@ -21,7 +21,7 @@ def write_registry(tmp_path: Path, source: str) -> Path:
 
 def test_load_valid_source_registry() -> None:
     sources = load_source_registry(Path("config/sources.yaml"))
-    assert len(sources) == 2
+    assert len(sources) == 3
     assert len({source.id for source in sources}) == len(sources)
 
     by_id = {source.id: source for source in sources}
@@ -38,6 +38,12 @@ def test_load_valid_source_registry() -> None:
     assert artefact.country is None
     assert artefact.frequency_minutes == 120
     assert artefact.status == "active"
+
+    rekrute = by_id["rekrute_public"]
+    assert rekrute.type == "rekrute"
+    assert rekrute.organization is None
+    assert rekrute.board_token is None
+    assert rekrute.country == "MA"
 
 
 @pytest.mark.parametrize("frequency", [0, -1, True])

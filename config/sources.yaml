@@ -18,3 +18,9 @@ sources:
     status: active
     organization: Artefact
     board_token: artefact
+  - id: rekrute_public
+    type: rekrute
+    enabled: true
+    category: jobs
+    country: MA
+    status: active

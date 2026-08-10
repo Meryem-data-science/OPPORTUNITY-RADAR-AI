@@ -35,11 +35,16 @@ def test_factory_builds_greenhouse_for_every_configured_source_and_rejects_unsup
     assert {item.id for item in configured_sources} == {
         "scale_ai_greenhouse",
         "artefact_greenhouse",
+        "rekrute_public",
     }
+    greenhouse_sources = [item for item in configured_sources if item.type == "greenhouse"]
     assert all(
         isinstance(collector_for(item), GreenhouseCollector)
-        for item in configured_sources
+        for item in greenhouse_sources
     )
+    # ReKrute remains a dedicated dry-run and is intentionally not RadarAgent-integrated.
+    with pytest.raises(UnsupportedCollectorTypeError, match="unsupported collector type"):
+        collector_for(next(item for item in configured_sources if item.type == "rekrute"))
     with pytest.raises(UnsupportedCollectorTypeError, match="unsupported collector type"):
         collector_for(source(source_type="lever"))
 
