@@ -5,6 +5,45 @@ development server runs with `npm run dev` from `apps/web` after dependencies
 are installed. No deployment, scheduled collection, or external integration is
 currently operational.
 
+## Local Gmail read-only probe
+
+Create a Google Cloud project, enable the Gmail API, and create an OAuth 2.0
+**Desktop app** client. Download its JSON file to a local ignored directory;
+do not commit it. Configure the OAuth client, generated token, and generic
+Gmail search query through the environment:
+
+```bash
+export GMAIL_OAUTH_CLIENT_SECRET_PATH=.secrets/gmail-oauth-client.json
+export GMAIL_TOKEN_PATH=.secrets/gmail-token.json
+export GMAIL_ALERT_QUERY='label:Opportunity-Radar'
+python -m services.collector.cli.gmail_probe --limit 5
+# Or override the query for one invocation:
+python -m services.collector.cli.gmail_probe \
+  --query 'label:Opportunity-Radar' --limit 5
+```
+
+The first invocation opens the local user-authorization flow. It requests only
+`https://www.googleapis.com/auth/gmail.readonly` and writes the resulting token
+to `GMAIL_TOKEN_PATH`; subsequent invocations reuse it and refresh it when a
+refresh token is available. The probe performs Gmail `list` and `get` calls
+only. It neither creates labels nor modifies message/read state.
+
+Output is one JSON summary per matching message: `message_id`, `sender`,
+`subject`, UTC `received_at`, a snippet truncated to 200 characters, and the
+plain-text and HTML body lengths. Full bodies, OAuth credentials, and tokens
+are never printed. The limit must be between 1 and 100. `.secrets/`, common
+credential JSON names, and Gmail token names are ignored by Git; keep both
+OAuth files there or at another ignored location. No API endpoint exposes this
+Gmail intake, and it does not persist messages or create opportunities.
+
+The real-account smoke test is deliberately opt-in and needs matching local
+mail. It fails clearly rather than fabricating a message when the query is
+empty or has no results:
+
+```bash
+RUN_LIVE_GMAIL_TEST=1 pytest -q tests/live/test_gmail_readonly.py
+```
+
 ## Local read-only opportunity API
 
 Start the Phase 1 FastAPI service against the existing configured SQLite
@@ -107,6 +146,9 @@ while loading settings. Supported variables are:
 - `TURSO_DATABASE_URL`: required when the Turso backend is selected.
 - `TURSO_AUTH_TOKEN`: secret required when the Turso backend is selected and
   excluded from the settings representation.
+- `GMAIL_OAUTH_CLIENT_SECRET_PATH`: local ignored Desktop OAuth client JSON.
+- `GMAIL_TOKEN_PATH`: local ignored user OAuth token JSON.
+- `GMAIL_ALERT_QUERY`: optional default query for `gmail_probe`.
 
 `.env.example` documents names and local defaults but contains no credential.
 Secrets must be supplied through the process environment. Turso connectivity

@@ -31,6 +31,7 @@ npm-debug.log*
 *credentials*.json
 *oauth*.json
 *gmail*token*
+.secrets/
 *.pem
 *.key
 
