@@ -17,10 +17,19 @@ _JOB_PATH = re.compile(r"^/(?:comm/)?jobs/view/(\d+)(?:/)?$")
 _TEXT_URL = re.compile(r"https?://[^\s<>\]\[()]+")
 _BLOCK_TAGS = frozenset({"article", "div", "li", "table", "td", "tr"})
 _LINE_TAGS = frozenset({"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4"})
+_NON_LOCATION = re.compile(
+    r"(?:\brelations?\b|\bconnections?\b|^recrutement actif$|^actively recruiting$)",
+    re.IGNORECASE,
+)
 
 
 def _clean(value: str) -> str:
     return " ".join(unescape(value).split())
+
+
+def _is_plausible_location(value: str | None) -> bool:
+    """Reject compact LinkedIn UI labels that are not geographic metadata."""
+    return bool(value and not _NON_LOCATION.search(_clean(value)))
 
 
 def _job_identity(url: str) -> tuple[str, str] | None:
@@ -140,7 +149,19 @@ def _metadata(block: _Node, title: str) -> tuple[str, str | None] | None:
     if not following:
         return None
     organization = following[0]
-    location = following[1] if len(following) > 1 else None
+    location: str | None = None
+    # Real alerts can render the company and geography in one metadata line.
+    # Split only this structurally associated line, and only one separator.
+    if organization.count("·") == 1:
+        possible_organization, possible_location = map(
+            _clean, organization.split("·", maxsplit=1)
+        )
+        if possible_organization and possible_location:
+            organization = possible_organization
+            if _is_plausible_location(possible_location):
+                location = possible_location
+    elif len(following) > 1 and _is_plausible_location(following[1]):
+        location = following[1]
     return organization, location
 
 
@@ -149,15 +170,16 @@ def _from_html(body: str) -> list[tuple[str, str, str, str, str | None]]:
     parser.feed(body)
     found: list[tuple[str, str, str, str, str | None]] = []
     for anchor in parser.anchors:
-        source_url = unescape(anchor.attrs.get("href", "")).strip()
-        identity = _job_identity(source_url)
+        email_url = unescape(anchor.attrs.get("href", "")).strip()
+        identity = _job_identity(email_url)
         title = _text(anchor)
         if not identity or not title:
             continue
         block = _single_job_block(anchor)
         metadata = _metadata(block, title) if block else None
         if metadata:
-            found.append((identity[0], identity[1], source_url, title, *metadata))
+            # Never propagate email tracking parameters or tokens.
+            found.append((identity[0], identity[1], identity[1], title, *metadata))
     return found
 
 
@@ -173,7 +195,7 @@ def _from_text(body: str) -> list[tuple[str, str, str, str, str | None]]:
         title, organization = lines[index - 2 : index]
         if _TEXT_URL.search(title) or _TEXT_URL.search(organization):
             continue
-        found.append((identity[0], identity[1], line, title, organization, None))
+        found.append((identity[0], identity[1], identity[1], title, organization, None))
     return found
 
 

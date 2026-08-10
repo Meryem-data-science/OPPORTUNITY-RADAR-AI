@@ -29,5 +29,12 @@ def test_real_linkedin_job_alert(capsys):
         assert candidate.canonical_title
         assert candidate.organization
         assert "/jobs/view/" in candidate.source_url
+        assert "?" not in candidate.source_url
+        if candidate.location is not None:
+            assert candidate.location.casefold() not in {
+                "recrutement actif", "actively recruiting"
+            }
+            assert " relation" not in candidate.location.casefold()
+            assert " connection" not in candidate.location.casefold()
         assert candidate.canonical_url == f"https://www.linkedin.com/jobs/view/{candidate.source_external_id}"
     assert capsys.readouterr().out == ""

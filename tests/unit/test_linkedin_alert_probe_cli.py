@@ -10,7 +10,7 @@ from services.collector.models.gmail_message import GmailMessageCandidate
 
 def candidate():
     private_text = "PRIVATE BODY MUST NOT APPEAR"
-    html = '<div><a href="https://www.linkedin.com/jobs/view/123?trk=x">Role</a><div>Company</div></div>'
+    html = '''<div><a href="https://www.linkedin.com/comm/jobs/view/123?savedSearchAuthToken=fake-auth&amp;otpToken=fake-otp&amp;midToken=fake-mid&amp;midSig=fake-sig">Role</a><div>Company</div></div>'''
     return GmailMessageCandidate("message-secret", None, "LinkedIn <jobs@linkedin.com>", "Subject", None, None, private_text, html)
 
 
@@ -26,6 +26,8 @@ def test_cli_reuses_gmail_and_prints_only_opportunity_summary(capsys):
     assert "PRIVATE BODY MUST NOT APPEAR" not in output
     assert "message-secret" not in output
     assert "body_text" not in output and "body_html" not in output
+    for forbidden in ("?", "savedSearchAuthToken", "otpToken", "midToken", "midSig", "fake-auth", "fake-otp", "fake-mid", "fake-sig"):
+        assert forbidden not in output
     assert json.loads(output)["source_external_id"] == "123"
     assert summaries[0]["description_length"] == 0
 

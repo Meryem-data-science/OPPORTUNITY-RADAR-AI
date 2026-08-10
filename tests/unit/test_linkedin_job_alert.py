@@ -21,7 +21,7 @@ def test_html_single_job_has_normalized_candidate():
     assert candidate.canonical_title == "Data Analyst"
     assert candidate.organization == "Example Labs"
     assert candidate.location == "Rabat"
-    assert candidate.source_url.endswith("?trk=email")
+    assert candidate.source_url == "https://www.linkedin.com/jobs/view/123456"
     assert candidate.canonical_url == "https://www.linkedin.com/jobs/view/123456"
     assert candidate.application_url == candidate.canonical_url
     assert candidate.description is None
@@ -42,10 +42,52 @@ def test_duplicate_job_is_stably_deduplicated():
 
 
 def test_comm_url_and_tracking_are_canonicalized():
-    html = '<div><a href="http://www.linkedin.com/comm/jobs/view/987?tracking=x#top">Engineer</a><div>Widgets</div></div>'
+    html = '''<div><a href="http://www.linkedin.com/comm/jobs/view/987?savedSearchAuthToken=fake-auth&amp;otpToken=fake-otp&amp;midToken=fake-mid&amp;midSig=fake-sig#top">Engineer</a><div>Widgets</div></div>'''
     candidate = parse_linkedin_job_alert(message(html=html))[0]
     assert candidate.source_external_id == "987"
+    assert candidate.source_url == "https://www.linkedin.com/jobs/view/987"
     assert candidate.canonical_url == "https://www.linkedin.com/jobs/view/987"
+    assert candidate.application_url == "https://www.linkedin.com/jobs/view/987"
+    assert all("?" not in url for url in (
+        candidate.source_url, candidate.canonical_url, candidate.application_url
+    ))
+
+
+def test_combined_company_and_location_metadata_is_split_conservatively():
+    cases = (
+        ("UM6P - University Mohammed VI Polytechnic · Maroc", "UM6P - University Mohammed VI Polytechnic", "Maroc"),
+        ("LabelVie · Casablanca et périphérie", "LabelVie", "Casablanca et périphérie"),
+        ("Entreprise · Casablanca, Casablanca-Settat, Maroc", "Entreprise", "Casablanca, Casablanca-Settat, Maroc"),
+    )
+    for index, (metadata, organization, location) in enumerate(cases, start=300):
+        candidate = parse_linkedin_job_alert(message(html=job(str(index), company=metadata, location="2 relations")))[0]
+        assert (candidate.organization, candidate.location) == (organization, location)
+
+
+def test_linkedin_ui_labels_are_never_locations():
+    for index, label in enumerate(
+        ("2 relations", "1 relation", "Recrutement actif", "Actively recruiting", "3 connections"),
+        start=400,
+    ):
+        candidate = parse_linkedin_job_alert(message(html=job(str(index), location=label)))[0]
+        assert candidate.organization == "Example Labs"
+        assert candidate.location is None
+
+    combined = parse_linkedin_job_alert(message(
+        html=job("499", company="Example Labs · Recrutement actif", location="2 relations")
+    ))[0]
+    assert combined.organization == "Example Labs"
+    assert combined.location is None
+
+
+def test_multiple_blocks_do_not_cross_contaminate_metadata():
+    html = job("501", company="Alpha · Maroc", location="2 relations") + job(
+        "502", company="Beta · Paris", location="Recrutement actif"
+    )
+    candidates = parse_linkedin_job_alert(message(html=html))
+    assert [(item.organization, item.location) for item in candidates] == [
+        ("Alpha", "Maroc"), ("Beta", "Paris")
+    ]
 
 
 def test_sender_address_not_display_name_controls_acceptance():
