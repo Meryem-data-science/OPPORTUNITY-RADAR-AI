@@ -12,7 +12,7 @@ from services.collector.collectors.greenhouse import GreenhouseCollector
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.database.opportunities import PersistenceSummary
 from services.collector.models.opportunity import OpportunityCandidate
-from services.collector.sources import SourceConfig
+from services.collector.sources import SourceConfig, load_source_registry
 
 
 def source(source_id="source_a", *, enabled=True, status="active", source_type="greenhouse"):
@@ -30,8 +30,16 @@ def candidate(source_id="source_a", description="safe description"):
 SETTINGS = Settings(ApplicationEnvironment.TEST, DatabaseBackend.SQLITE)
 
 
-def test_factory_builds_greenhouse_and_rejects_unsupported_type():
-    assert isinstance(collector_for(source()), GreenhouseCollector)
+def test_factory_builds_greenhouse_for_every_configured_source_and_rejects_unsupported_type():
+    configured_sources = load_source_registry()
+    assert {item.id for item in configured_sources} == {
+        "scale_ai_greenhouse",
+        "artefact_greenhouse",
+    }
+    assert all(
+        isinstance(collector_for(item), GreenhouseCollector)
+        for item in configured_sources
+    )
     with pytest.raises(UnsupportedCollectorTypeError, match="unsupported collector type"):
         collector_for(source(source_type="lever"))
 

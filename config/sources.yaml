@@ -9,3 +9,12 @@ sources:
     status: active
     organization: Scale AI
     board_token: scaleai
+  - id: artefact_greenhouse
+    type: greenhouse
+    enabled: true
+    category: jobs
+    country: null
+    frequency_minutes: 120
+    status: active
+    organization: Artefact
+    board_token: artefact
