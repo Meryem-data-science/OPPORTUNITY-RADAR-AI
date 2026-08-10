@@ -6,6 +6,7 @@ import base64
 import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.message import Message
 import json
 import os
 from pathlib import Path
@@ -92,12 +93,22 @@ def _load_credentials(configuration: GmailConfiguration) -> Any:
     credentials: Any = None
     try:
         if configuration.token_path.is_file():
+            configuration.token_path.chmod(0o600)
             credentials = dependencies.Credentials.from_authorized_user_file(
-                str(configuration.token_path), GMAIL_SCOPES
+                str(configuration.token_path)
             )
-            if not credentials.has_scopes(GMAIL_SCOPES):
+            serialized_scopes = frozenset(credentials.scopes or ())
+            granted_scopes_value = getattr(credentials, "granted_scopes", None)
+            granted_scopes = (
+                frozenset(granted_scopes_value)
+                if granted_scopes_value is not None
+                else serialized_scopes
+            )
+            required_scopes = frozenset(GMAIL_SCOPES)
+            if serialized_scopes != required_scopes or granted_scopes != required_scopes:
                 raise GmailAuthenticationError(
-                    "stored Gmail token does not grant exactly the required read-only access"
+                    "stored Gmail token must be replaced by a new authorization "
+                    "granting only gmail.readonly"
                 )
 
         if credentials and credentials.valid:
@@ -130,16 +141,43 @@ def _load_credentials(configuration: GmailConfiguration) -> Any:
         ) from error
 
 
-def _decode_body(data: str) -> str:
+def _decode_body_data(data: str) -> bytes:
     try:
         padded = data + "=" * (-len(data) % 4)
         return base64.b64decode(
             padded.encode("ascii"), altchars=b"-_", validate=True
-        ).decode(
-            "utf-8", errors="replace"
         )
     except (UnicodeEncodeError, binascii.Error, ValueError) as error:
         raise GmailPayloadError("message contains invalid base64url body data") from error
+
+
+def _part_charset(part: Mapping[str, Any]) -> str | None:
+    """Read a MIME part's declared charset from case-insensitive headers."""
+    raw_headers = part.get("headers", ())
+    if not isinstance(raw_headers, list):
+        return None
+    for header in raw_headers:
+        if not isinstance(header, Mapping):
+            continue
+        name, value = header.get("name"), header.get("value")
+        if (
+            isinstance(name, str)
+            and name.lower() == "content-type"
+            and isinstance(value, str)
+        ):
+            mime_header = Message()
+            mime_header["Content-Type"] = value
+            return mime_header.get_content_charset()
+    return None
+
+
+def _decode_part_body(part: Mapping[str, Any], data: str) -> str:
+    raw_body = _decode_body_data(data)
+    charset = _part_charset(part) or "utf-8"
+    try:
+        return raw_body.decode(charset, errors="replace")
+    except LookupError:
+        return raw_body.decode("utf-8", errors="replace")
 
 
 def _extract_bodies(payload: Mapping[str, Any]) -> tuple[str | None, str | None]:
@@ -153,7 +191,7 @@ def _extract_bodies(payload: Mapping[str, Any]) -> tuple[str | None, str | None]
             return
         mime_type = str(part.get("mimeType", "")).lower()
         if isinstance(body, Mapping) and isinstance(body.get("data"), str):
-            decoded = _decode_body(body["data"])
+            decoded = _decode_part_body(part, body["data"])
             if mime_type == "text/plain":
                 text_parts.append(decoded)
             elif mime_type == "text/html":

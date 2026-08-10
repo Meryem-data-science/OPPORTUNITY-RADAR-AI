@@ -10,6 +10,7 @@ from services.collector.gmail.client import (
     GMAIL_READONLY_SCOPE,
     GMAIL_SCOPES,
     GmailApiError,
+    GmailAuthenticationError,
     GmailClient,
     GmailConfiguration,
     GmailConfigurationError,
@@ -43,8 +44,8 @@ def dependencies(credentials: Mock | None = None) -> SimpleNamespace:
     )
 
 
-def encoded(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+def encoded(value: str, charset: str = "utf-8") -> str:
+    return base64.urlsafe_b64encode(value.encode(charset)).decode().rstrip("=")
 
 
 def message(payload: dict, **values: object) -> dict:
@@ -66,20 +67,89 @@ def test_existing_valid_token_is_reused(tmp_path: Path) -> None:
     client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
     client_file.write_text("{}")
     token_file.write_text("{}")
-    credentials = Mock(valid=True)
-    credentials.has_scopes.return_value = True
+    token_file.chmod(0o644)
+    credentials = Mock(
+        valid=True,
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[GMAIL_READONLY_SCOPE],
+    )
     deps = dependencies(credentials)
     with patch("services.collector.gmail.client._google_dependencies", return_value=deps):
         assert _load_credentials(GmailConfiguration(client_file, token_file)) is credentials
     deps.InstalledAppFlow.from_client_secrets_file.assert_not_called()
+    deps.Credentials.from_authorized_user_file.assert_called_once_with(str(token_file))
+    assert token_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_token_permission_failure_is_authentication_error(
+    tmp_path: Path,
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    token_file.write_text("{}")
+    with patch(
+        "services.collector.gmail.client._google_dependencies",
+        return_value=dependencies(),
+    ), patch.object(Path, "chmod", side_effect=PermissionError):
+        with pytest.raises(GmailAuthenticationError, match="PermissionError"):
+            _load_credentials(GmailConfiguration(client_file, token_file))
+
+
+@pytest.mark.parametrize(
+    "stored_scopes",
+    [
+        [GMAIL_READONLY_SCOPE, "https://www.googleapis.com/auth/gmail.modify"],
+        ["https://mail.google.com/"],
+    ],
+)
+def test_existing_token_with_additional_or_broader_scope_is_rejected(
+    tmp_path: Path, stored_scopes: list[str]
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    token_file.write_text("{}")
+    credentials = Mock(valid=True, scopes=stored_scopes, granted_scopes=stored_scopes)
+    with patch(
+        "services.collector.gmail.client._google_dependencies",
+        return_value=dependencies(credentials),
+    ):
+        with pytest.raises(GmailAuthenticationError, match="only gmail.readonly"):
+            _load_credentials(GmailConfiguration(client_file, token_file))
+
+
+def test_existing_token_with_additional_granted_scope_is_rejected(
+    tmp_path: Path,
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    token_file.write_text("{}")
+    credentials = Mock(
+        valid=True,
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[
+            GMAIL_READONLY_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify",
+        ],
+    )
+    with patch(
+        "services.collector.gmail.client._google_dependencies",
+        return_value=dependencies(credentials),
+    ):
+        with pytest.raises(GmailAuthenticationError, match="only gmail.readonly"):
+            _load_credentials(GmailConfiguration(client_file, token_file))
 
 
 def test_expired_token_is_refreshed_and_saved(tmp_path: Path) -> None:
     client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
     client_file.write_text("{}")
     token_file.write_text("{}")
-    credentials = Mock(valid=False, expired=True, refresh_token="fictitious-refresh-token")
-    credentials.has_scopes.return_value = True
+    credentials = Mock(
+        valid=False,
+        expired=True,
+        refresh_token="fictitious-refresh-token",
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[GMAIL_READONLY_SCOPE],
+    )
     credentials.to_json.return_value = '{"token":"fictitious"}'
 
     def refresh(_request: object) -> None:
@@ -131,6 +201,41 @@ def test_plain_html_nested_headers_and_attachment_extraction() -> None:
 def test_simple_body_types(mime_type: str, expected_text: str | None, expected_html: str | None) -> None:
     result = normalize_message(message({"mimeType": mime_type, "body": {"data": encoded("hello")}}))
     assert (result.body_text, result.body_html) == (expected_text, expected_html)
+
+
+@pytest.mark.parametrize(
+    ("charset", "value"),
+    [
+        ("utf-8", "Développeuse €"),
+        ("iso-8859-1", "Développeuse à Montréal"),
+        ("windows-1252", "Opportunity — Paris"),
+    ],
+)
+def test_body_respects_declared_charset(charset: str, value: str) -> None:
+    payload = {
+        "mimeType": "text/plain",
+        "headers": [{"name": "cOnTeNt-TyPe", "value": f"text/plain; charset={charset}"}],
+        "body": {"data": encoded(value, charset)},
+    }
+    assert normalize_message(message(payload)).body_text == value
+
+
+def test_body_without_charset_uses_utf8_fallback() -> None:
+    value = "Alerte ingénieur"
+    payload = {"mimeType": "text/plain", "body": {"data": encoded(value)}}
+    assert normalize_message(message(payload)).body_text == value
+
+
+def test_unknown_charset_uses_controlled_utf8_fallback() -> None:
+    value = "Alerte ingénieur"
+    payload = {
+        "mimeType": "text/plain",
+        "headers": [
+            {"name": "Content-Type", "value": "text/plain; charset=not-a-real-charset"}
+        ],
+        "body": {"data": encoded(value)},
+    }
+    assert normalize_message(message(payload)).body_text == value
 
 
 def test_missing_body_and_fields_do_not_crash() -> None:
