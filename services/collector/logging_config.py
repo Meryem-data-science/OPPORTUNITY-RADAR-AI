@@ -90,14 +90,22 @@ def configure_logging(stream: TextIO | None = None) -> logging.Logger:
     """Configure the service logger once and return it."""
     logger = logging.getLogger(LOGGER_NAME)
     target_stream = stream if stream is not None else sys.stdout
-    handler = next(
-        (
-            existing
-            for existing in logger.handlers
-            if getattr(existing, "name", None) == _HANDLER_MARKER
-        ),
-        None,
-    )
+    marked_handlers = [
+        existing
+        for existing in logger.handlers
+        if getattr(existing, "name", None) == _HANDLER_MARKER
+    ]
+    handler = marked_handlers[0] if marked_handlers else None
+    for duplicate in marked_handlers[1:]:
+        logger.removeHandler(duplicate)
+        duplicate.close()
+
+    if handler is not None and getattr(handler.stream, "closed", False):
+        # StreamHandler.setStream() flushes the previous stream first. Replace a
+        # handler whose captured pytest/stdout stream is already closed instead.
+        logger.removeHandler(handler)
+        handler.close()
+        handler = None
     if handler is None:
         handler = logging.StreamHandler(target_stream)
         handler.name = _HANDLER_MARKER

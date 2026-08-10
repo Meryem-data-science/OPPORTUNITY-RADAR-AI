@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import logging
 
-from services.collector.collectors.base import BaseCollector
+from services.collector.collectors.base import OpportunityCollector
 from services.collector.collectors.factory import collector_for
 from services.collector.config import Settings, load_settings
 from services.collector.database.opportunities import (
@@ -38,7 +38,7 @@ class RadarRunSummary:
 
 
 SourceLoader = Callable[[], list[SourceConfig]]
-CollectorFactory = Callable[[SourceConfig], BaseCollector]
+CollectorFactory = Callable[[SourceConfig], OpportunityCollector]
 Persister = Callable[
     [Settings, SourceConfig, Iterable[OpportunityCandidate]], PersistenceSummary
 ]
@@ -55,18 +55,34 @@ class RadarAgent:
         settings_loader: Callable[[], Settings] = load_settings,
         persister: Persister = persist_configured_opportunities,
         logger: logging.Logger | None = None,
+        source_ids: Iterable[str] | None = None,
     ) -> None:
         self._source_loader = source_loader
         self._collector_factory = collector_factory
         self._settings_loader = settings_loader
         self._persister = persister
         self._logger = logger or get_logger(__name__)
+        self._source_ids = tuple(source_ids) if source_ids is not None else None
 
     def run_once(self) -> RadarRunSummary:
         """Collect and persist each eligible source exactly once."""
+        configured = self._source_loader()
+        if self._source_ids is not None:
+            requested = set(self._source_ids)
+            known = {source.id for source in configured}
+            unknown = requested - known
+            if unknown:
+                raise ValueError(f"unknown source: {sorted(unknown)[0]}")
+            unavailable = [
+                source.id for source in configured
+                if source.id in requested and (not source.enabled or source.status != "active")
+            ]
+            if unavailable:
+                raise ValueError(f"source is disabled or inactive: {unavailable[0]}")
+            configured = [source for source in configured if source.id in requested]
         sources = [
             source
-            for source in self._source_loader()
+            for source in configured
             if source.enabled and source.status == "active"
         ]
         settings = self._settings_loader()

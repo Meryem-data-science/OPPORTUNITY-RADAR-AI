@@ -170,6 +170,50 @@ RUN_TURSO_LIVE_TEST=1 DATABASE_BACKEND=turso pytest tests/live
 
 No remote migration or write is performed by this test.
 
+## LinkedIn Job Alert radar validation
+
+The pipeline source reads LinkedIn alert emails through Gmail, using only
+`https://www.googleapis.com/auth/gmail.readonly`; it does not scrape LinkedIn
+pages or apply to jobs. OAuth paths remain local environment configuration,
+while the Gmail query (`newer_than:7d from:linkedin.com`) and limit (`50`) come
+from `config/sources.yaml` and require no query environment override.
+
+Prepare a fresh isolated SQLite database with the existing migrations and run
+only the enabled, active LinkedIn source:
+
+```bash
+export GMAIL_OAUTH_CLIENT_SECRET_PATH=.secrets/gmail-oauth-client.json
+export GMAIL_TOKEN_PATH=.secrets/gmail-token.json
+
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/linkedin-pipeline-validation.db
+
+python -m services.collector.cli.migrate_configured --apply
+
+python -m services.collector.cli.run_radar \
+  --once --apply \
+  --source linkedin_job_alert_email
+```
+
+The first run should report `items_created > 0`. Repeating the same command
+should report `items_created=0` and `items_updated > 0`, with a stable row
+count. `--source` is repeatable; omitted, all enabled and active sources run.
+Unknown, disabled, and inactive requested sources are refused rather than
+bypassing catalogue policy. No new migration is required for LinkedIn because
+the existing source/opportunity/source-occurrence schema is reused.
+
+The full real-account pipeline test always creates a temporary SQLite database
+and is skipped unless explicitly enabled in a local WSL environment:
+
+```bash
+RUN_LIVE_LINKEDIN_PIPELINE_TEST=1 \
+  pytest -q tests/live/test_linkedin_radar_pipeline.py -s
+```
+
+No real email address, OAuth credential, email content, or job data is stored
+in the repository. Temporal scheduling and automatic applications are outside
+this phase.
+
 ## Web health
 
 The Next.js server reads `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` directly

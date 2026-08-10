@@ -9,6 +9,7 @@ from services.collector.collectors.factory import (
     collector_for,
 )
 from services.collector.collectors.greenhouse import GreenhouseCollector
+from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCollector
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.database.opportunities import PersistenceSummary
 from services.collector.models.opportunity import OpportunityCandidate
@@ -35,11 +36,13 @@ def test_factory_builds_greenhouse_for_every_configured_source_and_rejects_unsup
     assert {item.id for item in configured_sources} == {
         "scale_ai_greenhouse",
         "artefact_greenhouse",
+        "linkedin_job_alert_email",
     }
     assert all(
         isinstance(collector_for(item), GreenhouseCollector)
-        for item in configured_sources
+        for item in configured_sources if item.type == "greenhouse"
     )
+    assert isinstance(collector_for(configured_sources[2]), LinkedInJobAlertCollector)
     with pytest.raises(UnsupportedCollectorTypeError, match="unsupported collector type"):
         collector_for(source(source_type="lever"))
 
@@ -118,3 +121,59 @@ def test_persistence_failure_is_isolated_without_retry():
     assert all(item.collect.call_count == 1 for item in collectors)
     assert summary.sources_failed == 1
     assert summary.items_collected == 2
+
+
+def test_requested_sources_are_filtered_and_cannot_bypass_availability():
+    sources = [source("a"), source("b"), source("off", enabled=False)]
+    collector = Mock()
+    collector.collect.return_value = []
+    factory = Mock(return_value=collector)
+    agent = RadarAgent(
+        source_loader=lambda: sources, collector_factory=factory,
+        settings_loader=lambda: SETTINGS, persister=Mock(return_value=PersistenceSummary(0, 0)),
+        source_ids=["b"],
+    )
+    assert agent.run_once().sources_total == 1
+    factory.assert_called_once_with(sources[1])
+    for selected, message in ((["missing"], "unknown"), (["off"], "disabled or inactive")):
+        with pytest.raises(ValueError, match=message):
+            RadarAgent(source_loader=lambda: sources, source_ids=selected).run_once()
+
+
+def test_three_sources_succeed_and_linkedin_failure_is_isolated():
+    sources = [source("greenhouse_one"), source("greenhouse_two"), source("linkedin_job_alert_email")]
+    persister = Mock(return_value=PersistenceSummary(1, 0))
+
+    def successful_factory(config):
+        collector = Mock()
+        collector.collect.return_value = [candidate(config.id)]
+        return collector
+
+    successful = RadarAgent(
+        source_loader=lambda: sources, collector_factory=successful_factory,
+        settings_loader=lambda: SETTINGS, persister=persister,
+    ).run_once()
+    assert (successful.sources_total, successful.sources_succeeded, successful.sources_failed) == (3, 3, 0)
+    assert persister.call_count == 3
+    assert persister.call_args_list[-1].args[1] is sources[-1]
+    persisted_linkedin_candidate = persister.call_args_list[-1].args[2][0]
+    assert isinstance(persisted_linkedin_candidate, OpportunityCandidate)
+    assert not hasattr(persisted_linkedin_candidate, "body_html")
+
+    def failing_linkedin_factory(config):
+        collector = Mock()
+        if config.id == "linkedin_job_alert_email":
+            collector.collect.side_effect = RuntimeError("Gmail failed")
+        else:
+            collector.collect.return_value = [candidate(config.id)]
+        return collector
+
+    isolated_persister = Mock(return_value=PersistenceSummary(1, 0))
+    isolated = RadarAgent(
+        source_loader=lambda: sources, collector_factory=failing_linkedin_factory,
+        settings_loader=lambda: SETTINGS, persister=isolated_persister,
+    ).run_once()
+    assert (isolated.sources_total, isolated.sources_succeeded, isolated.sources_failed) == (3, 2, 1)
+    assert isolated.source_results[-1].source_id == "linkedin_job_alert_email"
+    assert isolated.source_results[-1].error_type == "RuntimeError"
+    assert isolated_persister.call_count == 2

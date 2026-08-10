@@ -11,6 +11,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run all active radar sources once")
     parser.add_argument("--once", action="store_true", help="Run once and exit")
     parser.add_argument("--apply", action="store_true", help="Authorize database writes")
+    parser.add_argument("--source", action="append", dest="sources", help="Run only this enabled, active source (repeatable)")
     return parser.parse_args(argv)
 
 
@@ -22,7 +23,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise PermissionError("This phase requires --once")
         if not args.apply:
             raise PermissionError("Radar persistence requires --apply")
-        summary = RadarAgent().run_once()
+        summary = RadarAgent(source_ids=args.sources).run_once()
     except Exception as error:
         logger.error(
             "Radar run failed.",
