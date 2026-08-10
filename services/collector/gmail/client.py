@@ -85,6 +85,21 @@ def _validate_limit(limit: int) -> None:
         raise ValueError(f"limit must be an integer between 1 and {MAX_MESSAGE_LIMIT}")
 
 
+def _validate_exact_gmail_scopes(credentials: Any) -> None:
+    """Require every available OAuth scope view to be exactly read-only."""
+    required_scopes = frozenset(GMAIL_SCOPES)
+    observed_scopes: list[frozenset[str]] = []
+    for attribute in ("scopes", "granted_scopes"):
+        value = getattr(credentials, attribute, None)
+        if value is not None:
+            observed_scopes.append(frozenset(value))
+    if not observed_scopes or any(scopes != required_scopes for scopes in observed_scopes):
+        raise GmailAuthenticationError(
+            "Gmail credentials must be replaced by a new authorization "
+            "granting only gmail.readonly"
+        )
+
+
 def _load_credentials(configuration: GmailConfiguration) -> Any:
     if not configuration.client_secret_path.is_file():
         raise GmailConfigurationError("configured Gmail OAuth client file does not exist")
@@ -97,19 +112,7 @@ def _load_credentials(configuration: GmailConfiguration) -> Any:
             credentials = dependencies.Credentials.from_authorized_user_file(
                 str(configuration.token_path)
             )
-            serialized_scopes = frozenset(credentials.scopes or ())
-            granted_scopes_value = getattr(credentials, "granted_scopes", None)
-            granted_scopes = (
-                frozenset(granted_scopes_value)
-                if granted_scopes_value is not None
-                else serialized_scopes
-            )
-            required_scopes = frozenset(GMAIL_SCOPES)
-            if serialized_scopes != required_scopes or granted_scopes != required_scopes:
-                raise GmailAuthenticationError(
-                    "stored Gmail token must be replaced by a new authorization "
-                    "granting only gmail.readonly"
-                )
+            _validate_exact_gmail_scopes(credentials)
 
         if credentials and credentials.valid:
             return credentials
@@ -122,6 +125,7 @@ def _load_credentials(configuration: GmailConfiguration) -> Any:
             credentials = flow.run_local_server(port=0)
         if not credentials or not credentials.valid:
             raise GmailAuthenticationError("Gmail OAuth did not produce valid credentials")
+        _validate_exact_gmail_scopes(credentials)
 
         configuration.token_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(
@@ -180,14 +184,37 @@ def _decode_part_body(part: Mapping[str, Any], data: str) -> str:
         return raw_body.decode("utf-8", errors="replace")
 
 
+def _is_attachment_part(part: Mapping[str, Any]) -> bool:
+    body = part.get("body")
+    if part.get("filename") or (
+        isinstance(body, Mapping) and body.get("attachmentId")
+    ):
+        return True
+    raw_headers = part.get("headers", ())
+    if not isinstance(raw_headers, list):
+        return False
+    for header in raw_headers:
+        if not isinstance(header, Mapping):
+            continue
+        name, value = header.get("name"), header.get("value")
+        if (
+            isinstance(name, str)
+            and name.lower() == "content-disposition"
+            and isinstance(value, str)
+        ):
+            mime_header = Message()
+            mime_header["Content-Disposition"] = value
+            return mime_header.get_content_disposition() == "attachment"
+    return False
+
+
 def _extract_bodies(payload: Mapping[str, Any]) -> tuple[str | None, str | None]:
     text_parts: list[str] = []
     html_parts: list[str] = []
 
     def visit(part: Mapping[str, Any]) -> None:
         body = part.get("body")
-        filename = part.get("filename")
-        if filename or (isinstance(body, Mapping) and body.get("attachmentId")):
+        if _is_attachment_part(part):
             return
         mime_type = str(part.get("mimeType", "")).lower()
         if isinstance(body, Mapping) and isinstance(body.get("data"), str):

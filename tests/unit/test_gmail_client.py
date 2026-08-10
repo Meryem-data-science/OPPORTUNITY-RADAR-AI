@@ -163,6 +163,79 @@ def test_expired_token_is_refreshed_and_saved(tmp_path: Path) -> None:
     assert token_file.stat().st_mode & 0o777 == 0o600
 
 
+def test_refresh_with_additional_scope_is_rejected_before_token_write(
+    tmp_path: Path,
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    token_file.write_text("original-fictitious-token")
+    credentials = Mock(
+        valid=False,
+        expired=True,
+        refresh_token="fictitious-refresh-token",
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[GMAIL_READONLY_SCOPE],
+    )
+
+    def refresh(_request: object) -> None:
+        credentials.valid = True
+        credentials.granted_scopes = [
+            GMAIL_READONLY_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify",
+        ]
+
+    credentials.refresh.side_effect = refresh
+    with patch(
+        "services.collector.gmail.client._google_dependencies",
+        return_value=dependencies(credentials),
+    ):
+        with pytest.raises(GmailAuthenticationError, match="only gmail.readonly"):
+            _load_credentials(GmailConfiguration(client_file, token_file))
+    assert token_file.read_text() == "original-fictitious-token"
+
+
+def test_interactive_authorization_with_readonly_scope_is_saved(
+    tmp_path: Path,
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    credentials = Mock(
+        valid=True,
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[GMAIL_READONLY_SCOPE],
+    )
+    credentials.to_json.return_value = '{"token":"fictitious"}'
+    deps = dependencies()
+    deps.InstalledAppFlow.from_client_secrets_file.return_value.run_local_server.return_value = credentials
+    with patch("services.collector.gmail.client._google_dependencies", return_value=deps):
+        assert _load_credentials(GmailConfiguration(client_file, token_file)) is credentials
+    deps.InstalledAppFlow.from_client_secrets_file.assert_called_once_with(
+        str(client_file), GMAIL_SCOPES
+    )
+    assert token_file.read_text() == '{"token":"fictitious"}'
+
+
+def test_interactive_authorization_with_additional_scope_is_not_saved(
+    tmp_path: Path,
+) -> None:
+    client_file, token_file = tmp_path / "client.json", tmp_path / "token.json"
+    client_file.write_text("{}")
+    credentials = Mock(
+        valid=True,
+        scopes=[GMAIL_READONLY_SCOPE],
+        granted_scopes=[
+            GMAIL_READONLY_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify",
+        ],
+    )
+    deps = dependencies()
+    deps.InstalledAppFlow.from_client_secrets_file.return_value.run_local_server.return_value = credentials
+    with patch("services.collector.gmail.client._google_dependencies", return_value=deps):
+        with pytest.raises(GmailAuthenticationError, match="only gmail.readonly"):
+            _load_credentials(GmailConfiguration(client_file, token_file))
+    assert not token_file.exists()
+
+
 def test_plain_html_nested_headers_and_attachment_extraction() -> None:
     payload = {
         "mimeType": "multipart/mixed",
@@ -192,6 +265,54 @@ def test_plain_html_nested_headers_and_attachment_extraction() -> None:
     assert result.body_text == "plain body"
     assert result.body_html == "<p>html body</p>"
     assert result.received_at == "2024-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("header_name", "header_value"),
+    [
+        ("Content-Disposition", "attachment"),
+        ("content-disposition", "attachment"),
+        ("CONTENT-DISPOSITION", 'attachment; filename="fixture.txt"'),
+    ],
+)
+def test_content_disposition_attachment_is_ignored(
+    header_name: str, header_value: str
+) -> None:
+    payload = {
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [{"name": header_name, "value": header_value}],
+        "body": {"data": encoded("fictitious attachment content")},
+    }
+    assert normalize_message(message(payload)).body_text is None
+
+
+def test_inline_content_disposition_remains_body() -> None:
+    payload = {
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [{"name": "Content-Disposition", "value": "inline"}],
+        "body": {"data": encoded("fictitious inline body")},
+    }
+    assert normalize_message(message(payload)).body_text == "fictitious inline body"
+
+
+def test_multipart_excludes_content_disposition_attachment() -> None:
+    payload = {
+        "mimeType": "multipart/mixed",
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": encoded("real body")}},
+            {
+                "mimeType": "text/plain",
+                "filename": "",
+                "headers": [
+                    {"name": "Content-Disposition", "value": "attachment"}
+                ],
+                "body": {"data": encoded("fictitious attachment content")},
+            },
+        ],
+    }
+    assert normalize_message(message(payload)).body_text == "real body"
 
 
 @pytest.mark.parametrize(
