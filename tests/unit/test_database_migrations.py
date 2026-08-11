@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "opportunities",
     "opportunity_sources",
     "deduplication_decisions",
+    "opportunity_qualifications",
 }
 
 
@@ -30,14 +31,14 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001", "0002", "0003"]
+    assert applied == ["0001", "0002", "0003", "0004"]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",), ("0002",), ("0003",)]
+    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",)]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001", "0002", "0003"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004"]
         assert apply_migrations(connection) == []
 
         counts = {
@@ -49,7 +50,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         ).fetchone()[0]
 
     assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0}
-    assert migration_count == 3
+    assert migration_count == 4
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
@@ -137,6 +138,46 @@ def test_database_at_0002_receives_only_0003(tmp_path) -> None:
         )
         assert apply_migrations(connection, migrations) == ["0003"]
         assert apply_migrations(connection, migrations) == []
+
+
+def test_database_at_0003_receives_qualification_schema_and_constraints(tmp_path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    for name in (
+        "0001_opportunity_foundation.sql", "0002_deduplication_decisions.sql",
+        "0003_deduplication_merges.sql",
+    ):
+        (migrations / name).write_text(
+            open(f"migrations/{name}", encoding="utf-8").read(), encoding="utf-8"
+        )
+    with connect_database(tmp_path / "upgrade-0003.db") as connection:
+        assert apply_migrations(connection, migrations) == ["0001", "0002", "0003"]
+        name = "0004_opportunity_qualifications.sql"
+        (migrations / name).write_text(
+            open(f"migrations/{name}", encoding="utf-8").read(), encoding="utf-8"
+        )
+        assert apply_migrations(connection, migrations) == ["0004"]
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(opportunity_qualifications)")}
+        assert {"opportunity_id", "qualification", "classifier_version", "input_fingerprint"} <= columns
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(opportunity_qualifications)")}
+        assert {
+            "idx_opportunity_qualifications_qualification",
+            "idx_opportunity_qualifications_primary_domain",
+            "idx_opportunity_qualifications_opportunity_type",
+        } <= indexes
+        connection.execute("""INSERT INTO opportunities
+            (id, canonical_title, organization, discovered_at, first_seen_at, last_seen_at,
+             source_url, status) VALUES (1, 'Role', 'Org', '2026-01-01', '2026-01-01',
+             '2026-01-01', 'https://example.test', 'visible')""")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("""INSERT INTO opportunity_qualifications
+                (opportunity_id, qualification, primary_domain, opportunity_type,
+                 employment_type, listing_quality, matched_domains_json,
+                 matched_title_signals_json, matched_description_signals_json,
+                 matched_exclusion_signals_json, reasons_json, classifier_version,
+                 input_fingerprint, classified_at)
+                VALUES (1, 'INVALID', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'NORMAL_LISTING',
+                        '[]', '[]', '[]', '[]', '[]', 'v1', ?, '2026-01-01')""", ("a" * 64,))
 
 
 def test_decision_schema_enforces_pair_status_and_foreign_keys(tmp_path) -> None:
