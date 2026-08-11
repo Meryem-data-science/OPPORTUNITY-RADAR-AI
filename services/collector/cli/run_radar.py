@@ -37,7 +37,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "items_collected", "items_created", "items_updated",
     ):
         print(f"{field}={getattr(summary, field)}")
-    return 1 if summary.sources_failed else 0
+    qualification = summary.qualification
+    print(f"qualification_success={qualification.success}")
+    if qualification.success:
+        for field in ("created", "updated", "unchanged", "total"):
+            print(f"qualifications_{field}={getattr(qualification, field)}")
+    else:
+        print(f"qualification_error_type={qualification.error_type}")
+    return 0 if summary.success else 1
 
 
 if __name__ == "__main__":

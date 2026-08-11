@@ -13,6 +13,9 @@ from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCol
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.database.opportunities import PersistenceSummary
 from services.collector.models.opportunity import OpportunityCandidate
+from services.collector.qualification.persistence import (
+    PersistenceSummary as QualificationPersistenceSummary,
+)
 from services.collector.sources import SourceConfig, load_source_registry
 
 
@@ -29,6 +32,10 @@ def candidate(source_id="source_a", description="safe description"):
 
 
 SETTINGS = Settings(ApplicationEnvironment.TEST, DatabaseBackend.SQLITE)
+
+
+def qualification_persister():
+    return Mock(return_value=QualificationPersistenceSummary(0, 0, 0, 0))
 
 
 def test_factory_builds_greenhouse_for_every_configured_source_and_rejects_unsupported_type():
@@ -58,6 +65,7 @@ def test_run_once_loads_filters_and_passes_candidates_to_persistence():
     summary = RadarAgent(
         source_loader=loader, collector_factory=factory,
         settings_loader=lambda: SETTINGS, persister=persister,
+        qualification_persister=qualification_persister(),
     ).run_once()
 
     loader.assert_called_once_with()
@@ -85,6 +93,7 @@ def test_multiple_sources_aggregate_and_failure_does_not_retry_or_stop(caplog):
         summary = RadarAgent(
             source_loader=lambda: sources, collector_factory=factory,
             settings_loader=lambda: SETTINGS, persister=persister,
+            qualification_persister=qualification_persister(),
             logger=logger,
         ).run_once()
 
@@ -113,14 +122,17 @@ def test_persistence_failure_is_isolated_without_retry():
         collectors.append(collector)
         return collector
     persister = Mock(side_effect=[RuntimeError("db unavailable"), PersistenceSummary(0, 1)])
+    qualify = qualification_persister()
     summary = RadarAgent(
         source_loader=lambda: sources, collector_factory=factory,
         settings_loader=lambda: SETTINGS, persister=persister,
+        qualification_persister=qualify,
     ).run_once()
     assert persister.call_count == 2
     assert all(item.collect.call_count == 1 for item in collectors)
     assert summary.sources_failed == 1
     assert summary.items_collected == 2
+    qualify.assert_called_once_with(SETTINGS)
 
 
 def test_requested_sources_are_filtered_and_cannot_bypass_availability():
@@ -131,6 +143,7 @@ def test_requested_sources_are_filtered_and_cannot_bypass_availability():
     agent = RadarAgent(
         source_loader=lambda: sources, collector_factory=factory,
         settings_loader=lambda: SETTINGS, persister=Mock(return_value=PersistenceSummary(0, 0)),
+        qualification_persister=qualification_persister(),
         source_ids=["b"],
     )
     assert agent.run_once().sources_total == 1
@@ -152,6 +165,7 @@ def test_three_sources_succeed_and_linkedin_failure_is_isolated():
     successful = RadarAgent(
         source_loader=lambda: sources, collector_factory=successful_factory,
         settings_loader=lambda: SETTINGS, persister=persister,
+        qualification_persister=qualification_persister(),
     ).run_once()
     assert (successful.sources_total, successful.sources_succeeded, successful.sources_failed) == (3, 3, 0)
     assert persister.call_count == 3
@@ -172,8 +186,67 @@ def test_three_sources_succeed_and_linkedin_failure_is_isolated():
     isolated = RadarAgent(
         source_loader=lambda: sources, collector_factory=failing_linkedin_factory,
         settings_loader=lambda: SETTINGS, persister=isolated_persister,
+        qualification_persister=qualification_persister(),
     ).run_once()
     assert (isolated.sources_total, isolated.sources_succeeded, isolated.sources_failed) == (3, 2, 1)
     assert isolated.source_results[-1].source_id == "linkedin_job_alert_email"
     assert isolated.source_results[-1].error_type == "RuntimeError"
     assert isolated_persister.call_count == 2
+
+
+def test_qualification_runs_once_after_all_source_persistence_with_same_settings():
+    sources = [source("a"), source("b")]
+    events = []
+
+    def factory(config):
+        collector = Mock()
+        collector.collect.side_effect = (
+            lambda: events.append(f"collect:{config.id}") or [candidate(config.id)]
+        )
+        return collector
+
+    def persist(unused_settings, config, unused_candidates):
+        events.append(f"persist:{config.id}")
+        return PersistenceSummary(1, 0)
+
+    qualify = Mock(
+        side_effect=lambda settings: events.append("qualify")
+        or QualificationPersistenceSummary(2, 0, 0, 2)
+    )
+    summary = RadarAgent(
+        source_loader=lambda: sources, collector_factory=factory,
+        settings_loader=lambda: SETTINGS, persister=persist,
+        qualification_persister=qualify,
+    ).run_once()
+
+    assert events == ["collect:a", "persist:a", "collect:b", "persist:b", "qualify"]
+    qualify.assert_called_once_with(SETTINGS)
+    assert summary.qualification.success
+    assert summary.qualification.created == 2
+    assert summary.success
+
+
+def test_qualification_failure_is_global_isolated_and_logs_no_sensitive_message(caplog):
+    secret = "private candidate URL https://secret.example token=hidden"
+    qualify = Mock(side_effect=RuntimeError(secret))
+    logger = logging.getLogger("test.radar.qualification")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        summary = RadarAgent(
+            source_loader=lambda: [source()],
+            collector_factory=lambda unused: Mock(collect=Mock(return_value=[candidate()])),
+            settings_loader=lambda: SETTINGS,
+            persister=Mock(return_value=PersistenceSummary(1, 0)),
+            qualification_persister=qualify,
+            logger=logger,
+        ).run_once()
+
+    qualify.assert_called_once_with(SETTINGS)
+    assert summary.sources_succeeded == 1
+    assert summary.sources_failed == 0
+    assert not summary.qualification.success
+    assert summary.qualification.error_type == "RuntimeError"
+    assert not summary.success
+    assert secret not in caplog.text
+    failed = next(record for record in caplog.records if record.event == "radar_qualification_failed")
+    assert failed.error_type == "RuntimeError"
+    assert not hasattr(failed, "error_message")
