@@ -76,7 +76,7 @@ def test_ambiguous_titles_remain_uncertain(title: str) -> None:
 
 def test_strong_description_can_disambiguate_generic_technical_title() -> None:
     result = classify_opportunity(
-        "Software Engineer", "Build services as a machine learning engineer on our ML platform engineer team."
+        "Software Engineer", "Build production model serving and model deployment systems."
     )
     assert result.qualification is Qualification.CORE_TARGET
     assert result.primary_domain is Domain.MLOPS_ML_PLATFORM
@@ -363,3 +363,75 @@ def test_organization_cannot_participate_in_classification() -> None:
     scale_ai_result = classify_opportunity(title, "Build data pipelines.")
     different_employer_result = classify_opportunity(title, "Build data pipelines.")
     assert scale_ai_result == different_employer_result
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("DevOps Engineer, Infrastructure & Security", "Work with machine learning (ML)."),
+        (
+            "Senior Full-Stack Software Engineer, (Forward Deployed), GPS",
+            "Our products use Gen AI and LLMs.",
+        ),
+        (
+            "Solutions Engineer, Enterprise",
+            "Support Generative AI, LLMs, agents, and machine learning customers.",
+        ),
+        (
+            "Software Engineer, Identity",
+            "Identity products use generative AI, LLMs, and model evaluation.",
+        ),
+    ],
+)
+def test_broad_ai_vocabulary_does_not_promote_generic_roles(
+    title: str, description: str,
+) -> None:
+    result = classify_opportunity(title, description)
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.primary_domain is Domain.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("description", "domain"),
+    [
+        ("Implement model training and model evaluation.", Domain.MACHINE_LEARNING_AI),
+        ("Implement model serving and model deployment.", Domain.MLOPS_ML_PLATFORM),
+    ],
+)
+def test_two_distinct_strong_concepts_promote_generic_software_role(
+    description: str, domain: Domain,
+) -> None:
+    result = classify_opportunity("Software Engineer", description)
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is domain
+    assert "strong description concepts" in result.reasons[0]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Prototype retrieval augmented generation (RAG).",
+        "Apply machine learning (ML).",
+    ],
+)
+def test_aliases_of_one_concept_cannot_satisfy_description_promotion(description: str) -> None:
+    result = classify_opportunity("Software Engineer", description)
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.primary_domain is Domain.UNKNOWN
+
+
+def test_strong_evidence_controls_primary_domain_not_broad_context() -> None:
+    result = classify_opportunity(
+        "Software Engineer",
+        "Build agents while implementing data pipelines, ETL, and data governance.",
+    )
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.DATA_ENGINEERING
+    assert Domain.GENAI_LLM in result.matched_domains
+
+
+def test_ai_builder_intern_is_a_narrow_explicit_core_title() -> None:
+    result = classify_opportunity("AI Builder Intern", "New graduates may apply.")
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.MACHINE_LEARNING_AI
+    assert result.opportunity_type is OpportunityType.INTERNSHIP

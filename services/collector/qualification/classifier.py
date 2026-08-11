@@ -10,8 +10,8 @@ from .taxonomy import (
     GENERIC_CAREERS_TITLES,
     GENERIC_JOBS_TITLES, GENERIC_TECHNICAL_TITLES, GRADUATE_SIGNALS,
     INTERNSHIP_SIGNALS, NON_TARGET_ROLE_SIGNALS, PFE_SIGNALS,
-    POSTDOC_ROLE_SIGNALS, TECHNICAL_ROLE_SIGNALS, Domain, EmploymentType,
-    ListingQuality, OpportunityType, Qualification,
+    POSTDOC_ROLE_SIGNALS, STRONG_DESCRIPTION_CONCEPTS, TECHNICAL_ROLE_SIGNALS,
+    Domain, EmploymentType, ListingQuality, OpportunityType, Qualification,
 )
 
 
@@ -75,6 +75,17 @@ def _context_matches(text: str) -> dict[Domain, tuple[str, ...]]:
     }
 
 
+def _strong_description_concepts(text: str) -> dict[Domain, tuple[str, ...]]:
+    """Return independently-counted concrete concepts, collapsing all aliases."""
+    return {
+        domain: matched
+        for domain, concepts in STRONG_DESCRIPTION_CONCEPTS.items()
+        if (matched := tuple(
+            concept for concept, aliases in concepts.items() if _matches(text, aliases)
+        ))
+    }
+
+
 def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
     """Infer from title first; ordinary description vocabulary cannot override it."""
     title_pfe = _matches(title, PFE_SIGNALS)
@@ -117,15 +128,15 @@ def classify_opportunity(
     title_adjacent = _domain_matches(normalized_title, ADJACENT_SIGNALS)
     title_context = _context_matches(normalized_title)
     description_context = _context_matches(normalized_description)
+    strong_description = _strong_description_concepts(normalized_description)
     exclusions = _matches(normalized_title, NON_TARGET_ROLE_SIGNALS)
 
     title_positive = {**title_adjacent, **title_core}
     technical_roles = _matches(normalized_title, TECHNICAL_ROLE_SIGNALS)
     postdoc_roles = _matches(normalized_title, POSTDOC_ROLE_SIGNALS)
     is_generic_technical = bool(_matches(normalized_title, GENERIC_TECHNICAL_TITLES))
-    # Repeated text never increases evidence: only distinct configured phrases count.
-    description_signal_count = sum(len(values) for values in description_context.values())
-    description_promotes = is_generic_technical and description_signal_count >= 2
+    strong_concept_count = sum(len(concepts) for concepts in strong_description.values())
+    description_promotes = is_generic_technical and strong_concept_count >= 2
     structural_title_match = bool((technical_roles or postdoc_roles) and title_context)
 
     reasons: list[str] = []
@@ -152,9 +163,14 @@ def classify_opportunity(
     elif description_promotes:
         qualification = Qualification.CORE_TARGET
         relevant_domains = set(description_context)
-        primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in relevant_domains)
+        primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in strong_description)
         reasons.append(
-            "generic technical/research title + at least two independent description domain signals"
+            "generic technical/research title + strong description concepts: "
+            + ", ".join(
+                concept
+                for domain in DOMAIN_PRECEDENCE
+                for concept in strong_description.get(domain, ())
+            )
         )
     else:
         qualification = Qualification.UNCERTAIN

@@ -66,7 +66,7 @@ CORE_SIGNALS = {
     ),
     Domain.DATA_SCIENCE: ("data scientist",),
     Domain.MACHINE_LEARNING_AI: (
-        "machine learning engineer", "ml engineer", "ai engineer",
+        "machine learning engineer", "ml engineer", "ai engineer", "ai builder",
         "artificial intelligence engineer", "software engineer machine learning",
         "software engineer ai", "applied scientist machine learning",
         "applied scientist ai", "ml scientist", "research scientist machine learning",
@@ -130,6 +130,55 @@ DOMAIN_CONTEXT_SIGNALS = {
     Domain.DATA_QUALITY_GOVERNANCE: (
         "data quality", "data governance", "data lineage", "metadata management",
     ),
+}
+
+# Description-only promotion uses concepts rather than raw phrase counts.
+# Aliases within one concept are one piece of evidence, and broad domain labels
+# such as "machine learning", "GenAI", or "LLM" deliberately do not appear.
+STRONG_DESCRIPTION_CONCEPTS = {
+    Domain.DATA_ENGINEERING: {
+        "data_pipelines": ("data pipeline", "data pipelines"),
+        "etl_elt": ("etl", "elt"),
+        "analytical_storage": ("data warehouse", "data lake", "lakehouse"),
+        "spark": ("spark",),
+        "dbt": ("dbt",),
+        "airflow": ("airflow",),
+        "kafka": ("kafka",),
+        "data_orchestration": ("data orchestration",),
+        "streaming_pipelines": ("streaming pipelines",),
+    },
+    Domain.DATA_SCIENCE: {
+        "statistical_modeling": ("statistical modeling",),
+        "predictive_modeling": ("predictive modeling",),
+        "experimentation": ("experimentation",),
+        "statistical_analysis": ("statistical analysis",),
+    },
+    Domain.MACHINE_LEARNING_AI: {
+        "model_training": ("model training",),
+        "model_evaluation": ("model evaluation",),
+        "model_development": ("model development",),
+        "deep_learning": ("deep learning",),
+        "computer_vision": ("computer vision",),
+        "nlp": ("natural language processing", "nlp"),
+    },
+    Domain.GENAI_LLM: {
+        "retrieval_augmented_generation": ("retrieval augmented generation", "rag"),
+        "agentic_systems": ("agentic systems",),
+    },
+    Domain.MLOPS_ML_PLATFORM: {
+        "model_serving": ("model serving",),
+        "model_deployment": ("model deployment",),
+        "model_monitoring": ("model monitoring",),
+        "feature_store": ("feature store",),
+        "ml_platform": ("ml platform", "machine learning platform"),
+        "ml_infrastructure": ("ml infrastructure", "machine learning infrastructure"),
+    },
+    Domain.DATA_QUALITY_GOVERNANCE: {
+        "data_quality": ("data quality",),
+        "data_governance": ("data governance",),
+        "data_lineage": ("data lineage",),
+        "metadata_management": ("metadata management",),
+    },
 }
 
 ADJACENT_SIGNALS = {
