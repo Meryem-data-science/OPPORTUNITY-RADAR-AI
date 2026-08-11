@@ -1,5 +1,7 @@
 """Representative deterministic qualification rule coverage."""
 
+import inspect
+
 import pytest
 
 from services.collector.qualification import (
@@ -144,3 +146,194 @@ def test_quality_flags_are_diagnostic_and_do_not_downgrade_qualification() -> No
     assert "EMPTY_OR_NEAR_EMPTY_DESCRIPTION" in result.quality_flags
     assert "MISSING_APPLICATION_URL" in result.quality_flags
     assert "MISSING_CANONICAL_URL" in result.quality_flags
+
+
+@pytest.mark.parametrize(
+    ("title", "domain"),
+    [
+        ("AI Infrastructure Engineer, Model Serving Platform", Domain.MLOPS_ML_PLATFORM),
+        ("AI Infrastructure Engineer, Sandbox Platform", Domain.MLOPS_ML_PLATFORM),
+        ("AI Infrastructure Engineer, Serving Platform", Domain.MLOPS_ML_PLATFORM),
+        ("Forward Deployed Engineer, GenAI", Domain.GENAI_LLM),
+        ("Frontier Agents Engineer (Applied AI)", Domain.GENAI_LLM),
+        ("Machine Learning Fellow", Domain.MACHINE_LEARNING_AI),
+        ("Machine Learning Research Engineer, Agents - Enterprise GenAI", Domain.GENAI_LLM),
+        ("ML Research Engineer, ML Systems", Domain.MLOPS_ML_PLATFORM),
+        ("ML Systems Engineer, Robotics", Domain.MLOPS_ML_PLATFORM),
+        ("Senior Machine Learning Research Engineer", Domain.MACHINE_LEARNING_AI),
+        ("Senior Software Engineer, Data Platform", Domain.DATA_ENGINEERING),
+        ("Staff Software Engineer, Data Platform", Domain.DATA_ENGINEERING),
+        ("Software Engineer, Data Infrastructure", Domain.DATA_ENGINEERING),
+        ("Senior Software Engineer, GenAI", Domain.GENAI_LLM),
+        ("Software Engineer, Enterprise AI", Domain.MACHINE_LEARNING_AI),
+        ("Software Engineer, Frontier AI Infrastructure", Domain.MLOPS_ML_PLATFORM),
+        (
+            "Staff Machine Learning Research Engineer, Agent Post-training - Enterprise GenAI",
+            Domain.GENAI_LLM,
+        ),
+        ("Staff Infrastructure Software Engineer, Enterprise AI", Domain.MACHINE_LEARNING_AI),
+        ("Director of Engineering, Physical AI", Domain.MACHINE_LEARNING_AI),
+    ],
+)
+def test_real_corpus_structural_core_titles(title: str, domain: Domain) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is domain
+    assert "technical role family + explicit Data/AI title context" in result.reasons
+    assert result.matched_title_signals
+
+
+@pytest.mark.parametrize(
+    ("title", "domain"),
+    [
+        ("CUS - Postdoctoral Researcher in Spatial Data Science", Domain.DATA_SCIENCE),
+        ("GTI - Postdoctoral Researcher – AI/ML for Energy Systems", Domain.MACHINE_LEARNING_AI),
+        (
+            "CBS - Postdoctoral Position, Artificial Intelligence Applied to Multi-Omics Data Integration",
+            Domain.MACHINE_LEARNING_AI,
+        ),
+    ],
+)
+def test_data_ai_postdoc_titles_are_core_jobs(title: str, domain: Domain) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is domain
+    assert result.opportunity_type is OpportunityType.JOB
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "AgBS - Post-Doctoral in Modeling and Crop Yield Prediction in Africa",
+        "CRSA - Postdoctoral Research Fellowship, Developing Advanced Weather Prediction Models",
+        "COLCOM - Postdoctoral Researcher in Multimodal Crop Analysis & Fertilizer Optimization",
+    ],
+)
+def test_generic_modeling_prediction_postdocs_remain_uncertain(title: str) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.opportunity_type is OpportunityType.JOB
+
+
+@pytest.mark.parametrize("title", ["AI Advisory Consultant", "AI Strategy Consultant, Frontier Tech"])
+def test_explicit_ai_advisory_roles_are_adjacent(title: str) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_domain is Domain.OTHER_DATA_AI
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "[Annotations] Operations Associate",
+        "[Annotations] Operations Program Manager",
+        "Associate General Counsel, Commercial",
+        "Chief of Staff, Public Sector Engineering & Security",
+        "Communications Senior Manager, Corporate & Product (Enterprise)",
+        "Director of Product Management, Forward Deployed & Strategy",
+        "AI Product Manager (Coding/Multimodal)",
+        "Product Manager, Gen AI",
+        "Senior AI Product Manager, Code",
+        "Director of Product Strategy, Physical AI",
+        "Technical Program Manager, Gen AI Operations Planning",
+        "Head of Field Marketing and Events, Gen AI",
+        "Strategic Projects Lead, Generative AI",
+        "Finance Systems & Automations Manager",
+        "Finance Fellow - Human Frontier Collective",
+        "Associate General Counsel, Commercial",
+        "HR Manager",
+        "Recruiting Coordinator, Contract",
+        "University Recruiter, Contract",
+        "Sales Enablement Lead",
+        "Technical Writer",
+        "Executive Assistant",
+        "Support Specialist",
+        "Proposals Manager",
+        "Engagement Management Lead",
+        "Business Development Representative, Partnerships (Physical AI)",
+        "Enterprise Account Executive",
+        "Senior Corporate Accountant",
+    ],
+)
+def test_real_corpus_non_target_role_families_win_over_ai_context(title: str) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.OUT_OF_SCOPE
+    assert result.primary_domain is Domain.NON_TARGET
+    assert result.matched_exclusion_signals
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Software Engineer", "Research Scientist", "Business Analyst Intern",
+        "IT & Automation Intern - Unpaid Student Internship", "Portfolio Performance Intern",
+        "Solutions Engineer, Enterprise", "Principal Solutions Engineer, Enterprise",
+        "Software Engineer, Platform", "Senior Software Engineer, Full-Stack",
+        "DevOps Engineer, Infrastructure & Security",
+    ],
+)
+def test_real_corpus_generic_roles_stay_uncertain(title: str) -> None:
+    assert classify_opportunity(title).qualification is Qualification.UNCERTAIN
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "expected"),
+    [
+        ("AI Builder Intern", "New graduates may apply.", OpportunityType.INTERNSHIP),
+        (
+            "Business Development Representative, Partnerships (Physical AI)",
+            "We hire interns and recent graduates.", OpportunityType.JOB,
+        ),
+        ("University Recruiter, Contract", "Support our internship program.", OpportunityType.JOB),
+        ("Stage PFE Data Scientist", "Internship role.", OpportunityType.PFE),
+        ("Alternance Data Engineer", "Graduate applicants welcome.", OpportunityType.APPRENTICESHIP),
+        ("Graduate Data Engineer", "We hire interns.", OpportunityType.GRADUATE),
+        ("Postdoctoral Researcher in Spatial Data Science", "", OpportunityType.JOB),
+    ],
+)
+def test_title_first_opportunity_type_blocks_description_leakage(
+    title: str, description: str, expected: OpportunityType,
+) -> None:
+    assert classify_opportunity(title, description).opportunity_type is expected
+
+
+def test_description_pfe_is_the_narrow_high_confidence_fallback() -> None:
+    result = classify_opportunity("Data Science Intern", "Stage PFE: projet de fin d'études.")
+    assert result.opportunity_type is OpportunityType.PFE
+
+
+def test_generic_software_role_requires_independent_description_context() -> None:
+    promoted = classify_opportunity(
+        "Software Engineer",
+        "Develop machine learning systems, including model training and model evaluation.",
+    )
+    boilerplate = classify_opportunity(
+        "Software Engineer", "We are an AI company building the future of technology."
+    )
+    assert promoted.qualification is Qualification.CORE_TARGET
+    assert len(promoted.matched_description_signals) >= 2
+    assert boilerplate.qualification is Qualification.UNCERTAIN
+
+
+def test_generic_research_role_can_use_multiple_strong_description_signals() -> None:
+    result = classify_opportunity(
+        "Research Scientist", "Research deep learning, model training, and model evaluation methods."
+    )
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.MACHINE_LEARNING_AI
+
+
+@pytest.mark.parametrize("title", ["Product Manager", "Recruiter"])
+def test_non_target_title_cannot_be_rescued_by_strong_ai_description(title: str) -> None:
+    result = classify_opportunity(
+        title, "Lead machine learning, model training, model evaluation, and generative AI programs."
+    )
+    assert result.qualification is Qualification.OUT_OF_SCOPE
+
+
+def test_organization_cannot_participate_in_classification() -> None:
+    assert "organization" not in inspect.signature(classify_opportunity).parameters
+    title = "Senior Software Engineer, Data Platform"
+    scale_ai_result = classify_opportunity(title, "Build data pipelines.")
+    different_employer_result = classify_opportunity(title, "Build data pipelines.")
+    assert scale_ai_result == different_employer_result

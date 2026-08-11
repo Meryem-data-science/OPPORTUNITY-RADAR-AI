@@ -6,10 +6,12 @@ import unicodedata
 
 from .taxonomy import (
     ADJACENT_SIGNALS, APPRENTICESHIP_SIGNALS, CORE_SIGNALS, DOMAIN_PRECEDENCE,
-    EMPLOYMENT_SIGNALS, EXCLUSION_SIGNALS, GENERIC_CAREERS_TITLES,
+    DESCRIPTION_PFE_SIGNALS, DOMAIN_CONTEXT_SIGNALS, EMPLOYMENT_SIGNALS,
+    GENERIC_CAREERS_TITLES,
     GENERIC_JOBS_TITLES, GENERIC_TECHNICAL_TITLES, GRADUATE_SIGNALS,
-    INTERNSHIP_SIGNALS, PFE_SIGNALS, Domain, EmploymentType, ListingQuality,
-    OpportunityType, Qualification,
+    INTERNSHIP_SIGNALS, NON_TARGET_ROLE_SIGNALS, PFE_SIGNALS,
+    POSTDOC_ROLE_SIGNALS, TECHNICAL_ROLE_SIGNALS, Domain, EmploymentType,
+    ListingQuality, OpportunityType, Qualification,
 )
 
 
@@ -58,17 +60,39 @@ def _domain_matches(text: str, rules: dict[Domain, tuple[str, ...]]) -> dict[Dom
     return {domain: found for domain, signals in rules.items() if (found := _matches(text, signals))}
 
 
-def _infer_opportunity_type(title: str, description: str, looks_like_role: bool) -> OpportunityType:
-    combined = f"{title} {description}"
-    for result, signals in (
-        (OpportunityType.PFE, PFE_SIGNALS),
-        (OpportunityType.APPRENTICESHIP, APPRENTICESHIP_SIGNALS),
-        (OpportunityType.GRADUATE, GRADUATE_SIGNALS),
-        (OpportunityType.INTERNSHIP, INTERNSHIP_SIGNALS),
-    ):
-        if _matches(combined, signals):
-            return result
-    return OpportunityType.JOB if looks_like_role else OpportunityType.UNKNOWN
+def _context_matches(text: str) -> dict[Domain, tuple[str, ...]]:
+    """Return distinct context evidence, suppressing phrases nested in stronger ones."""
+    found = _domain_matches(text, DOMAIN_CONTEXT_SIGNALS)
+    all_signals = tuple(signal for signals in found.values() for signal in signals)
+    return {
+        domain: independent
+        for domain, signals in found.items()
+        if (independent := tuple(
+            signal
+            for signal in signals
+            if not any(signal != other and _contains(other, signal) for other in all_signals)
+        ))
+    }
+
+
+def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
+    """Infer from title first; ordinary description vocabulary cannot override it."""
+    title_pfe = _matches(title, PFE_SIGNALS)
+    title_apprenticeship = _matches(title, APPRENTICESHIP_SIGNALS)
+    title_internship = _matches(title, INTERNSHIP_SIGNALS)
+    title_graduate = _matches(title, GRADUATE_SIGNALS)
+    description_pfe = _matches(description, DESCRIPTION_PFE_SIGNALS)
+    if title_pfe or description_pfe:
+        return OpportunityType.PFE
+    if title_apprenticeship:
+        return OpportunityType.APPRENTICESHIP
+    if title_internship:
+        return OpportunityType.INTERNSHIP
+    if title_graduate:
+        return OpportunityType.GRADUATE
+    if not title or title in GENERIC_CAREERS_TITLES or title in GENERIC_JOBS_TITLES:
+        return OpportunityType.UNKNOWN
+    return OpportunityType.JOB
 
 
 def _infer_employment_type(title: str, description: str) -> EmploymentType:
@@ -91,16 +115,18 @@ def classify_opportunity(
     normalized_title, normalized_description = normalize_text(title), normalize_text(description)
     title_core = _domain_matches(normalized_title, CORE_SIGNALS)
     title_adjacent = _domain_matches(normalized_title, ADJACENT_SIGNALS)
-    description_core = _domain_matches(normalized_description, CORE_SIGNALS)
-    description_adjacent = _domain_matches(normalized_description, ADJACENT_SIGNALS)
-    exclusions = _matches(normalized_title, EXCLUSION_SIGNALS)
+    title_context = _context_matches(normalized_title)
+    description_context = _context_matches(normalized_description)
+    exclusions = _matches(normalized_title, NON_TARGET_ROLE_SIGNALS)
 
     title_positive = {**title_adjacent, **title_core}
-    description_positive = {**description_adjacent, **description_core}
+    technical_roles = _matches(normalized_title, TECHNICAL_ROLE_SIGNALS)
+    postdoc_roles = _matches(normalized_title, POSTDOC_ROLE_SIGNALS)
     is_generic_technical = bool(_matches(normalized_title, GENERIC_TECHNICAL_TITLES))
-    # Description-only promotion requires two distinct explicit domain phrases.
-    description_signal_count = sum(len(values) for values in description_positive.values())
+    # Repeated text never increases evidence: only distinct configured phrases count.
+    description_signal_count = sum(len(values) for values in description_context.values())
     description_promotes = is_generic_technical and description_signal_count >= 2
+    structural_title_match = bool((technical_roles or postdoc_roles) and title_context)
 
     reasons: list[str] = []
     if exclusions:
@@ -110,31 +136,40 @@ def classify_opportunity(
         relevant_domains: set[Domain] = set()
     elif title_core:
         qualification = Qualification.CORE_TARGET
-        relevant_domains = set(title_positive) | set(description_positive)
+        relevant_domains = set(title_positive) | set(title_context) | set(description_context)
         primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in title_core)
         reasons.append("explicit core Data/AI title signal")
     elif title_adjacent:
         qualification = Qualification.ADJACENT_TARGET
-        relevant_domains = set(title_positive) | set(description_positive)
+        relevant_domains = set(title_positive) | set(title_context) | set(description_context)
         primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in title_adjacent)
         reasons.append("explicit adjacent Data/AI title signal")
+    elif structural_title_match:
+        qualification = Qualification.CORE_TARGET
+        relevant_domains = set(title_context) | set(description_context)
+        primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in title_context)
+        reasons.append("technical role family + explicit Data/AI title context")
     elif description_promotes:
-        qualification = Qualification.CORE_TARGET if description_core else Qualification.ADJACENT_TARGET
-        relevant_domains = set(description_positive)
+        qualification = Qualification.CORE_TARGET
+        relevant_domains = set(description_context)
         primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in relevant_domains)
-        reasons.append("generic technical title is disambiguated by at least two explicit description signals")
+        reasons.append(
+            "generic technical/research title + at least two independent description domain signals"
+        )
     else:
         qualification = Qualification.UNCERTAIN
         primary = Domain.UNKNOWN
-        relevant_domains = set(description_positive)
+        relevant_domains = set(title_context) | set(description_context)
         reasons.append("no authoritative title signal and description evidence is insufficient")
 
     matched_domains = tuple(domain for domain in DOMAIN_PRECEDENCE if domain in relevant_domains)
     title_signals = tuple(
         signal for domain in DOMAIN_PRECEDENCE for signal in title_positive.get(domain, ())
+    ) + technical_roles + postdoc_roles + tuple(
+        signal for domain in DOMAIN_PRECEDENCE for signal in title_context.get(domain, ())
     )
     description_signals = tuple(
-        signal for domain in DOMAIN_PRECEDENCE for signal in description_positive.get(domain, ())
+        signal for domain in DOMAIN_PRECEDENCE for signal in description_context.get(domain, ())
     )
 
     flags: list[str] = []
@@ -157,10 +192,9 @@ def classify_opportunity(
     if not application_url and source_url:
         reasons.append("application URL is missing; source URL remains available (diagnostic only)")
 
-    looks_like_role = qualification is not Qualification.UNCERTAIN or bool(normalized_description)
     return Classification(
         qualification, primary, matched_domains,
-        _infer_opportunity_type(normalized_title, normalized_description, looks_like_role),
+        _infer_opportunity_type(normalized_title, normalized_description),
         _infer_employment_type(normalized_title, normalized_description), quality,
         tuple(flags), title_signals, description_signals, exclusions, tuple(reasons),
     )

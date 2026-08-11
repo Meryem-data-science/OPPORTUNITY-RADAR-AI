@@ -46,7 +46,7 @@ class ListingQuality(StrEnum):
     INSUFFICIENT_CONTENT = "INSUFFICIENT_CONTENT"
 
 
-# Earlier entries win primary-domain ties. A signal is a normalized phrase.
+# Earlier entries win primary-domain ties. Every signal is a normalized phrase.
 DOMAIN_PRECEDENCE = (
     Domain.GENAI_LLM,
     Domain.MLOPS_ML_PLATFORM,
@@ -58,6 +58,7 @@ DOMAIN_PRECEDENCE = (
     Domain.OTHER_DATA_AI,
 )
 
+# Complete role phrases remain the highest-confidence target evidence.
 CORE_SIGNALS = {
     Domain.DATA_ENGINEERING: (
         "data engineer", "analytics engineer", "data platform engineer",
@@ -83,27 +84,87 @@ CORE_SIGNALS = {
     ),
 }
 
-ADJACENT_SIGNALS = {
+# Structural title matching requires a role family plus domain context. This
+# prevents AI, agent, or platform product wording from being sufficient alone.
+TECHNICAL_ROLE_SIGNALS = (
+    "software engineer", "infrastructure software engineer", "infrastructure engineer",
+    "research engineer", "systems research engineer", "systems engineer",
+    "solutions engineer", "research scientist", "forward deployed engineer",
+    "forward deployed engineering", "agents engineer", "director of engineering", "fellow",
+)
+
+POSTDOC_ROLE_SIGNALS = ("postdoc", "post doc", "postdoctoral", "post doctoral")
+
+DOMAIN_CONTEXT_SIGNALS = {
+    Domain.DATA_ENGINEERING: (
+        "data pipeline", "data pipelines", "etl", "elt", "data warehouse",
+        "data lake", "lakehouse", "data platform", "data infrastructure",
+        "spark", "dbt", "airflow", "kafka", "data orchestration", "streaming pipelines",
+    ),
+    Domain.DATA_SCIENCE: (
+        "data science", "statistical modeling", "predictive modeling",
+        "experimentation", "statistical analysis",
+    ),
+    Domain.MACHINE_LEARNING_AI: (
+        "machine learning", "ml", "artificial intelligence", "deep learning",
+        "computer vision", "natural language processing", "nlp", "model training",
+        "model evaluation", "model development", "ai ml", "applied ai",
+        "enterprise ai", "physical ai",
+    ),
+    Domain.GENAI_LLM: (
+        "generative ai", "genai", "gen ai", "large language model",
+        "large language models", "llm", "llms", "retrieval augmented generation",
+        "rag", "foundation model", "foundation models", "ai agents",
+        "agentic systems", "frontier agents", "agents",
+    ),
+    Domain.MLOPS_ML_PLATFORM: (
+        "ml platform", "machine learning platform", "model serving", "serving platform",
+        "sandbox platform", "inference platform", "model deployment", "model monitoring",
+        "ml infrastructure", "machine learning infrastructure", "ai infrastructure",
+        "frontier ai infrastructure", "ml systems", "machine learning systems", "feature store",
+    ),
     Domain.BI_ANALYTICS: (
-        "data analyst", "bi analyst", "business intelligence developer",
-        "bi developer", "analytics analyst", "reporting analyst",
-        "decision analyst", "analyste de donnees", "developpeur bi",
-        "developpeuse bi",
+        "business intelligence", "power bi", "tableau", "dashboarding",
+        "analytics reporting", "data visualization",
     ),
     Domain.DATA_QUALITY_GOVERNANCE: (
-        "data quality engineer", "data quality analyst", "data governance analyst",
-        "data governance engineer", "data management analyst",
-        "data management engineer",
+        "data quality", "data governance", "data lineage", "metadata management",
     ),
 }
 
-EXCLUSION_SIGNALS = (
+ADJACENT_SIGNALS = {
+    Domain.BI_ANALYTICS: (
+        "data analyst", "bi analyst", "business intelligence developer", "bi developer",
+        "analytics analyst", "reporting analyst", "decision analyst",
+        "analyste de donnees", "developpeur bi", "developpeuse bi",
+    ),
+    Domain.DATA_QUALITY_GOVERNANCE: (
+        "data quality engineer", "data quality analyst", "data governance analyst",
+        "data governance engineer", "data management analyst", "data management engineer",
+    ),
+    Domain.OTHER_DATA_AI: (
+        "ai advisory consultant", "ai strategy consultant", "ai advisory principal",
+    ),
+}
+
+# These are title role families, never description keywords. They take
+# precedence even when a title also contains AI, GenAI, or data-platform terms.
+NON_TARGET_ROLE_SIGNALS = (
     "data center technician", "data centre technician", "data center operations manager",
-    "data centre operations manager", "account executive", "sales manager", "sales representative",
-    "business development", "recruiter", "talent acquisition", "human resources",
+    "data centre operations manager", "account executive", "sales manager",
+    "sales representative", "sales enablement", "business development", "recruiter",
+    "recruiting coordinator", "talent acquisition", "human resources", "hr manager",
     "marketing manager", "content manager", "customer success", "legal counsel",
-    "finance manager", "financial accountant", "accountant", "office administrator",
-    "operations manager", "store manager", "retail associate", "graphic designer",
+    "general counsel", "lead counsel", "legal fellow", "finance manager", "finance systems",
+    "finance fellow",
+    "financial accountant", "corporate accountant", "accountant", "payroll manager",
+    "office administrator", "operations associate", "operations program manager",
+    "operations manager", "product manager", "product management", "product strategy",
+    "program manager", "chief of staff", "communications manager",
+    "communications senior manager", "field marketing", "marketing and events",
+    "strategic projects lead", "technical writer", "executive assistant",
+    "support specialist", "support team lead", "proposals manager", "engagement manager",
+    "engagement management", "store manager", "retail associate", "graphic designer",
     "field technician", "hardware technician",
 )
 
@@ -118,7 +179,10 @@ GRADUATE_SIGNALS = (
     "graduate program", "graduate programme", "new graduate", "recent graduate program",
     "graduate scheme", "graduate data engineer",
 )
-APPRENTICESHIP_SIGNALS = ("apprenticeship", "apprentice", "alternance", "alternant", "alternante")
+APPRENTICESHIP_SIGNALS = (
+    "apprenticeship", "apprentice", "alternance", "alternant", "alternante",
+)
+DESCRIPTION_PFE_SIGNALS = ("projet de fin d etudes", "projet fin d etudes", "stage pfe")
 
 EMPLOYMENT_SIGNALS = {
     EmploymentType.FULL_TIME: ("full time", "temps plein"),
