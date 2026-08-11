@@ -302,6 +302,32 @@ def test_description_pfe_is_the_narrow_high_confidence_fallback() -> None:
     assert result.opportunity_type is OpportunityType.PFE
 
 
+@pytest.mark.parametrize(
+    ("title", "description", "expected"),
+    [
+        (
+            "Senior Data Engineer",
+            "Mentor students during their projet de fin d'études and PFE internships.",
+            OpportunityType.JOB,
+        ),
+        (
+            "Alternance Data Engineer",
+            "Projet de fin d'études opportunities are also available elsewhere.",
+            OpportunityType.APPRENTICESHIP,
+        ),
+        (
+            "Graduate Data Engineer",
+            "We also host stage PFE students.",
+            OpportunityType.GRADUATE,
+        ),
+    ],
+)
+def test_description_pfe_only_upgrades_an_explicit_internship_title(
+    title: str, description: str, expected: OpportunityType,
+) -> None:
+    assert classify_opportunity(title, description).opportunity_type is expected
+
+
 def test_generic_software_role_requires_independent_description_context() -> None:
     promoted = classify_opportunity(
         "Software Engineer",

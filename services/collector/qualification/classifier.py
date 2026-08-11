@@ -82,12 +82,12 @@ def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
     title_internship = _matches(title, INTERNSHIP_SIGNALS)
     title_graduate = _matches(title, GRADUATE_SIGNALS)
     description_pfe = _matches(description, DESCRIPTION_PFE_SIGNALS)
-    if title_pfe or description_pfe:
+    if title_pfe:
         return OpportunityType.PFE
     if title_apprenticeship:
         return OpportunityType.APPRENTICESHIP
     if title_internship:
-        return OpportunityType.INTERNSHIP
+        return OpportunityType.PFE if description_pfe else OpportunityType.INTERNSHIP
     if title_graduate:
         return OpportunityType.GRADUATE
     if not title or title in GENERIC_CAREERS_TITLES or title in GENERIC_JOBS_TITLES:
