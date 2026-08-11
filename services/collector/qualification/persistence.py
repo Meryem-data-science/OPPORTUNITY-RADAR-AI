@@ -7,6 +7,9 @@ import json
 import sqlite3
 from typing import Callable
 
+from services.collector.config import DatabaseBackend, Settings
+from services.collector.database.connection import connect_configured_database
+
 from .classifier import CLASSIFIER_VERSION, Classification, classify_opportunity
 
 
@@ -20,6 +23,19 @@ class PersistenceSummary:
     updated: int
     unchanged: int
     total: int
+
+
+def persist_configured_qualifications(settings: Settings) -> PersistenceSummary:
+    """Reconcile qualifications in the configured operational SQLite database."""
+    if settings.database_backend is DatabaseBackend.TURSO:
+        raise QualificationPersistenceError(
+            "Remote Turso qualification writes are disabled in this phase"
+        )
+    connection = connect_configured_database(settings)
+    try:
+        return persist_qualifications(connection)
+    finally:
+        connection.close()
 
 
 _INPUT_FIELDS = (
