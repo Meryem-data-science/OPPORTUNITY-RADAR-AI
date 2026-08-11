@@ -135,6 +135,26 @@ def _update_candidate(
     candidate: OpportunityCandidate,
     observed_at: str,
 ) -> None:
+    primary = connection.execute(
+        "SELECT source_url FROM opportunities WHERE id = ?", (opportunity_id,)
+    ).fetchone()
+    if primary is None:
+        raise OpportunityPersistenceError("persisted source references a missing opportunity")
+    if candidate.source_url != primary[0]:
+        connection.execute(
+            """UPDATE opportunities SET last_seen_at = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            (observed_at, opportunity_id),
+        )
+        connection.execute(
+            """UPDATE opportunity_sources SET
+                   application_url = COALESCE(?, application_url),
+                   canonical_url = COALESCE(?, canonical_url)
+               WHERE opportunity_id = ? AND source_id = ? AND source_url = ?""",
+            (candidate.application_url, candidate.canonical_url, opportunity_id,
+             candidate.source_id, candidate.source_url),
+        )
+        return
     connection.execute(
         """
         UPDATE opportunities SET
