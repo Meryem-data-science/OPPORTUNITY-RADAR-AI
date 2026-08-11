@@ -97,6 +97,14 @@ Same-source idempotence currently looks up `(source_id, source_url)` in
 so concurrent-write protection and multi-source deduplication remain future
 work.
 
+## Opportunity qualification persistence
+
+Migration `0004` adds `opportunity_qualifications`, a derived-data table with
+one current, versioned classifier result per opportunity. The explicit
+`persist_qualifications` CLI writes only to an existing, already-migrated local
+SQLite database when `--apply` is supplied; collection and automatic
+qualification remain separate operations.
+
 ## Not yet implemented
 
 - Live Web-to-Turso health validation (requires manual credentials outside Codex).

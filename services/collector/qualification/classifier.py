@@ -15,6 +15,9 @@ from .taxonomy import (
 )
 
 
+CLASSIFIER_VERSION = "qualification-rules-v1"
+
+
 @dataclass(frozen=True)
 class Classification:
     qualification: Qualification
