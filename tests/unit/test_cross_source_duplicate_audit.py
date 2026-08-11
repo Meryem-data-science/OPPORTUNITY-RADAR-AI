@@ -89,6 +89,71 @@ def test_generic_titles_at_different_organizations_are_not_strong() -> None:
     assert candidate is None or candidate.classification != STRONG_CANDIDATE
 
 
+def test_shared_company_canonical_url_does_not_make_different_jobs_strong() -> None:
+    shared_url = "https://company.invalid/careers"
+    candidate = compare_pair(
+        opportunity(
+            1,
+            "a",
+            canonical_title="Data Analyst",
+            canonical_url=shared_url,
+            source_canonical_urls=(shared_url,),
+        ),
+        opportunity(
+            2,
+            "b",
+            canonical_title="Senior Backend Engineer",
+            canonical_url=shared_url,
+            source_canonical_urls=(shared_url,),
+        ),
+    )
+    assert candidate is None or candidate.classification != STRONG_CANDIDATE
+
+
+def test_shared_generic_application_url_does_not_make_different_jobs_strong() -> None:
+    shared_url = "https://company.invalid/apply"
+    candidate = compare_pair(
+        opportunity(
+            1,
+            "a",
+            canonical_title="Data Analyst",
+            application_url=shared_url,
+            source_application_urls=(shared_url,),
+        ),
+        opportunity(
+            2,
+            "b",
+            canonical_title="Senior Backend Engineer",
+            application_url=shared_url,
+            source_application_urls=(shared_url,),
+        ),
+    )
+    assert candidate is None or candidate.classification != STRONG_CANDIDATE
+
+
+def test_shared_url_reinforces_existing_high_text_match_and_is_explained() -> None:
+    shared_url = "https://company.invalid/jobs/data-analyst-intern"
+    candidate = compare_pair(
+        opportunity(
+            1,
+            "a",
+            application_url=shared_url,
+            source_application_urls=(shared_url,),
+        ),
+        opportunity(
+            2,
+            "b",
+            canonical_title="Intern - Data Analyst",
+            application_url=shared_url,
+            source_application_urls=(shared_url,),
+        ),
+    )
+    assert candidate is not None
+    assert candidate.classification == STRONG_CANDIDATE
+    assert candidate.shared_application_url
+    assert "application URL is shared" in candidate.reasons
+
+
 def test_missing_location_is_unknown_not_incompatible() -> None:
     candidate = compare_pair(
         opportunity(1, "a", location=None), opportunity(2, "b")

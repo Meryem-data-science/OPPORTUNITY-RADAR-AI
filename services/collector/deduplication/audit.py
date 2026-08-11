@@ -178,9 +178,13 @@ def compare_pair(
     if title_exact and org_exact:
         classification = STRONG_CANDIDATE
         reasons.append("normalized title and organization are exact")
-    elif (canonical_urls or application_urls or source_urls) and organization_similarity >= thresholds.possible_organization_similarity:
+    elif (
+        (canonical_urls or application_urls or source_urls)
+        and title_similarity >= thresholds.possible_title_similarity
+        and organization_similarity >= thresholds.possible_organization_similarity
+    ):
         classification = STRONG_CANDIDATE
-        reasons.append("an exact URL is shared with a closely matching organization")
+        reasons.append("a shared URL reinforces strong title and organization matches")
     elif title_similarity >= thresholds.possible_title_similarity and organization_similarity >= thresholds.possible_organization_similarity:
         classification = POSSIBLE_CANDIDATE
         reasons.append("title and organization meet possible-candidate thresholds")
@@ -195,6 +199,12 @@ def compare_pair(
         reasons.append("location comparison is unknown")
     if date_signal == "NEARBY":
         reasons.append(f"relevant dates are within {thresholds.nearby_days} days")
+    if source_urls:
+        reasons.append("source URL is shared")
+    if application_urls:
+        reasons.append("application URL is shared")
+    if canonical_urls:
+        reasons.append("canonical URL is shared")
 
     return CandidatePair(
         left, right, title_exact, org_exact, title_similarity,
