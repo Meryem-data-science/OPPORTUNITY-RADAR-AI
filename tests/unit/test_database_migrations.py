@@ -13,6 +13,7 @@ EXPECTED_TABLES = {
     "sources",
     "opportunities",
     "opportunity_sources",
+    "deduplication_decisions",
 }
 
 
@@ -29,26 +30,26 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001"]
+    assert applied == ["0001", "0002"]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",)]
+    assert recorded == [("0001",), ("0002",)]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001"]
+        assert apply_migrations(connection) == ["0001", "0002"]
         assert apply_migrations(connection) == []
 
         counts = {
             table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("sources", "opportunities", "opportunity_sources")
+            for table in ("sources", "opportunities", "opportunity_sources", "deduplication_decisions")
         }
         migration_count = connection.execute(
             "SELECT COUNT(*) FROM schema_migrations"
         ).fetchone()[0]
 
-    assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0}
-    assert migration_count == 1
+    assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0}
+    assert migration_count == 2
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
@@ -104,3 +105,54 @@ def test_failed_migration_is_rolled_back_and_not_recorded(tmp_path) -> None:
 
     assert recorded == []
     assert partial_table == []
+
+
+def test_database_at_0001_receives_only_0002(tmp_path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    source = open("migrations/0001_opportunity_foundation.sql", encoding="utf-8").read()
+    (migrations / "0001_foundation.sql").write_text(source, encoding="utf-8")
+    with connect_database(tmp_path / "upgrade.db") as connection:
+        assert apply_migrations(connection, migrations) == ["0001"]
+        (migrations / "0002_registry.sql").write_text(
+            open("migrations/0002_deduplication_decisions.sql", encoding="utf-8").read(),
+            encoding="utf-8",
+        )
+        assert apply_migrations(connection, migrations) == ["0002"]
+        assert apply_migrations(connection, migrations) == []
+
+
+def test_decision_schema_enforces_pair_status_and_foreign_keys(tmp_path) -> None:
+    with connect_database(tmp_path / "constraints.db") as connection:
+        apply_migrations(connection)
+        connection.execute("INSERT INTO sources (id, type, status) VALUES ('a', 'test', 'active')")
+        for identifier in (1, 2):
+            connection.execute("""INSERT INTO opportunities
+                (id, canonical_title, organization, discovered_at, first_seen_at,
+                 last_seen_at, source_url, status)
+                VALUES (?, 'Role', 'Org', '2026-01-01', '2026-01-01',
+                        '2026-01-01', 'https://test.invalid', 'visible')""", (identifier,))
+
+        def insert(a, b, status="POSSIBLE_DUPLICATE"):
+            connection.execute("""INSERT INTO deduplication_decisions
+                (opportunity_a_id, opportunity_b_id, status, audit_classification,
+                 title_similarity, organization_similarity, title_normalized_exact,
+                 organization_normalized_exact, location_signal, shared_source_url,
+                 shared_application_url, shared_canonical_url, reasons_json,
+                 first_detected_at, last_detected_at)
+                VALUES (?, ?, ?, 'STRONG_CANDIDATE', 1, 1, 1, 1, 'EXACT', 0, 0, 0,
+                        '[]', '2026-01-01', '2026-01-01')""", (a, b, status))
+
+        insert(1, 2)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(1, 2)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(2, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(1, 1)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(1, 999)
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(1, 2, "INVALID")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM opportunities WHERE id = 1")
