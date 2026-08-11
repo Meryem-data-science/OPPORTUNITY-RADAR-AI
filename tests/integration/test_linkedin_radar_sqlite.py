@@ -11,7 +11,7 @@ def test_linkedin_email_to_radar_to_sqlite_is_idempotent(tmp_path):
     database = tmp_path / "linkedin-radar.db"
     connection = connect_database(database)
     try:
-        assert apply_migrations(connection) == ["0001"]
+        assert apply_migrations(connection) == ["0001", "0002"]
     finally:
         connection.close()
 

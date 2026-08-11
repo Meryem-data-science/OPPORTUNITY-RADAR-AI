@@ -10,7 +10,7 @@ def test_two_agent_runs_insert_then_update_real_sqlite(tmp_path):
     path = tmp_path / "radar.db"
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001"]
+        assert apply_migrations(connection) == ["0001", "0002"]
     finally:
         connection.close()
     source = SourceConfig("fake_greenhouse", "greenhouse", True, "Org", "fake", status="active")
