@@ -30,14 +30,14 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001", "0002"]
+    assert applied == ["0001", "0002", "0003"]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",), ("0002",)]
+    assert recorded == [("0001",), ("0002",), ("0003",)]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001", "0002"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003"]
         assert apply_migrations(connection) == []
 
         counts = {
@@ -49,7 +49,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         ).fetchone()[0]
 
     assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0}
-    assert migration_count == 2
+    assert migration_count == 3
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
@@ -119,6 +119,23 @@ def test_database_at_0001_receives_only_0002(tmp_path) -> None:
             encoding="utf-8",
         )
         assert apply_migrations(connection, migrations) == ["0002"]
+        assert apply_migrations(connection, migrations) == []
+
+
+def test_database_at_0002_receives_only_0003(tmp_path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    for name in ("0001_opportunity_foundation.sql", "0002_deduplication_decisions.sql"):
+        (migrations / name).write_text(
+            open(f"migrations/{name}", encoding="utf-8").read(), encoding="utf-8"
+        )
+    with connect_database(tmp_path / "upgrade-0002.db") as connection:
+        assert apply_migrations(connection, migrations) == ["0001", "0002"]
+        name = "0003_deduplication_merges.sql"
+        (migrations / name).write_text(
+            open(f"migrations/{name}", encoding="utf-8").read(), encoding="utf-8"
+        )
+        assert apply_migrations(connection, migrations) == ["0003"]
         assert apply_migrations(connection, migrations) == []
 
 
