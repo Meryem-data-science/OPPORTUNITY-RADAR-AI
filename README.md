@@ -1,153 +1,111 @@
 # Opportunity Radar AI
 
-Opportunity Radar AI is the foundation of a future platform for students and
-recent graduates in Data & AI to discover and manage real professional
-opportunities.
+Opportunity Radar AI is a locally operated opportunity-collection and review
+prototype for Data & AI roles. Phase 2 implements a complete local path from
+three real sources, through SQLite persistence and deterministic qualification,
+to a read-only FastAPI API and a server-rendered Next.js interface.
 
-This repository currently contains only:
+Implemented now:
 
-- an importable, executable Python collector service shell;
-- a local SQLite migration runner for schema validation;
-- structured JSON logging for the Python service;
-- validated runtime configuration loaded from environment variables;
-- SQLite/Turso connection selection with a read-only database healthcheck;
-- shared transactional migrations and read-only schema verification;
-- a minimal Next.js application with a real, read-only Turso health page;
-- a first read-only Scale AI Greenhouse collector and dry-run CLI;
-- transactional persistence of bounded collector batches to operational SQLite;
-- configuration contracts and initial documentation;
-- foundation tests and continuous-integration checks.
+- `RadarAgent` collection from the public Scale AI and Artefact Greenhouse
+  boards and from LinkedIn Job Alert emails read with Gmail's read-only API;
+- transactional opportunity persistence in local SQLite;
+- read-only cross-source duplicate auditing, a human decision registry, and
+  explicit, transactional, reversible merging of confirmed duplicates;
+- persistent, versioned Data/AI qualification (`qualification-rules-v1`);
+- `GET /api/opportunities` and a Next.js home page that displays its results and
+  links to each original offer.
 
-Multi-source deduplication, matching, Gmail integration, application tracking,
-recommendations, NLP, and machine learning are **Planned**. They are not
-implemented in this phase.
+This is a locally validated prototype, not a production deployment. It does not
+schedule continuous collection, scrape authenticated LinkedIn pages, apply to
+jobs, rank opportunities for a person, compare a CV, implement a Digital Twin,
+or provide ML recommendations. Qualification is deterministic categorization,
+not personalized matching.
 
 ## Repository structure
 
-- `services/collector/`: Python service and reserved domain packages.
+- `services/collector/`: collectors, orchestration, persistence, qualification,
+  and duplicate-review tools.
+- `services/api/`: read-only FastAPI opportunity API.
 - `apps/web/`: Next.js web application.
-- `config/`: empty YAML configuration contracts for future catalogues.
-- `tests/`: Python foundation tests and reserved test suites.
-- `migrations/`: versioned SQL migrations for the database schema.
-- `docs/`: current state and architectural direction.
-- `scripts/`: reserved for future operational scripts.
+- `config/sources.yaml`: operational source catalogue.
+- `migrations/`: ordered SQLite/Foundation SQL migrations.
+- `tests/`: unit, integration, and opt-in live tests.
+- `docs/`: architecture, database, source, and operating details.
 
-## Prerequisites
+## Prerequisites and installation
 
 - Python 3.12
 - Node.js 20 or later
 - npm 10 or later
-
-Docker is not required.
-
-## Python setup
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
-pytest
+
+cd apps/web
+npm install
+cd ../..
 ```
 
-Run the service shell from the repository root:
+Docker is not required.
 
-```bash
-python -m services.collector.main
-```
+## Phase 2 local quick start
 
-Dry-run the public Scale AI Greenhouse source without database persistence:
-
-```bash
-python -m services.collector.cli.collect_source \
-  --source scale_ai_greenhouse --limit 3 --dry-run
-```
-
-Configure the persistent operational Phase 1 SQLite database and apply its
-existing migration before the first write:
+From the repository root, select the persistent operational SQLite database and
+keep the Gmail OAuth files in an ignored local directory:
 
 ```bash
 export DATABASE_BACKEND=sqlite
 export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
-python -m services.collector.cli.migrate_configured --apply
-```
+export GMAIL_OAUTH_CLIENT_SECRET_PATH=.secrets/gmail-oauth-client.json
+export GMAIL_TOKEN_PATH=.secrets/gmail-token.json
 
-Then persist at most one collected opportunity:
-
-```bash
-python -m services.collector.cli.persist_source \
-  --source scale_ai_greenhouse --limit 1 --apply
-python -m services.collector.cli.list_opportunities --limit 5
-```
-
-The normal automatic orchestration command processes every enabled, active
-configured source in one run:
-
-```bash
-export DATABASE_BACKEND=sqlite
-export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
 python -m services.collector.cli.migrate_configured --apply
 python -m services.collector.cli.run_radar --once --apply
-python -m services.collector.cli.list_opportunities --limit 5
 ```
 
-`run_radar` is the operational orchestration entry point. `persist_source`
-remains available as a bounded manual/debug tool. Neither command applies
-migrations implicitly.
+The normal `RadarAgent` run processes every enabled, active source independently
+and then performs one global qualification reconciliation. A source failure does
+not undo successful source transactions; qualification has its own result in the
+run summary. Use `--source linkedin_job_alert_email` only to debug that one
+source. Migrations are always explicit.
 
-The listing is read-only and shows persisted offers without printing their full
-descriptions. Current idempotence uses `(source_id, source_url)` for repeat
-observations from the same source; it is not multi-source deduplication. Remote
-Turso opportunity writes are disabled in Phase 1; its Foundation read-only
-health experiment remains available.
-
-Apply the SQL migrations to an explicit local SQLite database used for
-development or validation:
+Start the read-only API in one terminal:
 
 ```bash
-python -m services.collector.cli.migrate --database /tmp/opportunity-radar.db
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m uvicorn services.api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Turso / libSQL read-only connectivity and the Foundation migration were
-validated manually outside Codex. Remote opportunity writes are disabled for
-Phase 1; the operational opportunity database is configured SQLite.
-
-Check the configured database connection with a read-only `SELECT 1`:
-
-```bash
-python -m services.collector.cli.db_health
-```
-
-Apply migrations to the configured backend and verify the foundation schema:
-
-```bash
-python -m services.collector.cli.migrate_configured --apply
-python -m services.collector.cli.db_schema
-```
-
-Remote Turso migration additionally requires the explicit
-`RUN_TURSO_LIVE_MIGRATION=1` safeguard and has not been run from Codex Cloud.
-
-## Web setup
+Start the web application in another:
 
 ```bash
 cd apps/web
-npm install
-npm run dev
+OPPORTUNITY_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
-The development server is available at <http://localhost:3000> by default.
-The server-rendered `/health` page and JSON `GET /api/health` endpoint perform
-read-only connectivity, Foundation schema, and migration-version checks. Set
-`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the server process before
-starting Next.js, then validate the API manually:
+Open <http://localhost:3000>. The API reads existing SQLite data; it neither
+collects opportunities nor applies migrations. Detailed setup, duplicate review,
+security guidance, and debug commands are in [docs/operations.md](docs/operations.md).
 
-```bash
-TURSO_DATABASE_URL=... TURSO_AUTH_TOKEN=... npm run dev
-curl http://localhost:3000/api/health
-```
+## Database boundary
 
-Never commit either credential. They are server-only variables; no
-`NEXT_PUBLIC_` database setting is used. Use `npm test`, `npm run lint`, and
-`npm run build` for frontend validation. Live Web-to-Turso validation is still
-required outside Codex.
+Persistent local SQLite is the operational Phase 2 database. Turso/libSQL is
+retained only as a Foundation/read-only experiment where applicable. Remote
+Turso opportunity, qualification, decision, and merge writes are not part of the
+operational path and must not be enabled or treated as a prerequisite.
+
+## Phase 2 validation snapshot
+
+The disposable end-to-end validation run on **2026-08-12** observed three real
+active sources, 373 opportunities and 373 persisted qualifications. All 373
+classifier comparisons matched; the duplicate audit examined 37,711 cross-source
+pairs and retained no candidates in that dataset. FastAPI-to-Next.js rendering
+and original-offer links were exercised successfully. At that snapshot the
+Python suite reported 392 passed and 10 skipped, the web suite reported 16
+passed, and web lint and production build succeeded. Live sources change, so
+373 is not an expected or hard-coded production count.

@@ -1,33 +1,51 @@
 # Opportunity sources
 
-Phase 2.1 configures two real public sources: `scale_ai_greenhouse` (board token
-`scaleai`) and `artefact_greenhouse` (board token `artefact`). Both use the same
-generic `GreenhouseCollector`, which reads the configured public Greenhouse
-board API. These public GET requests require no authentication.
+The operational catalogue in `config/sources.yaml` currently has three enabled,
+active sources:
 
-The collector preserves official `absolute_url` values and produces typed
-`OpportunityCandidate` objects. The read-only CLI leaves them in memory; the
-separate persistence CLI writes a bounded batch with explicit authorization.
-Configured category, country, frequency, and status metadata are stored on the
-source, while `organization` and public `board_token` remain collector-only
-configuration.
+| Source ID | Type | Intake |
+| --- | --- | --- |
+| `scale_ai_greenhouse` | Greenhouse | Public Scale AI board (`scaleai`) |
+| `artefact_greenhouse` | Greenhouse | Public Artefact board (`artefact`) |
+| `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:linkedin.com`, at most 50 messages |
 
-Repeat observations use `(source_id, source_url)` as their current identity and
-refresh the existing opportunity without changing its first-seen timestamp.
-This is same-source idempotence only, not multi-source deduplication.
+## Greenhouse
 
-LinkedIn Job Alerts are an operational pipeline source with id
-`linkedin_job_alert_email`. They are collected **via alert email**, never by
-scraping or opening a LinkedIn job page. The source uses official Gmail API
-`list`/`get` reads under the single `gmail.readonly` scope. Its non-secret
-catalogue settings are query `newer_than:7d from:linkedin.com` and message limit
-`50`; the subject is not required.
+Both organizations use the generic `GreenhouseCollector`. It performs an
+unauthenticated GET against the public Greenhouse Job Board API, requests full
+content, validates the response, and normalizes the official ID, title,
+organization, location, description, publication time, and `absolute_url` into
+an `OpportunityCandidate`. Public board tokens are collector configuration, not
+credentials.
 
-The dedicated collector parses transient `GmailMessageCandidate` values, then
-deduplicates repeated numeric LinkedIn job IDs across all messages in the run.
-Only `OpportunityCandidate` values with canonical
-`https://www.linkedin.com/jobs/view/<JOB_ID>` URLs reach RadarAgent and the
-existing persistence layer. Email bodies, message/thread IDs, snippets, and
-tracking query strings are not persisted. The generic API and web UI therefore
-handle persisted LinkedIn opportunities like all other opportunities. There is
-no automatic application, LinkedIn page scraping, or scheduled execution.
+## LinkedIn Job Alert email
+
+LinkedIn opportunities come from Job Alert emails through the official Gmail
+API. The implementation does **not** authenticate to, open, or scrape LinkedIn
+pages. Local user OAuth must grant exactly this one scope:
+
+```text
+https://www.googleapis.com/auth/gmail.readonly
+```
+
+The Gmail client exposes bounded `list` and `get` reads only; it does not mutate
+labels, messages, or read state. The collector parses transient normalized MIME
+content and deduplicates repeated numeric LinkedIn job IDs across messages in
+one run. It emits canonical URLs of the form
+`https://www.linkedin.com/jobs/view/<JOB_ID>`.
+
+Only normalized opportunity fields reach persistence. Email bodies, snippets,
+Gmail message/thread IDs, and LinkedIn email tracking parameters are not stored
+as opportunity data. OAuth client and token files stay local, should live in an
+ignored directory such as `.secrets/`, and must never be committed.
+
+## Identity and duplicate review
+
+Repeated observations from one source refresh the occurrence identified by
+`(source_id, source_url)`. Separately, Phase 2 can audit pairs whose source sets
+differ and persist explicit reviewer decisions. No cross-source opportunity is
+merged solely because an audit considers it similar; see
+[database.md](database.md) for the confirmed-merge and rollback safeguards.
+
+Source `frequency_minutes` values are catalogue metadata only. No scheduled or
+continuous production runner is implemented.
