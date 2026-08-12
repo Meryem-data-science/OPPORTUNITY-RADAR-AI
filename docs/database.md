@@ -1,111 +1,99 @@
 # Database
 
-Phase 1 operational storage is a persistent local **SQLite** database. The
-earlier Turso/libSQL Foundation read-only experiment remains available, but
-remote opportunity writes are disabled and do not block product development.
+## Operational database
 
-Runtime settings select the `sqlite` or `turso` connection backend.
+Persistent local **SQLite** is the operational Phase 2 database. Connections
+enable foreign-key enforcement, and collection, qualification, duplicate
+decision, and merge writes are local SQLite operations.
 
-## SQLite
-
-The standard-library SQLite connection remains available for local development,
-tests, migrations, and schema validation. Foreign keys are enabled on every
-connection.
-
-## Turso
-
-Read-only Python health and schema operations may still use SQL over HTTP.
-Remote Turso opportunity writes are disabled in Phase 1 after failed live
-transport validations. Operational Phase 1 opportunity storage is the
-configured persistent local SQLite database.
-
-The Next.js server uses `@libsql/client` with `TURSO_DATABASE_URL` and
-`TURSO_AUTH_TOKEN`. Its health service performs only `SELECT` statements and
-does not expose either setting to browser code or health responses.
+Turso/libSQL remains only a Foundation/read-only connectivity and schema
+experiment where applicable. Although runtime Foundation utilities retain
+backend selection, remote Turso opportunity writes are disabled and are not an
+operational Phase 2 path. Do not enable or recommend Turso writes.
 
 ## Migrations
 
-SQLite and Turso use the same ordered files in `migrations/`. The runner splits
-each SQL script into complete statements, starts a transaction, executes the
-statements, records the version in `schema_migrations`, and commits. An error
-causes a rollback and the version is not recorded.
+Ordered SQL files are applied transactionally and recorded in
+`schema_migrations`. A failed file is rolled back and its version is not
+recorded. The migrations currently present are:
 
-The configured migration command is:
+1. `0001_opportunity_foundation.sql`: `sources`, `opportunities`, and
+   `opportunity_sources` plus indexes;
+2. `0002_deduplication_decisions.sql`: the explicit duplicate-review registry;
+3. `0003_deduplication_merges.sql`: merge history and source-movement history;
+4. `0004_opportunity_qualifications.sql`: persistent versioned qualification.
+
+Apply every pending migration to configured local SQLite explicitly:
 
 ```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
 python -m services.collector.cli.migrate_configured --apply
 ```
 
-SQLite requires only `--apply`. Turso additionally requires
-`RUN_TURSO_LIVE_MIGRATION=1`; without both explicit permissions, no connection
-is opened and no remote write is attempted. Real Turso migration application
-has not been performed in Codex Cloud and must be validated manually in WSL.
-
-## Healthcheck
-
-The Web application exposes a server-rendered `/health` page and
-`GET /api/health`. Both use the same read-only service to verify `SELECT 1`,
-the four Foundation tables in `sqlite_schema`, and migration version `0001`.
-The API returns HTTP 200 only when every check passes, and HTTP 503 with a
-sanitized response otherwise.
-
-Run the configured backend healthcheck with:
-
-```bash
-python -m services.collector.cli.db_health
-```
-
-It opens the selected connection, executes only `SELECT 1`, verifies the
-result, and closes the connection. It creates no schema and writes no data.
-
-After migrations, verify the four foundation tables without writing data:
-
-```bash
-python -m services.collector.cli.db_schema
-```
-
-## Currently implemented
-
-- Ordered, transactional SQL migrations tracked in `schema_migrations`.
-- A shared SQLite/Turso migration runner and configured migration CLI.
-- Read-only foundation schema verification.
-- SQLite and Turso connection selection with explicit dependency errors.
-- A local SQLite connection with foreign-key enforcement.
-- Foundation tables: `sources`, `opportunities`, and `opportunity_sources`.
-- A migration CLI requiring an explicit local database path:
-
-  ```bash
-  python -m services.collector.cli.migrate --database /tmp/opportunity-radar.db
-  ```
-
-The foundation migration creates schema only and inserts no sources or
-opportunities.
+Neither `RadarAgent` nor the FastAPI application applies migrations implicitly.
+`python -m services.collector.cli.db_health` performs a read-only `SELECT 1`, and
+`python -m services.collector.cli.db_schema` performs read-only Foundation
+schema verification.
 
 ## Opportunity persistence
 
-The collector persistence layer uses the shared connection protocol and one
-transaction per batch. It upserts configured source metadata, then creates or
-refreshes opportunities and their source occurrences. New currently visible
-offers use status `visible`, `is_active = 1`, and one UTC observation timestamp
-for `discovered_at`, `first_seen_at`, and `last_seen_at`; unknown enrichment and
-score columns remain `NULL`. Existing occurrences preserve discovery and first
-seen timestamps and preserve optional values when a later response supplies
-`NULL`.
+Each collected source batch is one transaction: source metadata is upserted,
+then opportunities and their `opportunity_sources` observations are created or
+refreshed. Repeat observations use `(source_id, source_url)` to find the existing
+source occurrence, preserve discovery/first-seen timestamps, and refresh
+last-seen data. A later `NULL` does not erase an existing optional value.
 
-Same-source idempotence currently looks up `(source_id, source_url)` in
-`opportunity_sources`. Migration `0001` has no unique constraint for that pair,
-so concurrent-write protection and multi-source deduplication remain future
-work.
+That same-source behavior is not the whole deduplication design. Cross-source
+duplicate handling is deliberately review-driven:
 
-## Opportunity qualification persistence
+- `audit_duplicates` examines pairs read-only and classifies retained candidates;
+- a review scan may stage eligible candidates in `deduplication_decisions`, and a
+  reviewer explicitly records `CONFIRMED_DUPLICATE` or `NOT_DUPLICATE`;
+- candidate classifications are not `AUTO_MERGE` decisions, and similarity alone
+  never changes opportunity rows;
+- merge requires a confirmed pair and an explicit canonical opportunity;
+- one SQLite transaction moves the merged row's `opportunity_sources` to the
+  canonical opportunity, fills permitted missing canonical fields, records the
+  before/after state and moves, and marks the other opportunity inactive with
+  status `merged_duplicate` rather than deleting it;
+- rollback is transactional and restores recorded state/source ownership only
+  when LIFO and data-drift safety checks pass.
 
-Migration `0004` adds `opportunity_qualifications`, a derived-data table with
-one current, versioned classifier result per opportunity. The explicit
-`persist_qualifications` CLI writes only to an existing, already-migrated local
-SQLite database when `--apply` is supplied; collection and automatic
-qualification remain separate operations.
+The retained tombstone, decision, merge, and movement rows make applied changes
+auditable and reversible instead of destructive.
 
-## Not yet implemented
+## Qualification persistence
 
-- Live Web-to-Turso health validation (requires manual credentials outside Codex).
-- Matching or an application-facing database API.
+Migration `0004` stores one current derived result per eligible opportunity,
+including explanatory signals, classifier version, a SHA-256 input fingerprint,
+and timestamps. The current classifier version is `qualification-rules-v1`.
+Reconciliation leaves a row unchanged when both its input fingerprint and
+classifier version match; otherwise it inserts or updates atomically. Merged,
+inactive duplicates are excluded. `RadarAgent` runs this global reconciliation
+once after its source loop; the standalone CLI remains available for audit or
+maintenance.
+
+Closed taxonomy values are:
+
+- **Qualification:** `CORE_TARGET`, `ADJACENT_TARGET`, `OUT_OF_SCOPE`,
+  `UNCERTAIN`.
+- **Primary domain:** `DATA_ENGINEERING`, `DATA_SCIENCE`,
+  `MACHINE_LEARNING_AI`, `GENAI_LLM`, `MLOPS_ML_PLATFORM`, `BI_ANALYTICS`,
+  `DATA_QUALITY_GOVERNANCE`, `OTHER_DATA_AI`, `NON_TARGET`, `UNKNOWN`.
+- **Opportunity type:** `PFE`, `INTERNSHIP`, `GRADUATE`, `APPRENTICESHIP`,
+  `JOB`, `UNKNOWN`.
+- **Employment type:** `FULL_TIME`, `PART_TIME`, `CONTRACT`, `TEMPORARY`,
+  `UNKNOWN`.
+- **Listing quality:** `NORMAL_LISTING`, `POSSIBLE_NON_JOB_PAGE`,
+  `INSUFFICIENT_CONTENT`.
+
+These classifications do not implement personalized matching or ranking.
+
+## Read-only application API
+
+FastAPI exposes `GET /api/opportunities` with a bounded `limit` (1–100). It
+returns the count and summary fields for visible, active rows, including
+`original_url` and `description_length`; it does not expose the stored full
+description. The service opens existing configured storage read-only for the
+request and does not collect data or alter schema.
