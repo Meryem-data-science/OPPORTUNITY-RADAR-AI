@@ -136,9 +136,10 @@ write path is introduced: the operational database stays local SQLite.
   filled with zeros, and an unfinished attempt left `RUNNING` rather than given
   an invented ending.
 - The user/profile root records ownership, not knowledge. It stores who owns
-  a Digital Twin and the stable profile that owns nothing yet; it asserts no
-  fact about the person, and a profile is never invented for an unknown
-  address.
+  a Digital Twin and the stable profile that owns nothing yet, and it asserts
+  no fact about the person. Reading an unknown address returns an explicit
+  absence and never invents a profile; a user and its profile are created only
+  by the explicit `ensure_user_profile` operation behind `init-profile`.
 - Source health reads that evidence back without adding to it. It derives one
   entry per known source at read time, and the only judgement it makes is the
   repeated-zero anomaly described below. Deciding that a `RUNNING` row is stale

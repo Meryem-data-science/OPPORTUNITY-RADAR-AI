@@ -16,6 +16,8 @@ EXPECTED_TABLES = {
     "deduplication_decisions",
     "opportunity_qualifications",
     "source_runs",
+    "users",
+    "profiles",
 }
 
 
