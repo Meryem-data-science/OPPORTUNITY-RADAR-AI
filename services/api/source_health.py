@@ -66,7 +66,11 @@ class SourceHealthBackendError(RuntimeError):
 
     Source health is derived from the operational SQLite database. Asked for any
     other backend it refuses locally instead of reaching for a remote one, so no
-    credential is requested and no network call is made.
+    remote connector is called and no network call is made. Validated settings
+    are still loaded first, as for any request, so a configured remote URL and
+    token are read from the environment like any other setting; source health
+    never uses them to open or contact anything, and they reach neither the
+    response nor the logs.
     """
 
 
@@ -96,7 +100,8 @@ def _readonly_connection(settings: Settings) -> DatabaseConnection:
     """Open the operational SQLite database read-only, or refuse locally.
 
     Any non-SQLite backend is rejected here, before any connection is attempted,
-    so no remote connector is called and no token is read for this request.
+    so no remote connector is called and whatever remote credentials the settings
+    carry are never used.
     """
     if settings.database_backend is not DatabaseBackend.SQLITE:
         raise SourceHealthBackendError(

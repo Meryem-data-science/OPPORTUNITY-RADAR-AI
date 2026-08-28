@@ -273,4 +273,7 @@ or a row: a missing or not-yet-migrated path answers `503` and stays missing
 rather than becoming an empty database. Source health is defined over the
 operational SQLite database only; any other configured backend is refused
 locally, before any connection is attempted, so no remote connector is called
-and no credential is read for the request.
+and no network call is made. Validated settings are still loaded first, as for
+any request, so a configured remote URL and token are read from the environment
+like any other setting; source health never uses them to open or contact
+anything, and they reach neither the response nor the logs.
