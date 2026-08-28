@@ -21,7 +21,8 @@ recorded. The migrations currently present are:
    `opportunity_sources` plus indexes;
 2. `0002_deduplication_decisions.sql`: the explicit duplicate-review registry;
 3. `0003_deduplication_merges.sql`: merge history and source-movement history;
-4. `0004_opportunity_qualifications.sql`: persistent versioned qualification.
+4. `0004_opportunity_qualifications.sql`: persistent versioned qualification;
+5. `0005_source_runs.sql`: persistent history of attempted source runs.
 
 Apply every pending migration to configured local SQLite explicitly:
 
@@ -89,6 +90,102 @@ Closed taxonomy values are:
   `INSUFFICIENT_CONTENT`.
 
 These classifications do not implement personalized matching or ranking.
+
+## Source run history
+
+Migration `0005` stores one row per attempted execution of a source by
+`RadarAgent`. The row is written **before** collection begins and the same row
+is closed when the attempt ends, so one attempt is always exactly one row and an
+attempt that started always leaves proof that it started.
+
+The status taxonomy is the closed set that lifecycle needs:
+
+| status | `finished_at` | `error_type` | `error_message` |
+| --- | --- | --- | --- |
+| `RUNNING` | `NULL` | `NULL` | `NULL` |
+| `SUCCESS` | set | `NULL` | `NULL` |
+| `FAILED` | set | set | set, or `NULL` if redaction empties it |
+
+- **`RUNNING`**: the attempt was persisted and began; no ending has been
+  recorded yet.
+- **`SUCCESS`**: collection and opportunity persistence both completed.
+- **`FAILED`**: the attempt raised; `error_type` names the exception and
+  `error_message` carries a redacted, diagnosable message.
+
+The schema enforces exactly those three shapes, and the persistence layer allows
+only `RUNNING → SUCCESS` and `RUNNING → FAILED`. A row that already reached a
+terminal state can never be finalized again.
+
+A crash or an interruption therefore leaves a `RUNNING` row rather than no row
+at all — that surviving row is the evidence, and `finished_at` is never invented
+for an attempt that did not end. Deciding when a `RUNNING` row has been left
+behind too long is a separate concern and is deliberately not implemented here.
+
+`NULL` means "this run did not know it" and is never replaced by a zero, which
+would read later as a real observation:
+
+- `items_found` is the number of candidates the collector actually returned. It
+  is `NULL` when collection itself failed, and a real count when collection
+  succeeded and persistence then failed.
+- `new_items` is the number of opportunities actually created. It is only known
+  on a successful run.
+- `relevant_items` is always `NULL` today: qualification runs once globally
+  after the whole source loop, so per-source relevance is genuinely unknown at
+  the moment a run is recorded.
+- `pages_checked`, `http_status`, and `parser_version` are always `NULL` today:
+  no current collector paginates, exposes a reliable transport status to the
+  agent, or carries a versioned parser. A collector may opt in by exposing
+  `run_metrics()`; only known, well-typed keys are stored.
+
+`error_message` is redacted before it is stored. Credential assignments,
+authorization schemes, URL user-info, JWTs, and long opaque blobs are removed
+and the message is length-bounded. No token, credential, or OAuth secret is
+persisted or logged.
+
+### `sources.last_run_at`
+
+`sources.last_run_at` is the `finished_at` of that source's most recent
+**completed attempt**, successful or failed. It is not "last successful run" and
+not "last time data changed".
+
+Starting a run does **not** touch it: an attempt that has only started has not
+finished, and an interrupted `RUNNING` row must never look like a completed run.
+Only finalization stamps it, in the same transaction that closes the run, so the
+stamp can never disagree with the run that produced it. A source that has never
+completed an attempt keeps `NULL`.
+
+Starting a run registers a never-persisted source so the run's foreign key
+resolves; a source that already exists is left entirely untouched.
+
+### Transaction boundaries
+
+Starting and finalizing are each one transaction, both separate from the
+opportunity batch they describe. A later source failing never rolls back an
+earlier committed one, and a source that fails still records the fact that it
+failed.
+
+The two ends are treated differently on purpose:
+
+- if the **start** cannot be persisted, the source is not collected at all —
+  running it would produce work that could never be audited. It is reported as a
+  failed source for that run and the remaining sources continue;
+- if the **finalization** fails after the row exists, the failure is logged and
+  the row is left `RUNNING`. It is never deleted, and never rewritten into a
+  state the attempt did not reach, so the unfinalized attempt stays visible.
+
+### Deleting a source
+
+`source_runs.source_id` uses `ON DELETE RESTRICT`, like the other audit tables.
+A source that carries run history cannot be deleted, so its audit trail cannot
+be discarded as a side effect of removing the source.
+
+### Not yet implemented
+
+`source_runs` is history only. Anomaly detection is **not** implemented: nothing
+scores runs, nothing detects a source returning zero items across consecutive
+runs, nothing flags a `RUNNING` row as stale, nothing raises an alert, and there
+is no Source Health page. This table is the evidence a later phase would need,
+not that phase.
 
 ## Read-only application API
 
