@@ -89,6 +89,8 @@ class _ReadOnlyConnection:
             return _Cursor()
         if "COUNT(*)" in statement:
             return _Cursor(row=(1,))
+        if "opportunity_sources" in statement:
+            return _Cursor(rows=[])
         return _Cursor(
             rows=[
                 (

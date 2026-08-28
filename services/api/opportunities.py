@@ -1,9 +1,14 @@
 """Read-only opportunity listing service and response models."""
 
-from typing import Any
+from typing import Any, Sequence
 
 from pydantic import BaseModel
 
+from services.api.link_priority import (
+    SourceObservation,
+    preferred_link,
+    select_original_url,
+)
 from services.collector.config import DatabaseBackend, load_settings
 from services.collector.database.connection import connect_configured_database
 from services.collector.logging_config import get_logger
@@ -42,8 +47,44 @@ class OpportunityReadError(RuntimeError):
     """Raised when configured opportunity data cannot be read safely."""
 
 
-def _to_response(row: Any) -> OpportunityResponse:
-    original_url = row[5] or row[4] or row[6]
+def _read_observations(
+    connection: Any, opportunity_ids: Sequence[int]
+) -> dict[int, list[SourceObservation]]:
+    """Read every persisted observation of these opportunities, read-only."""
+    if not opportunity_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in opportunity_ids)
+    rows = connection.execute(
+        f"""
+        SELECT opportunity_sources.opportunity_id, opportunity_sources.id,
+               sources.type, opportunity_sources.application_url,
+               opportunity_sources.source_url, opportunity_sources.canonical_url
+        FROM opportunity_sources
+        JOIN sources ON sources.id = opportunity_sources.source_id
+        WHERE opportunity_sources.opportunity_id IN ({placeholders})
+        ORDER BY opportunity_sources.opportunity_id, opportunity_sources.id
+        """,
+        tuple(opportunity_ids),
+    ).fetchall()
+    observations: dict[int, list[SourceObservation]] = {}
+    for row in rows:
+        observations.setdefault(int(row[0]), []).append(
+            SourceObservation(
+                observation_id=int(row[1]),
+                source_type=row[2],
+                application_url=row[3],
+                source_url=row[4],
+                canonical_url=row[5],
+            )
+        )
+    return observations
+
+
+def _to_response(
+    row: Any, observations: Sequence[SourceObservation]
+) -> OpportunityResponse:
+    fallback = preferred_link(row[5], row[4], row[6]) or row[4]
+    original_url = select_original_url(observations, fallback=fallback)
     return OpportunityResponse(
         id=row[0],
         canonical_title=row[1],
@@ -84,7 +125,12 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
             """,
             ("visible", 1, limit),
         ).fetchall()
-        items = [_to_response(row) for row in rows]
+        observations = _read_observations(
+            connection, [int(row[0]) for row in rows]
+        )
+        items = [
+            _to_response(row, observations.get(int(row[0]), ())) for row in rows
+        ]
         response = OpportunityListResponse(
             items=items, returned=len(items), total=int(total_row[0])
         )
