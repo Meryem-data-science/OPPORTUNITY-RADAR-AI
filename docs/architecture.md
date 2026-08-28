@@ -68,6 +68,19 @@ home page calls that API server-side using `OPPORTUNITY_API_BASE_URL` (default
 `http://127.0.0.1:8000`) and renders real opportunity summaries and original
 source links.
 
+The `original_url` each item exposes is chosen at read time from every
+`opportunity_sources` observation of that opportunity, joined to `sources`, not
+from the canonical row alone. `services/api/link_priority.py` holds that policy
+in one place: a `greenhouse` observation is an official career page / ATS link
+and is preferred over a `gmail_linkedin_alert` job-board observation, so the
+canonical row a reviewer kept for deduplication never decides which link the
+user is shown. Within one observation the order is `application_url`, then
+`source_url`, then `canonical_url`; between several official observations the
+tie-break is the most preferred official source type, then the smallest
+`opportunity_sources.id`, which is the earliest recorded observation. With no
+official observation, the previous canonical-row fallback is unchanged. The
+selection reads only; it moves, rewrites, and deletes nothing.
+
 `GET /api/source-health` is read-only more strictly still. It opens the
 operational SQLite database through a `mode=ro` URI and also sets `query_only`,
 so the request cannot create the database file it was pointed at, let alone a
