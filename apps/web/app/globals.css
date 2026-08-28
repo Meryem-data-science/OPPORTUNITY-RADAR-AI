@@ -50,6 +50,13 @@ h1 {
   line-height: 1.6;
 }
 
+.hero-links {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .health-link {
   flex: none;
   padding: 0.7rem 0.9rem;
@@ -122,9 +129,72 @@ h1 {
 .status-panel h2 { margin: 0 0 0.6rem; font-size: 1.25rem; }
 .status-panel p { margin: 0; color: #617068; }
 
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid #dce4e0;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.source-health-table {
+  width: 100%;
+  min-width: 900px;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.source-health-table th, .source-health-table td {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid #edf1ef;
+  text-align: left;
+  vertical-align: top;
+}
+
+.source-health-table thead th {
+  color: #405049;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.source-health-table tbody th { font-weight: 700; }
+.source-health-table tbody tr:last-child th,
+.source-health-table tbody tr:last-child td { border-bottom: 0; }
+.source-health-table tbody tr[data-anomaly="true"] { background: #fdf6ec; }
+
+.unknown-value { color: #8a958f; font-style: italic; }
+.no-error { color: #7a8780; }
+
+.error-cell { display: flex; flex-direction: column; gap: 0.5rem; }
+.error-cell p { margin: 0; line-height: 1.45; }
+.anomaly { color: #8a5300; }
+.run-error { color: #8a2f2f; }
+
+.anomaly-badge {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: #f3d9a8;
+  color: #6b3f00;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.error-type {
+  display: inline-block;
+  margin-right: 0.4rem;
+  font-weight: 700;
+}
+
 @media (max-width: 720px) {
   .page-shell { width: min(100% - 2rem, 1120px); padding-top: 2rem; }
   .hero, .section-heading, .card-footer { align-items: flex-start; flex-direction: column; }
   .opportunity-grid { grid-template-columns: 1fr; }
   .opportunity-card { min-height: 220px; }
+  .source-health-table { font-size: 0.85rem; }
+  .source-health-table th, .source-health-table td { padding: 0.7rem; }
 }

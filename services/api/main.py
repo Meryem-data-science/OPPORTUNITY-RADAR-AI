@@ -10,9 +10,15 @@ from services.api.opportunities import (
     PUBLIC_DATABASE_ERROR,
     read_opportunities,
 )
+from services.api.source_health import (
+    PUBLIC_SOURCE_HEALTH_ERROR,
+    SourceHealthListResponse,
+    SourceHealthReadError,
+    read_source_health,
+)
 
 
-app = FastAPI(title="Opportunity Radar API", version="1.4.0")
+app = FastAPI(title="Opportunity Radar API", version="1.5.0")
 
 
 @app.get("/api/opportunities", response_model=OpportunityListResponse)
@@ -26,4 +32,16 @@ def list_opportunities(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_DATABASE_ERROR,
+        ) from None
+
+
+@app.get("/api/source-health", response_model=SourceHealthListResponse)
+def list_source_health() -> SourceHealthListResponse:
+    """Return one deterministic health entry per known source, read-only."""
+    try:
+        return read_source_health()
+    except SourceHealthReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_SOURCE_HEALTH_ERROR,
         ) from None

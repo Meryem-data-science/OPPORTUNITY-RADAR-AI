@@ -13,14 +13,22 @@ Implemented now:
 - read-only cross-source duplicate auditing, a human decision registry, and
   explicit, transactional, reversible merging of confirmed duplicates;
 - persistent, versioned Data/AI qualification (`qualification-rules-v1`);
+- persistent source run history, and a read-only, deterministic source health
+  read model over it that flags three consecutive successful runs finding zero
+  items;
 - `GET /api/opportunities` and a Next.js home page that displays its results and
-  links to each original offer.
+  links to each original offer;
+- `GET /api/source-health` and a Next.js `/source-health` page showing each
+  source's Enabled flag, last run, status, items found, new items, relevant
+  items, and errors.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, compare a CV, implement a Digital Twin,
 or provide ML recommendations. Qualification is deterministic categorization,
-not personalized matching.
+not personalized matching. Source health is a read model and a page: it sends no
+notification, retries nothing, reschedules nothing, and judges no `RUNNING` run
+stale.
 
 ## Repository structure
 
@@ -88,9 +96,11 @@ cd apps/web
 OPPORTUNITY_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
-Open <http://localhost:3000>. The API reads existing SQLite data; it neither
-collects opportunities nor applies migrations. Detailed setup, duplicate review,
-security guidance, and debug commands are in [docs/operations.md](docs/operations.md).
+Open <http://localhost:3000> for the opportunities, and
+<http://localhost:3000/source-health> for the state of each source. The API
+reads existing SQLite data; it neither collects opportunities nor applies
+migrations. Detailed setup, duplicate review, security guidance, and debug
+commands are in [docs/operations.md](docs/operations.md).
 
 ## Database boundary
 

@@ -31,8 +31,10 @@ public Greenhouse boards ─┐
 Gmail LinkedIn alerts ───┘                         ├─ qualification
                                                    └─ duplicate review tools
 
-local SQLite ─ read-only FastAPI GET /api/opportunities
-             └─────────────────────────────── Next.js home page
+local SQLite ─┬─ read-only FastAPI GET /api/opportunities
+              │                     └─ Next.js home page
+              └─ read-only FastAPI GET /api/source-health
+                                      └─ Next.js /source-health page
 ```
 
 The two Greenhouse sources use public board JSON. The LinkedIn source reads Job
@@ -40,11 +42,37 @@ Alert messages via the Gmail API and parses canonical LinkedIn job URLs without
 opening or scraping LinkedIn pages. Gmail access is restricted to
 `https://www.googleapis.com/auth/gmail.readonly`.
 
+## Source health
+
+`services/collector/database/source_health.py` derives, for each known source,
+its `enabled` flag and the status and metrics of its most recent `source_runs`
+row. It writes nothing, adds no table, and creates no row for a source that has
+never run.
+
+The status shown for a source stays the real status of that latest run —
+`RUNNING`, `SUCCESS`, `FAILED`, or nothing at all for a source that never ran.
+No second health taxonomy is layered on top of it. The one derived signal is
+`zero_result_streak`, with the `anomaly_code` and `anomaly_message` it produces
+past its threshold, and it is exposed beside the run status rather than folded
+into it. The rule and its `NULL` handling are specified in
+[database.md](database.md).
+
+Both the streak and the anomaly are decided once, in the backend. The
+`/source-health` page presents that verdict and never recomputes it.
+
+## Read-only application API
+
 The FastAPI service reads visible, active opportunities from the existing
 configured SQLite database. It performs no collection or migration. The Next.js
 home page calls that API server-side using `OPPORTUNITY_API_BASE_URL` (default
 `http://127.0.0.1:8000`) and renders real opportunity summaries and original
 source links.
+
+`GET /api/source-health` is read-only in the same way. It opens SQLite in
+`query_only` mode, merges the validated `config/sources.yaml` catalogue with the
+sources the database already holds so a configured source that has never run is
+still listed, and returns one entry per source. The `/source-health` page
+renders those entries as a table.
 
 ## Data-processing boundaries
 
@@ -61,16 +89,21 @@ source links.
 - Source run history is recorded evidence, not a judgement. A run row states
   what one attempt observed, with unknown metrics left `NULL` rather than
   filled with zeros, and an unfinished attempt left `RUNNING` rather than given
-  an invented ending; deciding that a run is abnormal — a stale `RUNNING` row
-  included — is a separate concern that does not exist yet.
+  an invented ending.
+- Source health reads that evidence back without adding to it. It derives one
+  entry per known source at read time, and the only judgement it makes is the
+  repeated-zero anomaly described below. Deciding that a `RUNNING` row is stale
+  remains a separate concern that does not exist yet.
 
 ## Outside Phase 2
 
 There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, Digital Twin, or ML recommendation model.
-There is also no source-health anomaly engine, no consecutive-zero alerting, no
-stale-`RUNNING` detection, no notification path, and no Source Health page;
-`source_runs` records history and nothing reads it back to raise an alert. Those possible later capabilities must
-not be inferred from the implemented qualification taxonomy, the recorded run
-history, or reserved package names.
+Source health detects exactly one anomaly, read-only, and does nothing with it
+beyond returning and displaying it. There is no alerting of any kind: no email,
+no web push, no notification path, no scheduler and no GitHub Actions schedule,
+no stale-`RUNNING` detection, no automatic retry, and no self-healing collector.
+Those possible later capabilities must not be inferred from the implemented
+qualification taxonomy, the recorded run history, the source health read model,
+or reserved package names.

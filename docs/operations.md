@@ -134,6 +134,19 @@ curl "http://127.0.0.1:8000/api/opportunities?limit=5"
 `original_url`, not the stored full description. It accepts limits from 1 to
 100.
 
+Inspect source health, which takes no parameter:
+
+```bash
+curl "http://127.0.0.1:8000/api/source-health"
+```
+
+`GET /api/source-health` returns one entry per known source — those configured
+in `config/sources.yaml` and those already persisted — with the status and
+metrics of each source's most recent run, plus `zero_result_streak`,
+`anomaly_code` and `anomaly_message`. Unknown values come back as `null`, never
+as zero, and a source that has never run comes back with a `null` status rather
+than an invented one. The read is strictly read-only.
+
 In another terminal, start Next.js:
 
 ```bash
@@ -145,6 +158,15 @@ OPPORTUNITY_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 `http://127.0.0.1:8000`. The home page fetches the API without caching, displays
 the real results, and uses “Voir l’offre originale” links to open their
 `original_url`. This is a local integration, not a production deployment.
+
+`/source-health` renders the source health entries as a table of Source,
+Activée, Dernière exécution, Statut, Éléments trouvés, Nouveaux éléments,
+Éléments pertinents and Erreurs. It displays the backend's own verdict: the
+streak and the anomaly are decided by the API, and the page never recomputes
+them. A `FAILED` run shows its `error_type` and its already-redacted
+`error_message`; a repeated-zero anomaly shows the deterministic message the
+backend produced. Reading the page changes nothing and alerts no one — no email,
+no push, no scheduled check.
 
 The separate Next.js `/health` and `GET /api/health` surfaces retain the earlier
 read-only Turso/Foundation experiment. They are not the opportunity-data path

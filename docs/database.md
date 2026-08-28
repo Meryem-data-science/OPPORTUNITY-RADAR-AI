@@ -179,13 +179,70 @@ The two ends are treated differently on purpose:
 A source that carries run history cannot be deleted, so its audit trail cannot
 be discarded as a side effect of removing the source.
 
+## Source health
+
+Source health is **derived at read time** from `sources` and `source_runs`. It
+adds no migration, no `anomalies` table, and no persisted health column: nothing
+about it is stored, so the answer cannot drift from the runs it describes.
+`services/collector/database/source_health.py` holds the read model; nothing in
+it writes, and reading health for a source the database has never seen creates
+no row for it.
+
+Each entry carries `source_id`, `enabled`, `last_run_at`, the latest run's
+`status`, `items_found`, `new_items`, `relevant_items`, `error_type` and
+`error_message`, plus the derived `zero_result_streak`, `anomaly_code` and
+`anomaly_message`.
+
+`last_run_at` is the `started_at` of the most recent run, so it always describes
+the very run whose status and metrics are shown beside it. For a source that has
+never run it is `NULL`: `sources.last_run_at` is deliberately not substituted,
+because a stamp with no run behind it would claim an execution the model cannot
+show.
+
+A source is listed when the validated `config/sources.yaml` catalogue configures
+it or when the database already holds it, once either way. The configured
+`enabled` flag wins over the persisted one, because a source row is registered
+at that source's first run and is never rewritten afterwards.
+
+### The consecutive-zero rule
+
+Exactly one anomaly is detected: **three consecutive successful runs that each
+found exactly zero items**, counted from the newest run backwards.
+
+- the constant is `ZERO_RESULT_STREAK_THRESHOLD = 3`;
+- `items_found IS NULL` means *unknown* and is never read as a zero;
+- a `FAILED` run is not a successful zero;
+- a `RUNNING` run has not finished and is not a completed zero;
+- a `SUCCESS` with `items_found > 0` ends the streak;
+- a run whose `items_found` is unknown ends the streak;
+- any run that is not a zero-result success ends the streak, so
+  `zero_result_streak` is 0 whenever the latest run failed, is still running, or
+  did not measure `items_found`.
+
+Past the threshold the entry carries `anomaly_code = "ZERO_RESULTS_STREAK"` and
+a deterministic `anomaly_message` built from a fixed template and the observed
+count. No language model, no heuristic phrasing, no severity beyond that count.
+
+This distinguishes the two situations the run history would otherwise conflate:
+a source that genuinely has nothing new (one or two zero runs, no anomaly) and a
+collector or parser that may have broken (three or more, anomaly).
+
+### Deliberately not a state machine
+
+The truth about a source stays the real `source_runs.status` of its latest run —
+`RUNNING`, `SUCCESS` or `FAILED`, or nothing at all. No `HEALTHY`/`DEGRADED`/
+`CRITICAL` taxonomy is introduced, persisted, or derived. The anomaly is exposed
+beside the status, never folded into it.
+
+`relevant_items` stays `NULL` for every current collector and is reported as
+unknown rather than invented.
+
 ### Not yet implemented
 
-`source_runs` is history only. Anomaly detection is **not** implemented: nothing
-scores runs, nothing detects a source returning zero items across consecutive
-runs, nothing flags a `RUNNING` row as stale, nothing raises an alert, and there
-is no Source Health page. This table is the evidence a later phase would need,
-not that phase.
+No alert is raised from any of this: nothing emails, notifies, retries, reruns,
+or repairs a source, nothing is scheduled, and no `RUNNING` row is judged stale
+against any age threshold — no such threshold is defined. Source health is a
+read model and a page, not an alerting system.
 
 ## Read-only application API
 
@@ -194,3 +251,9 @@ returns the count and summary fields for visible, active rows, including
 `original_url` and `description_length`; it does not expose the stored full
 description. The service opens existing configured storage read-only for the
 request and does not collect data or alter schema.
+
+`GET /api/source-health` takes no parameter and returns
+`{"items": [...], "returned": n}` with one entry per known source, ordered by
+`source_id`. Unknown values are serialized as `null` and never as zero. The
+service opens SQLite in `query_only` mode; it writes nothing, migrates nothing,
+and contacts nothing external.
