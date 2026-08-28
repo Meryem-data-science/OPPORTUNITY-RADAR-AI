@@ -49,3 +49,17 @@ merged solely because an audit considers it similar; see
 
 Source `frequency_minutes` values are catalogue metadata only. No scheduled or
 continuous production runner is implemented.
+
+## Watching a source
+
+Every attempt a source makes is recorded in `source_runs`, and
+`GET /api/source-health` with the `/source-health` page reads that history back
+read-only. A source configured here but never yet executed is listed with its
+`enabled` flag and no run, rather than being hidden or given a fabricated one.
+
+Three consecutive successful runs that each found exactly zero items raise a
+deterministic anomaly on that source, which separates "nothing new was
+published" from "this collector or parser may be broken". An unknown
+`items_found` is never counted as a zero. The rule is specified in
+[database.md](database.md). Nothing is alerted, retried, or rescheduled as a
+result.

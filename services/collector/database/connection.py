@@ -3,6 +3,7 @@
 import sqlite3
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from services.collector.config import DatabaseBackend, Settings
 from services.collector.database.turso import DatabaseConnectionError, connect_turso
@@ -26,6 +27,27 @@ def connect_database(database: str | Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path)
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def connect_readonly_database(database: str | Path) -> sqlite3.Connection:
+    """Open an **existing** SQLite database read-only, creating nothing.
+
+    ``connect_database`` is a read-write entry point: it creates the parent
+    directory and lets SQLite create the file. That is right for collection and
+    migration, and wrong for a request that only reads — a query against a
+    mistyped or not-yet-migrated path would leave an empty database behind that
+    later reads as a real, empty one.
+
+    This helper opens the same file through a ``mode=ro`` SQLite URI instead, so
+    the file must already exist and the connection cannot create, migrate, or
+    write anything. A missing database raises ``sqlite3.OperationalError``
+    rather than being brought into existence.
+    """
+    database_path = Path(database)
+    # quote leaves "/" intact and escapes the characters SQLite would otherwise
+    # read as URI syntax, so an odd but legal path stays the path it is.
+    uri = f"file:{quote(str(database_path.resolve()))}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
 
 
 def connect_configured_database(settings: Settings) -> DatabaseConnection:

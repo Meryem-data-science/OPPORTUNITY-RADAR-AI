@@ -33,9 +33,14 @@ export default async function Home() {
             Les opportunités affichées proviennent des sources collectées par le radar.
           </p>
         </div>
-        <Link className="health-link" href="/health">
-          État du système
-        </Link>
+        <nav className="hero-links" aria-label="Pages de supervision">
+          <Link className="health-link" href="/source-health">
+            État des sources
+          </Link>
+          <Link className="health-link" href="/health">
+            État du système
+          </Link>
+        </nav>
       </header>
 
       {opportunities === null ? (
