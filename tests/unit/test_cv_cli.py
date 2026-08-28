@@ -6,6 +6,10 @@ The point of most of these tests is that this content never reaches stdout.
 
 import hashlib
 import json
+import os
+import stat
+
+import pytest
 
 from services.digital_twin.cv import cli
 
@@ -112,14 +116,38 @@ def test_json_out_never_overwrites_an_existing_file(
     tmp_path, synthetic_pdf, capsys
 ) -> None:
     path = _cv(tmp_path, synthetic_pdf)
-    destination = tmp_path / "detailed.json"
-    destination.write_text("keep me", encoding="utf-8")
+    marker = "detailed-TEST-ONLY"
+    destination = tmp_path / f"{marker}.json"
+    original = b"keep me byte for byte \x00\xff"
+    destination.write_bytes(original)
 
     exit_code = cli.main(["parse", str(path), "--json-out", str(destination)])
+    output = capsys.readouterr().out
 
     assert exit_code == 1
-    assert "FileExistsError" in capsys.readouterr().out
-    assert destination.read_text(encoding="utf-8") == "keep me"
+    assert "FileExistsError" in output
+    assert cli.EXISTING_JSON_OUT_ERROR in output
+    # Exclusive creation: the existing file is not truncated, not appended to,
+    # and not touched at all.
+    assert destination.read_bytes() == original
+    # The refusal names the rule, never the path the operator gave.
+    assert marker not in output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_the_detailed_export_is_readable_by_its_owner_only(
+    tmp_path, synthetic_pdf, capsys
+) -> None:
+    path = _cv(tmp_path, synthetic_pdf)
+    destination = tmp_path / "detailed.json"
+
+    assert cli.main(["parse", str(path), "--json-out", str(destination)]) == 0
+    capsys.readouterr()
+
+    mode = stat.S_IMODE(destination.stat().st_mode)
+    assert mode == cli.DETAILED_FILE_MODE == 0o600
+    # No group and no other bit, whatever the umask of the shell that ran it.
+    assert mode & (stat.S_IRWXG | stat.S_IRWXO) == 0
 
 
 def test_no_file_is_written_when_json_out_is_not_given(

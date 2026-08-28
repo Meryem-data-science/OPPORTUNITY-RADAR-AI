@@ -1,11 +1,13 @@
 """Conservative text normalization for extracted CV pages.
 
-Normalization only removes artefacts a PDF text layer creates: line-ending
-conventions, exotic space characters, the padding a layout engine leaves
-between glyph runs, and stretches of blank lines. It never rewrites the CV. No
-line is reordered, translated, reworded, spell-checked, de-hyphenated or
-dropped, and the separation into lines — the only structure the parser has to
-work with — is preserved exactly.
+Normalization touches exactly one closed list of artefacts a PDF text layer
+creates: line-ending conventions, space-like and zero-width characters, the
+padding a layout engine leaves between glyph runs, and stretches of blank
+lines. Those are the only characters it removes or replaces: every character
+that carries visible text comes through untouched, and nothing is reordered,
+translated, reworded, spell-checked or de-hyphenated. The separation into
+lines, the only structure the parser has to work with, survives: a line holding
+text is never merged into another, never split, and never emptied.
 """
 
 from __future__ import annotations

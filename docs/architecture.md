@@ -132,15 +132,24 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
   `DetectedSection`, `ParserWarning`, `ParsedCv`, and the `PARSER_VERSION`
-  (`cv-parser-v1`) every result carries.
+  (`cv-parser-v1`) every result carries. `pypdf` is pinned to an exact
+  version in `pyproject.toml` because the extracted text depends on it:
+  changing that pin, or any extraction, normalization or segmentation rule, is
+  a change of the rules `cv-parser-v1` names, so it requires deciding whether
+  `PARSER_VERSION` must move with it. Without that, two different outputs could
+  claim the same provenance.
 - `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
   file, and raises one explicit error per failure mode: missing path, path that
   is not a file, unreadable PDF, encrypted PDF, and a PDF with no extractable
   text at all.
-- `normalization.py` only removes text-layer artefacts — line-ending
-  conventions, exotic spaces, glyph-run padding, runs of blank lines. It
-  reorders, rewords, translates and drops nothing, and the line structure is
-  preserved because it is all the parser has to segment on.
+- `normalization.py` normalizes exactly one closed list of text-layer
+  artefacts and nothing else: line-ending conventions become `\n`, space-like
+  and zero-width characters are folded away, runs of spaces inside a line and
+  runs of blank lines each collapse to one, and leading and trailing blank
+  lines go. Those are the only characters it touches: every character carrying
+  visible text comes through untouched, and nothing is reordered, reworded,
+  translated, spell-checked or de-hyphenated. The separation into lines
+  survives because it is all the parser has to segment on.
 - `sections.py` splits the document on headings whose folded form is listed
   verbatim in one French/English lexicon. There is no model, no scoring and no
   fuzzy match, so any classification can be checked against that table.

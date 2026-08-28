@@ -13,6 +13,9 @@ from enum import StrEnum
 
 #: Bumped whenever extraction, normalization or heading rules change, so a
 #: stored result can always be compared against the rules that produced it.
+#: The text layer is read by `pypdf`, so its pinned version in `pyproject.toml`
+#: is part of those rules: changing that pin requires deciding whether the
+#: extracted text can differ and therefore whether this version must move too.
 PARSER_VERSION = "cv-parser-v1"
 
 
