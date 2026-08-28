@@ -22,7 +22,9 @@ recorded. The migrations currently present are:
 2. `0002_deduplication_decisions.sql`: the explicit duplicate-review registry;
 3. `0003_deduplication_merges.sql`: merge history and source-movement history;
 4. `0004_opportunity_qualifications.sql`: persistent versioned qualification;
-5. `0005_source_runs.sql`: persistent history of attempted source runs.
+5. `0005_source_runs.sql`: persistent history of attempted source runs;
+6. `0006_user_profile_foundation.sql`: the `users` identity root and the
+   `profiles` Digital Twin root.
 
 Apply every pending migration to configured local SQLite explicitly:
 
@@ -90,6 +92,70 @@ Closed taxonomy values are:
   `INSUFFICIENT_CONTENT`.
 
 These classifications do not implement personalized matching or ranking.
+
+## User and profile root
+
+Migration `0006` adds the two roots Phase 3 builds on, and nothing else.
+
+`users` is the identity and ownership root:
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `email` | `NOT NULL`, `UNIQUE COLLATE NOCASE`, and a `CHECK` that refuses an empty or untrimmed value |
+| `created_at`, `updated_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`profiles` is the stable Digital Twin root:
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `user_id` | `NOT NULL UNIQUE`, `FOREIGN KEY → users(id) ON DELETE CASCADE` |
+| `created_at`, `updated_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`UNIQUE(user_id)` is what makes **one user own at most one profile** a database
+rule rather than an application convention, and the cascade expresses that a
+profile exists only for as long as its owner does. The migration creates the
+two tables and inserts no row: an identity is created by an explicit local
+command, never by applying a migration.
+
+`profiles` deliberately carries no factual column. A headline, a location, an
+education level, a skill level, mobility, or availability are facts with a
+provenance, and provenance is the subject of `profile_facts` in a later slice.
+Putting them here would make the root itself the place where facts are
+overwritten without any record of where they came from.
+
+`services/digital_twin/repository.py` owns the two operations on these tables.
+`ensure_user_profile` normalizes the address, then creates or returns the pair
+inside one explicit transaction, so a first call creates one user and one
+profile and any later call with the same address — in any case, with any
+surrounding spaces — returns the same ids and creates nothing. Any failure
+rolls the whole transaction back, so a user is never left without the profile it
+owns. `get_user_profile_by_email` reads the pair back and answers an explicit
+absence for an unknown address; a user row without its profile is refused as a
+broken invariant rather than answered with an invented profile.
+
+Address normalization lives in `services/digital_twin/identity.py`: trim, then
+lowercase the whole address, with conservative rejection of a manifestly
+malformed value rather than an RFC 5322 validator. `COLLATE NOCASE` on the
+column keeps the same guarantee at the database level.
+
+Initialise or read the local profile without putting an address in the shell
+history:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.digital_twin.cli init-profile   # prompts, no echo
+python -m services.digital_twin.cli show-profile
+```
+
+The command prints `user_id` and `profile_id` only, never the address, and
+never logs it. A non-SQLite backend is refused locally, before any connection.
+
+Not implemented by this slice: CV parsing, `cv_versions`, `profile_facts`,
+skills, education, experiences, projects, certifications, languages,
+preferences, eligibility, matching, scoring, and any profile HTTP API.
 
 ## Source run history
 

@@ -31,7 +31,7 @@ def source(source_id: str, *, enabled: bool = True) -> SourceConfig:
 def connection(tmp_path):
     handle = connect_database(tmp_path / "source-health-integration.db")
     try:
-        assert apply_migrations(handle) == ["0001", "0002", "0003", "0004", "0005"]
+        assert apply_migrations(handle) == ["0001", "0002", "0003", "0004", "0005", "0006"]
         yield handle
     finally:
         handle.close()

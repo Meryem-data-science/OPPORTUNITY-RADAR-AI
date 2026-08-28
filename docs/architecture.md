@@ -90,6 +90,35 @@ the request makes no network call at all. It merges the validated
 a configured source that has never run is still listed, and returns one entry
 per source. The `/source-health` page renders those entries as a table.
 
+## Digital Twin root
+
+`services/digital_twin/` is a separate business package: the collector keeps
+owning the SQLite infrastructure — the same connection factory and the same
+migration runner are reused, not replaced — while the Digital Twin owns its own
+domain. Nothing about it lives in `services/collector/models/`.
+
+Phase 3.1A persists two rows and no more:
+
+```text
+users  (identity / ownership root)
+  1 ─── 1
+profiles  (stable Digital Twin root)
+```
+
+`users` is who owns data; `profiles` is the stable anchor every later Digital
+Twin table will point at. One user owns at most one profile, enforced by
+`UNIQUE(user_id)` in the schema. There is no ORM: a small typed layer
+(`models.py`, `identity.py`, `repository.py`) talks to SQLite directly, as the
+rest of the project does, and a local CLI initialises or reads the real profile
+without echoing or logging the address.
+
+This slice implements the root only. CV parsing, `cv_versions`, `profile_facts`,
+skills, education, experiences, projects, certifications, languages,
+preferences, eligibility, matching, scoring, personal notifications, a personal
+frontend, and any public profile API are **not** implemented — neither Phase 3.1
+as a whole nor Phase 3 is complete. No LLM, no external API, and no remote
+write path is introduced: the operational database stays local SQLite.
+
 ## Data-processing boundaries
 
 - Opportunity persistence provides repeat-observation idempotence for a source.
@@ -106,6 +135,11 @@ per source. The `/source-health` page renders those entries as a table.
   what one attempt observed, with unknown metrics left `NULL` rather than
   filled with zeros, and an unfinished attempt left `RUNNING` rather than given
   an invented ending.
+- The user/profile root records ownership, not knowledge. It stores who owns
+  a Digital Twin and the stable profile that owns nothing yet, and it asserts
+  no fact about the person. Reading an unknown address returns an explicit
+  absence and never invents a profile; a user and its profile are created only
+  by the explicit `ensure_user_profile` operation behind `init-profile`.
 - Source health reads that evidence back without adding to it. It derives one
   entry per known source at read time, and the only judgement it makes is the
   repeated-zero anomaly described below. Deciding that a `RUNNING` row is stale
@@ -115,7 +149,9 @@ per source. The `/source-health` page renders those entries as a table.
 
 There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
-CV-to-offer recommendation engine, Digital Twin, or ML recommendation model.
+CV-to-offer recommendation engine, or ML recommendation model. The Digital
+Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A,
+described above; no profile content, matching, or scoring is derived from it.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,
 no web push, no notification path, no scheduler and no GitHub Actions schedule,
