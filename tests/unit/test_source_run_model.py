@@ -7,8 +7,10 @@ from services.collector.models.source_run import (
     MAX_ERROR_MESSAGE_LENGTH,
     NO_METRICS,
     REDACTED,
+    RUNNING,
     SOURCE_RUN_STATUSES,
     SUCCESS,
+    TERMINAL_STATUSES,
     SourceRun,
     SourceRunMetrics,
     metrics_reported_by,
@@ -17,8 +19,9 @@ from services.collector.models.source_run import (
 
 
 def test_status_taxonomy_is_closed_and_minimal():
-    assert SOURCE_RUN_STATUSES == {"SUCCESS", "FAILED"}
-    assert (SUCCESS, FAILED) == ("SUCCESS", "FAILED")
+    assert SOURCE_RUN_STATUSES == {"RUNNING", "SUCCESS", "FAILED"}
+    assert TERMINAL_STATUSES == {"SUCCESS", "FAILED"}
+    assert (RUNNING, SUCCESS, FAILED) == ("RUNNING", "SUCCESS", "FAILED")
 
 
 def test_unknown_metrics_stay_none_rather_than_zero():
@@ -126,6 +129,20 @@ def test_reported_metrics_are_filtered_and_never_break_the_run():
     assert metrics.new_items is None
     assert metrics.relevant_items is None
 
+
+@pytest.mark.parametrize("reported", [200, 404, 599, 100])
+def test_reported_http_status_inside_the_stored_domain_is_kept(reported):
+    assert SourceRunMetrics.from_reported({"http_status": reported}).http_status == reported
+
+
+@pytest.mark.parametrize(
+    "reported", [0, 42, 99, 600, 999, -1, True, False, "200", 200.0, None]
+)
+def test_reported_http_status_outside_the_stored_domain_is_dropped(reported):
+    # SQLite only accepts 100..599, so anything else must be dropped in Python
+    # rather than turned into a row the database would reject.
+    assert SourceRunMetrics.from_reported({"http_status": reported}).http_status is None
+
     class BrokenCollector:
         def run_metrics(self):
             raise RuntimeError("metrics unavailable")
@@ -139,14 +156,26 @@ def test_reported_metrics_are_filtered_and_never_break_the_run():
 
 
 def test_source_run_reports_its_own_outcome():
-    row = SourceRun(
+    succeeded = SourceRun(
         1, "source_a", "2026-01-01T00:00:00.000000+00:00",
         "2026-01-01T00:00:01.000000+00:00", SUCCESS,
         None, 2, 1, None, None, None, None, None,
     )
-    assert row.succeeded
-    assert not SourceRun(
+    assert succeeded.succeeded
+    assert succeeded.finished
+
+    failed = SourceRun(
         2, "source_b", "2026-01-01T00:00:00.000000+00:00",
         "2026-01-01T00:00:01.000000+00:00", FAILED,
         None, None, None, None, None, "RuntimeError", "boom", None,
-    ).succeeded
+    )
+    assert not failed.succeeded
+    assert failed.finished
+
+    running = SourceRun(
+        3, "source_c", "2026-01-01T00:00:00.000000+00:00", None, RUNNING,
+        None, None, None, None, None, None, None, None,
+    )
+    assert not running.succeeded
+    assert not running.finished
+    assert running.finished_at is None

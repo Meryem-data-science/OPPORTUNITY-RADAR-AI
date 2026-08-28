@@ -233,25 +233,56 @@ def test_database_at_0004_receives_source_run_history_and_constraints(tmp_path) 
                 values,
             )
 
+        # The three shapes the lifecycle actually produces.
+        insert(status="RUNNING", finished_at=None)
         insert(items_found=5, new_items=2)
         insert(status="FAILED", error_type="RuntimeError", error_message="board unreachable")
+        insert(status="FAILED", error_type="RuntimeError", error_message=None)
 
-        # An unknown source, an open taxonomy, an unexplained failure, an error on a
-        # success, a backwards window, negative counts, an impossible HTTP status, and
-        # more new items than items found are all rejected by the schema itself.
+        # A run in flight that claims an end, an end that carries an error, a failure
+        # without an end or without a type, a success carrying an error, an unknown
+        # source, an open taxonomy, a backwards window, negative counts, an impossible
+        # HTTP status, and more new items than items found are all rejected outright.
         for invalid in (
-            {"source_id": "missing"},
             {"status": "RUNNING"},
+            {"status": "RUNNING", "finished_at": None, "error_type": "RuntimeError"},
+            {"status": "RUNNING", "finished_at": None, "error_message": "leaked"},
+            {"status": "FAILED", "finished_at": None, "error_type": "RuntimeError"},
             {"status": "FAILED"},
             {"error_type": "RuntimeError"},
+            {"error_message": "unexpected"},
+            {"finished_at": None},
+            {"source_id": "missing"},
+            {"status": "CANCELLED"},
             {"finished_at": "2025-12-31T00:00:00.000000+00:00"},
             {"items_found": -1},
             {"pages_checked": -1},
             {"http_status": 42},
+            {"http_status": 600},
             {"items_found": 1, "new_items": 2},
         ):
             with pytest.raises(sqlite3.IntegrityError):
                 insert(**invalid)
+
+
+def test_a_source_carrying_run_history_cannot_be_deleted(tmp_path) -> None:
+    with connect_database(tmp_path / "restrict.db") as connection:
+        apply_migrations(connection)
+        connection.execute(
+            "INSERT INTO sources (id, type, status) VALUES ('board', 'greenhouse', 'active')"
+        )
+        connection.execute(
+            """INSERT INTO source_runs (source_id, started_at, finished_at, status)
+               VALUES ('board', '2026-01-01T00:00:00+00:00',
+                       '2026-01-01T00:00:05+00:00', 'SUCCESS')"""
+        )
+
+        # Deleting the source would silently take its whole audit trail with it.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM sources WHERE id = 'board'")
+
+        assert connection.execute("SELECT COUNT(*) FROM source_runs").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM sources").fetchone() == (1,)
 
 
 def test_failed_source_run_migration_leaves_no_table_and_no_version(tmp_path) -> None:

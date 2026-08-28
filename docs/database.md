@@ -94,19 +94,32 @@ These classifications do not implement personalized matching or ranking.
 ## Source run history
 
 Migration `0005` stores one row per attempted execution of a source by
-`RadarAgent`. `started_at` is captured before collection begins and
-`finished_at` when the attempt ends, so a row describes a real, closed window.
+`RadarAgent`. The row is written **before** collection begins and the same row
+is closed when the attempt ends, so one attempt is always exactly one row and an
+attempt that started always leaves proof that it started.
 
-The status taxonomy is deliberately the closed pair the history needs:
+The status taxonomy is the closed set that lifecycle needs:
 
-- **`SUCCESS`**: collection and opportunity persistence both completed;
+| status | `finished_at` | `error_type` | `error_message` |
+| --- | --- | --- | --- |
+| `RUNNING` | `NULL` | `NULL` | `NULL` |
+| `SUCCESS` | set | `NULL` | `NULL` |
+| `FAILED` | set | set | set, or `NULL` if redaction empties it |
+
+- **`RUNNING`**: the attempt was persisted and began; no ending has been
+  recorded yet.
+- **`SUCCESS`**: collection and opportunity persistence both completed.
 - **`FAILED`**: the attempt raised; `error_type` names the exception and
   `error_message` carries a redacted, diagnosable message.
 
-There is no in-flight status. A run is written once, when it completes, so an
-interrupted process cannot leave a permanently unfinished row that nothing in
-this phase would reconcile. The cost of that choice is that a crash between
-start and completion leaves no row at all.
+The schema enforces exactly those three shapes, and the persistence layer allows
+only `RUNNING → SUCCESS` and `RUNNING → FAILED`. A row that already reached a
+terminal state can never be finalized again.
+
+A crash or an interruption therefore leaves a `RUNNING` row rather than no row
+at all — that surviving row is the evidence, and `finished_at` is never invented
+for an attempt that did not end. Deciding when a `RUNNING` row has been left
+behind too long is a separate concern and is deliberately not implemented here.
 
 `NULL` means "this run did not know it" and is never replaced by a zero, which
 would read later as a real observation:
@@ -133,28 +146,46 @@ persisted or logged.
 
 `sources.last_run_at` is the `finished_at` of that source's most recent
 **completed attempt**, successful or failed. It is not "last successful run" and
-not "last time data changed". Both writes share one transaction, so the stamp
-can never disagree with the run that produced it. A source that has never been
-attempted keeps `NULL`.
+not "last time data changed".
 
-Recording an attempt registers a never-persisted source so the run's foreign key
-resolves; on a source that already exists it updates `last_run_at` only and
-leaves every other column alone.
+Starting a run does **not** touch it: an attempt that has only started has not
+finished, and an interrupted `RUNNING` row must never look like a completed run.
+Only finalization stamps it, in the same transaction that closes the run, so the
+stamp can never disagree with the run that produced it. A source that has never
+completed an attempt keeps `NULL`.
+
+Starting a run registers a never-persisted source so the run's foreign key
+resolves; a source that already exists is left entirely untouched.
 
 ### Transaction boundaries
 
-Each attempt is recorded in its own transaction, separate from the opportunity
-batch it describes. A later source failing never rolls back an earlier
-committed one, and a source that fails still records the fact that it failed.
-Run history observes collection and never governs it: if recording itself fails,
-the failure is logged and the source keeps the outcome it actually had.
+Starting and finalizing are each one transaction, both separate from the
+opportunity batch they describe. A later source failing never rolls back an
+earlier committed one, and a source that fails still records the fact that it
+failed.
+
+The two ends are treated differently on purpose:
+
+- if the **start** cannot be persisted, the source is not collected at all —
+  running it would produce work that could never be audited. It is reported as a
+  failed source for that run and the remaining sources continue;
+- if the **finalization** fails after the row exists, the failure is logged and
+  the row is left `RUNNING`. It is never deleted, and never rewritten into a
+  state the attempt did not reach, so the unfinalized attempt stays visible.
+
+### Deleting a source
+
+`source_runs.source_id` uses `ON DELETE RESTRICT`, like the other audit tables.
+A source that carries run history cannot be deleted, so its audit trail cannot
+be discarded as a side effect of removing the source.
 
 ### Not yet implemented
 
 `source_runs` is history only. Anomaly detection is **not** implemented: nothing
 scores runs, nothing detects a source returning zero items across consecutive
-runs, nothing raises an alert, and there is no Source Health page. This table is
-the evidence a later phase would need, not that phase.
+runs, nothing flags a `RUNNING` row as stale, nothing raises an alert, and there
+is no Source Health page. This table is the evidence a later phase would need,
+not that phase.
 
 ## Read-only application API
 

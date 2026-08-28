@@ -13,11 +13,12 @@ from services.collector.database.migrations import (
 from services.collector.database.schema import check_foundation_schema
 from services.collector.database.source_runs import (
     SourceRunPersistenceError,
+    finalize_configured_source_run,
+    finalize_failed_source_run,
+    finalize_source_run,
+    finalize_successful_source_run,
     recent_source_runs,
-    record_configured_source_run,
-    record_failed_source_run,
-    record_source_run,
-    record_successful_source_run,
+    start_configured_source_run,
     start_source_run,
 )
 from services.collector.database.turso import (
@@ -35,11 +36,12 @@ __all__ = [
     "check_foundation_schema",
     "connect_configured_database",
     "connect_database",
+    "finalize_configured_source_run",
+    "finalize_failed_source_run",
+    "finalize_source_run",
+    "finalize_successful_source_run",
     "recent_source_runs",
-    "record_configured_source_run",
-    "record_failed_source_run",
-    "record_source_run",
-    "record_successful_source_run",
     "split_sql_statements",
+    "start_configured_source_run",
     "start_source_run",
 ]

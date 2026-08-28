@@ -5,9 +5,14 @@ from dataclasses import dataclass, replace
 import re
 from typing import Any
 
+RUNNING = "RUNNING"
 SUCCESS = "SUCCESS"
 FAILED = "FAILED"
-SOURCE_RUN_STATUSES = frozenset({SUCCESS, FAILED})
+TERMINAL_STATUSES = frozenset({SUCCESS, FAILED})
+SOURCE_RUN_STATUSES = frozenset({RUNNING, SUCCESS, FAILED})
+
+MIN_HTTP_STATUS = 100
+MAX_HTTP_STATUS = 599
 
 MAX_ERROR_MESSAGE_LENGTH = 500
 
@@ -67,16 +72,23 @@ class SourceRunMetrics:
 
     @classmethod
     def from_reported(cls, reported: Mapping[str, Any]) -> "SourceRunMetrics":
-        """Accept only known, well-typed metrics and ignore everything else."""
-        counters = {
+        """Accept only known metrics the database would also accept.
+
+        Each value is checked against the same domain its column enforces, so a
+        collector reporting nonsense loses that one metric instead of making the
+        whole run unrecordable.
+        """
+        accepted = {
             name: reported[name]
-            for name in ("pages_checked", "items_found", "new_items", "relevant_items", "http_status")
+            for name in ("pages_checked", "items_found", "new_items", "relevant_items")
             if _is_count(reported.get(name))
         }
+        if _is_http_status(reported.get("http_status")):
+            accepted["http_status"] = reported["http_status"]
         version = reported.get("parser_version")
         if isinstance(version, str) and version.strip():
-            counters["parser_version"] = version.strip()
-        return cls(**counters)
+            accepted["parser_version"] = version.strip()
+        return cls(**accepted)
 
     def merge(self, **overrides: Any) -> "SourceRunMetrics":
         """Return a copy where only explicitly known overrides are applied."""
@@ -87,6 +99,14 @@ class SourceRunMetrics:
 
 def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_http_status(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and MIN_HTTP_STATUS <= value <= MAX_HTTP_STATUS
+    )
 
 
 NO_METRICS = SourceRunMetrics()
@@ -113,20 +133,29 @@ def metrics_reported_by(collector: object) -> SourceRunMetrics:
 
 @dataclass(frozen=True)
 class SourceRunAttempt:
-    """A started attempt, holding the instant collection actually began."""
+    """A handle on an attempt already persisted as ``RUNNING``.
 
+    It carries the row id, so finalizing closes the very row that was written
+    before collection started instead of creating a second one.
+    """
+
+    id: int
     source_id: str
     started_at: str
 
 
 @dataclass(frozen=True)
 class SourceRun:
-    """One persisted, terminal source run as stored in ``source_runs``."""
+    """One persisted source run as stored in ``source_runs``.
+
+    ``finished_at`` is ``None`` while the run is ``RUNNING``; it is never
+    invented for an attempt that has not actually ended.
+    """
 
     id: int
     source_id: str
     started_at: str
-    finished_at: str
+    finished_at: str | None
     status: str
     pages_checked: int | None
     items_found: int | None
@@ -140,3 +169,7 @@ class SourceRun:
     @property
     def succeeded(self) -> bool:
         return self.status == SUCCESS
+
+    @property
+    def finished(self) -> bool:
+        return self.status in TERMINAL_STATUSES
