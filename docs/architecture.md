@@ -8,6 +8,13 @@ collector and persists that collector's candidates in an independent
 transaction. An exception from one source is recorded and the remaining sources
 continue, so it cannot roll back earlier committed sources.
 
+Every attempt is instrumented. The agent captures the instant a source's
+collection begins and, when that attempt ends either way, writes one terminal
+`source_runs` row and stamps `sources.last_run_at`. Recording is observational:
+it happens in its own transaction after the source's own outcome is already
+settled, and a recording failure is logged without changing that outcome or
+stopping the remaining sources.
+
 After the complete source loop, the agent invokes qualification persistence
 exactly once across all eligible opportunities. Qualification success or failure
 is represented separately from each source result; the overall run succeeds only
@@ -46,11 +53,18 @@ source links.
 - Qualification is deterministic, explainable, versioned derived data. It is not
   personalized matching, ranking, or a recommendation model, and geography is
   metadata rather than an exclusion rule.
+- Source run history is recorded evidence, not a judgement. A run row states
+  what one attempt observed, with unknown metrics left `NULL` rather than
+  filled with zeros; deciding that a sequence of runs is abnormal is a separate
+  concern that does not exist yet.
 
 ## Outside Phase 2
 
 There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, Digital Twin, or ML recommendation model.
-Those possible later capabilities must not be inferred from the implemented
-qualification taxonomy or reserved package names.
+There is also no source-health anomaly engine, no consecutive-zero alerting, no
+notification path, and no Source Health page; `source_runs` records history and
+nothing reads it back to raise an alert. Those possible later capabilities must
+not be inferred from the implemented qualification taxonomy, the recorded run
+history, or reserved package names.

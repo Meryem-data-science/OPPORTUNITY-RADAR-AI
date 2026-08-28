@@ -21,7 +21,8 @@ recorded. The migrations currently present are:
    `opportunity_sources` plus indexes;
 2. `0002_deduplication_decisions.sql`: the explicit duplicate-review registry;
 3. `0003_deduplication_merges.sql`: merge history and source-movement history;
-4. `0004_opportunity_qualifications.sql`: persistent versioned qualification.
+4. `0004_opportunity_qualifications.sql`: persistent versioned qualification;
+5. `0005_source_runs.sql`: persistent history of attempted source runs.
 
 Apply every pending migration to configured local SQLite explicitly:
 
@@ -89,6 +90,71 @@ Closed taxonomy values are:
   `INSUFFICIENT_CONTENT`.
 
 These classifications do not implement personalized matching or ranking.
+
+## Source run history
+
+Migration `0005` stores one row per attempted execution of a source by
+`RadarAgent`. `started_at` is captured before collection begins and
+`finished_at` when the attempt ends, so a row describes a real, closed window.
+
+The status taxonomy is deliberately the closed pair the history needs:
+
+- **`SUCCESS`**: collection and opportunity persistence both completed;
+- **`FAILED`**: the attempt raised; `error_type` names the exception and
+  `error_message` carries a redacted, diagnosable message.
+
+There is no in-flight status. A run is written once, when it completes, so an
+interrupted process cannot leave a permanently unfinished row that nothing in
+this phase would reconcile. The cost of that choice is that a crash between
+start and completion leaves no row at all.
+
+`NULL` means "this run did not know it" and is never replaced by a zero, which
+would read later as a real observation:
+
+- `items_found` is the number of candidates the collector actually returned. It
+  is `NULL` when collection itself failed, and a real count when collection
+  succeeded and persistence then failed.
+- `new_items` is the number of opportunities actually created. It is only known
+  on a successful run.
+- `relevant_items` is always `NULL` today: qualification runs once globally
+  after the whole source loop, so per-source relevance is genuinely unknown at
+  the moment a run is recorded.
+- `pages_checked`, `http_status`, and `parser_version` are always `NULL` today:
+  no current collector paginates, exposes a reliable transport status to the
+  agent, or carries a versioned parser. A collector may opt in by exposing
+  `run_metrics()`; only known, well-typed keys are stored.
+
+`error_message` is redacted before it is stored. Credential assignments,
+authorization schemes, URL user-info, JWTs, and long opaque blobs are removed
+and the message is length-bounded. No token, credential, or OAuth secret is
+persisted or logged.
+
+### `sources.last_run_at`
+
+`sources.last_run_at` is the `finished_at` of that source's most recent
+**completed attempt**, successful or failed. It is not "last successful run" and
+not "last time data changed". Both writes share one transaction, so the stamp
+can never disagree with the run that produced it. A source that has never been
+attempted keeps `NULL`.
+
+Recording an attempt registers a never-persisted source so the run's foreign key
+resolves; on a source that already exists it updates `last_run_at` only and
+leaves every other column alone.
+
+### Transaction boundaries
+
+Each attempt is recorded in its own transaction, separate from the opportunity
+batch it describes. A later source failing never rolls back an earlier
+committed one, and a source that fails still records the fact that it failed.
+Run history observes collection and never governs it: if recording itself fails,
+the failure is logged and the source keeps the outcome it actually had.
+
+### Not yet implemented
+
+`source_runs` is history only. Anomaly detection is **not** implemented: nothing
+scores runs, nothing detects a source returning zero items across consecutive
+runs, nothing raises an alert, and there is no Source Health page. This table is
+the evidence a later phase would need, not that phase.
 
 ## Read-only application API
 

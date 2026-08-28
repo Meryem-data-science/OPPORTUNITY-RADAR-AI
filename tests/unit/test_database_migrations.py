@@ -15,6 +15,7 @@ EXPECTED_TABLES = {
     "opportunity_sources",
     "deduplication_decisions",
     "opportunity_qualifications",
+    "source_runs",
 }
 
 
@@ -31,14 +32,14 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001", "0002", "0003", "0004"]
+    assert applied == ["0001", "0002", "0003", "0004", "0005"]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",)]
+    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",)]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005"]
         assert apply_migrations(connection) == []
 
         counts = {
@@ -50,7 +51,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         ).fetchone()[0]
 
     assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0}
-    assert migration_count == 4
+    assert migration_count == 5
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
@@ -178,6 +179,105 @@ def test_database_at_0003_receives_qualification_schema_and_constraints(tmp_path
                  input_fingerprint, classified_at)
                 VALUES (1, 'INVALID', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'NORMAL_LISTING',
                         '[]', '[]', '[]', '[]', '[]', 'v1', ?, '2026-01-01')""", ("a" * 64,))
+
+
+def _copy_migrations(destination, names) -> None:
+    for name in names:
+        (destination / name).write_text(
+            open(f"migrations/{name}", encoding="utf-8").read(), encoding="utf-8"
+        )
+
+
+def test_database_at_0004_receives_source_run_history_and_constraints(tmp_path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    _copy_migrations(migrations, (
+        "0001_opportunity_foundation.sql", "0002_deduplication_decisions.sql",
+        "0003_deduplication_merges.sql", "0004_opportunity_qualifications.sql",
+    ))
+    with connect_database(tmp_path / "upgrade-0004.db") as connection:
+        assert apply_migrations(connection, migrations) == ["0001", "0002", "0003", "0004"]
+        _copy_migrations(migrations, ("0005_source_runs.sql",))
+        assert apply_migrations(connection, migrations) == ["0005"]
+        assert apply_migrations(connection, migrations) == []
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(source_runs)")}
+        assert columns == {
+            "id", "source_id", "started_at", "finished_at", "status", "pages_checked",
+            "items_found", "new_items", "relevant_items", "http_status", "error_type",
+            "error_message", "parser_version", "created_at",
+        }
+        indexes = {row[1] for row in connection.execute("PRAGMA index_list(source_runs)")}
+        assert "idx_source_runs_source_started" in indexes
+        assert connection.execute("SELECT COUNT(*) FROM source_runs").fetchone()[0] == 0
+
+        connection.execute(
+            "INSERT INTO sources (id, type, status) VALUES ('board', 'greenhouse', 'active')"
+        )
+
+        def insert(**overrides):
+            values = {
+                "source_id": "board", "started_at": "2026-01-01T00:00:00.000000+00:00",
+                "finished_at": "2026-01-01T00:00:05.000000+00:00", "status": "SUCCESS",
+                "items_found": None, "new_items": None, "pages_checked": None,
+                "http_status": None, "error_type": None, "error_message": None,
+            }
+            values.update(overrides)
+            connection.execute(
+                """INSERT INTO source_runs (
+                    source_id, started_at, finished_at, status, items_found, new_items,
+                    pages_checked, http_status, error_type, error_message
+                ) VALUES (:source_id, :started_at, :finished_at, :status, :items_found,
+                          :new_items, :pages_checked, :http_status, :error_type,
+                          :error_message)""",
+                values,
+            )
+
+        insert(items_found=5, new_items=2)
+        insert(status="FAILED", error_type="RuntimeError", error_message="board unreachable")
+
+        # An unknown source, an open taxonomy, an unexplained failure, an error on a
+        # success, a backwards window, negative counts, an impossible HTTP status, and
+        # more new items than items found are all rejected by the schema itself.
+        for invalid in (
+            {"source_id": "missing"},
+            {"status": "RUNNING"},
+            {"status": "FAILED"},
+            {"error_type": "RuntimeError"},
+            {"finished_at": "2025-12-31T00:00:00.000000+00:00"},
+            {"items_found": -1},
+            {"pages_checked": -1},
+            {"http_status": 42},
+            {"items_found": 1, "new_items": 2},
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                insert(**invalid)
+
+
+def test_failed_source_run_migration_leaves_no_table_and_no_version(tmp_path) -> None:
+    migrations = tmp_path / "migrations"
+    migrations.mkdir()
+    _copy_migrations(migrations, (
+        "0001_opportunity_foundation.sql", "0002_deduplication_decisions.sql",
+        "0003_deduplication_merges.sql", "0004_opportunity_qualifications.sql",
+    ))
+    with connect_database(tmp_path / "broken-0005.db") as connection:
+        apply_migrations(connection, migrations)
+        (migrations / "0005_source_runs.sql").write_text(
+            open("migrations/0005_source_runs.sql", encoding="utf-8").read()
+            + "\nINVALID SOURCE RUN SQL;",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(MigrationError, match="Migration 0005 failed"):
+            apply_migrations(connection, migrations)
+
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'source_runs'"
+        ).fetchall() == []
+        assert connection.execute(
+            "SELECT version FROM schema_migrations WHERE version = '0005'"
+        ).fetchall() == []
 
 
 def test_decision_schema_enforces_pair_status_and_foreign_keys(tmp_path) -> None:

@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 import logging
+from typing import Protocol
 
 from services.collector.collectors.base import OpportunityCollector
 from services.collector.collectors.factory import collector_for
@@ -11,8 +12,20 @@ from services.collector.database.opportunities import (
     PersistenceSummary as OpportunityPersistenceSummary,
     persist_configured_opportunities,
 )
+from services.collector.database.source_runs import (
+    record_configured_source_run,
+    start_source_run,
+)
 from services.collector.logging_config import get_logger
 from services.collector.models.opportunity import OpportunityCandidate
+from services.collector.models.source_run import (
+    FAILED as SOURCE_RUN_FAILED,
+    NO_METRICS,
+    SUCCESS as SOURCE_RUN_SUCCESS,
+    SourceRunAttempt,
+    SourceRunMetrics,
+    metrics_reported_by,
+)
 from services.collector.qualification.persistence import (
     PersistenceSummary as QualificationPersistenceSummary,
     persist_configured_qualifications,
@@ -62,6 +75,22 @@ Persister = Callable[
     [Settings, SourceConfig, Iterable[OpportunityCandidate]], OpportunityPersistenceSummary
 ]
 QualificationPersister = Callable[[Settings], QualificationPersistenceSummary]
+RunStarter = Callable[[str], SourceRunAttempt]
+
+
+class RunRecorder(Protocol):
+    """Persist the terminal state of one attempted source run."""
+
+    def __call__(
+        self,
+        settings: Settings,
+        source: SourceConfig,
+        attempt: SourceRunAttempt,
+        *,
+        status: str,
+        metrics: SourceRunMetrics,
+        error: Exception | None = None,
+    ) -> object: ...
 
 
 class RadarAgent:
@@ -75,6 +104,8 @@ class RadarAgent:
         settings_loader: Callable[[], Settings] = load_settings,
         persister: Persister = persist_configured_opportunities,
         qualification_persister: QualificationPersister = persist_configured_qualifications,
+        run_starter: RunStarter = start_source_run,
+        run_recorder: RunRecorder = record_configured_source_run,
         logger: logging.Logger | None = None,
         source_ids: Iterable[str] | None = None,
     ) -> None:
@@ -83,8 +114,56 @@ class RadarAgent:
         self._settings_loader = settings_loader
         self._persister = persister
         self._qualification_persister = qualification_persister
+        self._run_starter = run_starter
+        self._run_recorder = run_recorder
         self._logger = logger or get_logger(__name__)
         self._source_ids = tuple(source_ids) if source_ids is not None else None
+
+    @staticmethod
+    def _source_run_metrics(
+        collector: object | None,
+        *,
+        items_found: int | None = None,
+        new_items: int | None = None,
+    ) -> SourceRunMetrics:
+        """Combine what this run actually observed with any collector metrics.
+
+        Counts the agent measured itself always win; everything a collector does
+        not report stays unknown rather than becoming an invented zero.
+        """
+        reported = NO_METRICS if collector is None else metrics_reported_by(collector)
+        return reported.merge(items_found=items_found, new_items=new_items)
+
+    def _record_source_run(
+        self,
+        settings: Settings,
+        source: SourceConfig,
+        attempt: SourceRunAttempt,
+        *,
+        status: str,
+        metrics: SourceRunMetrics,
+        error: Exception | None = None,
+    ) -> None:
+        """Persist one attempt's history without letting it change that attempt.
+
+        Run history observes collection; it never governs it. A recording failure
+        is reported and dropped so an already-committed source stays successful
+        and the remaining sources still run.
+        """
+        try:
+            self._run_recorder(
+                settings, source, attempt, status=status, metrics=metrics, error=error
+            )
+        except Exception as recording_error:
+            self._logger.error(
+                "Radar source run was not recorded.",
+                extra={
+                    "event": "radar_source_run_not_recorded",
+                    "source_id": source.id,
+                    "run_status": status,
+                    "error_type": type(recording_error).__name__,
+                },
+            )
 
     def run_once(self) -> RadarRunSummary:
         """Collect and persist each eligible source exactly once."""
@@ -118,26 +197,47 @@ class RadarAgent:
                 "Radar source started.",
                 extra={"event": "radar_source_started", "source_id": source.id},
             )
-            collected = 0
+            attempt = self._run_starter(source.id)
+            collector: object | None = None
+            collected: int | None = None
             try:
-                candidates = self._collector_factory(source).collect()
+                collector = self._collector_factory(source)
+                candidates = collector.collect()
                 collected = len(candidates)
                 persisted = self._persister(settings, source, candidates)
             except Exception as error:
                 error_type = type(error).__name__
+                self._record_source_run(
+                    settings,
+                    source,
+                    attempt,
+                    status=SOURCE_RUN_FAILED,
+                    metrics=self._source_run_metrics(collector, items_found=collected),
+                    error=error,
+                )
+                items_collected = 0 if collected is None else collected
                 results.append(
-                    SourceRunSummary(source.id, collected, 0, 0, False, error_type)
+                    SourceRunSummary(source.id, items_collected, 0, 0, False, error_type)
                 )
                 self._logger.error(
                     "Radar source failed.",
                     extra={
                         "event": "radar_source_failed",
                         "source_id": source.id,
-                        "items_collected": collected,
+                        "items_collected": items_collected,
                         "error_type": error_type,
                     },
                 )
                 continue
+            self._record_source_run(
+                settings,
+                source,
+                attempt,
+                status=SOURCE_RUN_SUCCESS,
+                metrics=self._source_run_metrics(
+                    collector, items_found=collected, new_items=persisted.created
+                ),
+            )
             results.append(
                 SourceRunSummary(
                     source.id,
