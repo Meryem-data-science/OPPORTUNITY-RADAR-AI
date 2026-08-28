@@ -3,12 +3,20 @@
 The HTTP layer only reshapes what the database read model already decided. The
 zero-result streak, the anomaly code and the anomaly message are computed once,
 in the backend, so no client has to re-derive them.
+
+Reading is read-only in the strong sense. Source health is defined over the
+operational SQLite database, so this service opens that database itself through
+a ``mode=ro`` connection rather than through the general backend factory: a
+request cannot create the file, and it cannot reach a remote backend.
 """
 
 from pydantic import BaseModel
 
-from services.collector.config import DatabaseBackend, load_settings
-from services.collector.database.connection import connect_configured_database
+from services.collector.config import DatabaseBackend, Settings, load_settings
+from services.collector.database.connection import (
+    DatabaseConnection,
+    connect_readonly_database,
+)
 from services.collector.database.source_health import (
     SourceHealth,
     read_source_health as read_source_health_model,
@@ -53,6 +61,15 @@ class SourceHealthReadError(RuntimeError):
     """Raised when configured source health cannot be read safely."""
 
 
+class SourceHealthBackendError(RuntimeError):
+    """Raised when the configured backend is not the operational SQLite one.
+
+    Source health is derived from the operational SQLite database. Asked for any
+    other backend it refuses locally instead of reaching for a remote one, so no
+    credential is requested and no network call is made.
+    """
+
+
 def _to_response(health: SourceHealth) -> SourceHealthResponse:
     return SourceHealthResponse(
         source_id=health.source_id,
@@ -75,20 +92,39 @@ def _configured_sources() -> list[SourceConfig]:
     return load_source_registry()
 
 
+def _readonly_connection(settings: Settings) -> DatabaseConnection:
+    """Open the operational SQLite database read-only, or refuse locally.
+
+    Any non-SQLite backend is rejected here, before any connection is attempted,
+    so no remote connector is called and no token is read for this request.
+    """
+    if settings.database_backend is not DatabaseBackend.SQLITE:
+        raise SourceHealthBackendError(
+            "source health reads the operational SQLite database only"
+        )
+    if settings.sqlite_database_path is None:
+        raise SourceHealthBackendError(
+            "SQLite database path is missing from validated settings"
+        )
+    return connect_readonly_database(settings.sqlite_database_path)
+
+
 def read_source_health() -> SourceHealthListResponse:
     """Read health for every known source from the configured database.
 
-    The read is strictly read-only: SQLite is opened in ``query_only`` mode, no
-    migration is applied, no row is created for a source that has never run, and
-    nothing external is contacted.
+    The read is strictly read-only: the database is opened through a ``mode=ro``
+    SQLite URI and then also set ``query_only``, so a missing database cannot be
+    created and an existing one cannot be written. No migration is applied, no
+    row is created for a source that has never run, and nothing external is
+    contacted — a non-SQLite backend is refused locally rather than dialled.
     """
     connection = None
     try:
         settings = load_settings()
         sources = _configured_sources()
-        connection = connect_configured_database(settings)
-        if settings.database_backend is DatabaseBackend.SQLITE:
-            connection.execute("PRAGMA query_only = ON")
+        connection = _readonly_connection(settings)
+        # The connection already cannot write; this is the second lock on it.
+        connection.execute("PRAGMA query_only = ON")
         entries = read_source_health_model(connection, configured_sources=sources)
         items = [_to_response(entry) for entry in entries]
         response = SourceHealthListResponse(items=items, returned=len(items))

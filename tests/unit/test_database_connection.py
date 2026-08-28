@@ -10,7 +10,10 @@ from services.collector.config import (
     Settings,
 )
 from services.collector.database import turso
-from services.collector.database.connection import connect_configured_database
+from services.collector.database.connection import (
+    connect_configured_database,
+    connect_readonly_database,
+)
 from services.collector.database.turso import (
     DatabaseConnectionError,
     TursoHttpConnection,
@@ -115,3 +118,84 @@ def test_invalid_turso_url_does_not_affect_sqlite(tmp_path) -> None:
 
     with pytest.raises(DatabaseConnectionError, match="libsql"):
         connect_configured_database(turso_settings)
+
+
+def test_readonly_connection_reads_an_existing_database(tmp_path) -> None:
+    database_path = tmp_path / "readable.db"
+    writable = sqlite3.connect(database_path)
+    try:
+        writable.execute("CREATE TABLE sample (id INTEGER)")
+        writable.execute("INSERT INTO sample (id) VALUES (7)")
+        writable.commit()
+    finally:
+        writable.close()
+
+    connection = connect_readonly_database(database_path)
+    try:
+        assert connection.execute("SELECT id FROM sample").fetchone() == (7,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO sample (id) VALUES (8)",
+        "UPDATE sample SET id = 9",
+        "DELETE FROM sample",
+        "CREATE TABLE injected (id INTEGER)",
+    ],
+)
+def test_readonly_connection_refuses_every_write(tmp_path, statement: str) -> None:
+    database_path = tmp_path / "readable.db"
+    writable = sqlite3.connect(database_path)
+    try:
+        writable.execute("CREATE TABLE sample (id INTEGER)")
+        writable.execute("INSERT INTO sample (id) VALUES (7)")
+        writable.commit()
+    finally:
+        writable.close()
+
+    connection = connect_readonly_database(database_path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute(statement)
+    finally:
+        connection.close()
+
+    check = sqlite3.connect(database_path)
+    try:
+        assert check.execute("SELECT id FROM sample").fetchall() == [(7,)]
+    finally:
+        check.close()
+
+
+def test_readonly_connection_never_creates_a_missing_database(tmp_path) -> None:
+    """Unlike `connect_database`, it creates neither the file nor its directory."""
+    database_path = tmp_path / "missing" / "nested" / "absent.db"
+
+    with pytest.raises(sqlite3.OperationalError):
+        connect_readonly_database(database_path)
+
+    assert database_path.exists() is False
+    assert database_path.parent.exists() is False
+    assert (tmp_path / "missing").exists() is False
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_readonly_connection_accepts_a_path_with_uri_punctuation(tmp_path) -> None:
+    """A legal path is a path, not URI syntax to be reinterpreted."""
+    database_path = tmp_path / "odd name?with#punctuation.db"
+    writable = sqlite3.connect(database_path)
+    try:
+        writable.execute("CREATE TABLE sample (id INTEGER)")
+        writable.execute("INSERT INTO sample (id) VALUES (3)")
+        writable.commit()
+    finally:
+        writable.close()
+
+    connection = connect_readonly_database(database_path)
+    try:
+        assert connection.execute("SELECT id FROM sample").fetchone() == (3,)
+    finally:
+        connection.close()

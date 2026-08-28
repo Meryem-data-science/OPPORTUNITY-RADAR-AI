@@ -3,6 +3,7 @@
 from services.collector.database.connection import (
     connect_configured_database,
     connect_database,
+    connect_readonly_database,
 )
 from services.collector.database.health import check_database_health
 from services.collector.database.migrations import (
@@ -46,6 +47,7 @@ __all__ = [
     "check_foundation_schema",
     "connect_configured_database",
     "connect_database",
+    "connect_readonly_database",
     "finalize_configured_source_run",
     "finalize_failed_source_run",
     "finalize_source_run",

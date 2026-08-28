@@ -145,7 +145,13 @@ in `config/sources.yaml` and those already persisted — with the status and
 metrics of each source's most recent run, plus `zero_result_streak`,
 `anomaly_code` and `anomaly_message`. Unknown values come back as `null`, never
 as zero, and a source that has never run comes back with a `null` status rather
-than an invented one. The read is strictly read-only.
+than an invented one.
+
+The read is strictly read-only: the database is opened `mode=ro` and set
+`query_only`, so pointing `SQLITE_DATABASE_PATH` at a missing or not-yet-migrated
+file answers `503` and leaves that path missing instead of creating an empty
+database there. Source health reads the operational SQLite database only; with
+`DATABASE_BACKEND=turso` it answers the same `503` without contacting anything.
 
 In another terminal, start Next.js:
 

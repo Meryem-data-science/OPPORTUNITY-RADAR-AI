@@ -194,15 +194,25 @@ Each entry carries `source_id`, `enabled`, `last_run_at`, the latest run's
 `anomaly_message`.
 
 `last_run_at` is the `started_at` of the most recent run, so it always describes
-the very run whose status and metrics are shown beside it. For a source that has
-never run it is `NULL`: `sources.last_run_at` is deliberately not substituted,
-because a stamp with no run behind it would claim an execution the model cannot
-show.
+the very run whose status and metrics are shown beside it, and a run that is
+still `RUNNING` shows its own start rather than an older run's end. For a source
+that has never run it is `NULL`.
+
+This is deliberately **not** the column `sources.last_run_at`, which keeps its
+own meaning from the run-history slice: the `finished_at` of the most recent
+*completed* attempt. That column is not substituted here — a stamp with no run
+behind it would claim an execution the read model cannot show, and it would
+disagree with the status displayed next to it whenever the latest attempt has
+not finished.
 
 A source is listed when the validated `config/sources.yaml` catalogue configures
 it or when the database already holds it, once either way. The configured
-`enabled` flag wins over the persisted one, because a source row is registered
-at that source's first run and is never rewritten afterwards.
+`enabled` flag wins over the persisted one: the current configuration is the
+most direct authority on whether a source is enabled, whereas `sources.enabled`
+records what a run observed. Opportunity persistence does refresh that row —
+`type`, `enabled`, `category`, `country`, `frequency_minutes` and `status` are
+upserted with `ON CONFLICT(id) DO UPDATE` — but the row is absent for a source
+that has never run and lags the configuration until a run refreshes it.
 
 ### The consecutive-zero rule
 
@@ -254,6 +264,13 @@ request and does not collect data or alter schema.
 
 `GET /api/source-health` takes no parameter and returns
 `{"items": [...], "returned": n}` with one entry per known source, ordered by
-`source_id`. Unknown values are serialized as `null` and never as zero. The
-service opens SQLite in `query_only` mode; it writes nothing, migrates nothing,
-and contacts nothing external.
+`source_id`. Unknown values are serialized as `null` and never as zero.
+
+The read is read-only in the strong sense. The database is opened through a
+`mode=ro` SQLite URI (`connect_readonly_database`) and then also set
+`query_only`, so the request cannot create the database file, a schema, a table,
+or a row: a missing or not-yet-migrated path answers `503` and stays missing
+rather than becoming an empty database. Source health is defined over the
+operational SQLite database only; any other configured backend is refused
+locally, before any connection is attempted, so no remote connector is called
+and no credential is read for the request.

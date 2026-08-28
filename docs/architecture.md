@@ -68,11 +68,14 @@ home page calls that API server-side using `OPPORTUNITY_API_BASE_URL` (default
 `http://127.0.0.1:8000`) and renders real opportunity summaries and original
 source links.
 
-`GET /api/source-health` is read-only in the same way. It opens SQLite in
-`query_only` mode, merges the validated `config/sources.yaml` catalogue with the
-sources the database already holds so a configured source that has never run is
-still listed, and returns one entry per source. The `/source-health` page
-renders those entries as a table.
+`GET /api/source-health` is read-only more strictly still. It opens the
+operational SQLite database through a `mode=ro` URI and also sets `query_only`,
+so the request cannot create the database file it was pointed at, let alone a
+schema or a row; a non-SQLite backend is refused locally rather than dialled, so
+the request makes no network call at all. It merges the validated
+`config/sources.yaml` catalogue with the sources the database already holds, so
+a configured source that has never run is still listed, and returns one entry
+per source. The `/source-health` page renders those entries as a table.
 
 ## Data-processing boundaries
 

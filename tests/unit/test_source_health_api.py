@@ -3,6 +3,7 @@
 from io import StringIO
 import json
 import logging
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -14,6 +15,8 @@ from services.api.source_health import (
     SourceHealthReadError,
     SourceHealthResponse,
 )
+from services.collector.database import connection as connection_module
+from services.collector.database import turso as turso_module
 from services.collector import logging_config
 from services.collector.config import (
     ApplicationEnvironment,
@@ -26,6 +29,8 @@ from services.collector.database.source_health import (
 )
 from services.collector.models.source_run import RUNNING, SUCCESS
 from services.collector.sources import SourceConfig
+
+TEST_ONLY_DATABASE = Path("test-only-source-health-never-opened.db")
 
 EXPECTED_FIELDS = {
     "source_id",
@@ -207,11 +212,24 @@ class _ReadOnlyConnection:
 
 
 def _sqlite_settings() -> Settings:
+    """SQLite settings whose path is never opened: the connection is stubbed."""
     return Settings(
         environment=ApplicationEnvironment.TEST,
         database_backend=DatabaseBackend.SQLITE,
-        sqlite_database_path=None,
+        sqlite_database_path=TEST_ONLY_DATABASE,
     )
+
+
+def _turso_settings() -> Settings:
+    return Settings(
+        environment=ApplicationEnvironment.TEST,
+        database_backend=DatabaseBackend.TURSO,
+        turso_database_url="libsql://test-only.invalid",
+        turso_auth_token=TURSO_SECRET,
+    )
+
+
+TURSO_SECRET = "TEST_ONLY_TURSO_AUTH_TOKEN_DO_NOT_EXPOSE"
 
 
 def _registry() -> list[SourceConfig]:
@@ -222,11 +240,15 @@ def _registry() -> list[SourceConfig]:
 
 def test_the_service_reads_only_and_merges_the_configured_registry(monkeypatch) -> None:
     connection = _ReadOnlyConnection()
+    opened: list[Path] = []
+
+    def open_readonly(path):
+        opened.append(path)
+        return connection
+
     monkeypatch.setattr(source_health, "load_settings", _sqlite_settings)
     monkeypatch.setattr(source_health, "_configured_sources", _registry)
-    monkeypatch.setattr(
-        source_health, "connect_configured_database", lambda _settings: connection
-    )
+    monkeypatch.setattr(source_health, "connect_readonly_database", open_readonly)
 
     listing = source_health.read_source_health()
 
@@ -240,6 +262,7 @@ def test_the_service_reads_only_and_merges_the_configured_registry(monkeypatch) 
     assert listing.items[1].status == SUCCESS
     assert listing.items[1].zero_result_streak == 1
     assert connection.statements[0] == "PRAGMA query_only = ON"
+    assert opened == [TEST_ONLY_DATABASE]
     assert not any(
         keyword in statement.upper()
         for statement in connection.statements
@@ -258,19 +281,17 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
     monkeypatch.setattr(source_health, "_configured_sources", _registry)
     monkeypatch.setattr(
         source_health,
-        "connect_configured_database",
-        lambda _settings: _ReadOnlyConnection(),
+        "connect_readonly_database",
+        lambda _path: _ReadOnlyConnection(),
     )
 
     try:
         response = TestClient(main.app).get("/api/source-health")
 
-        def fail_with_secret(_settings):
+        def fail_with_secret(_path):
             raise RuntimeError(secret)
 
-        monkeypatch.setattr(
-            source_health, "connect_configured_database", fail_with_secret
-        )
+        monkeypatch.setattr(source_health, "connect_readonly_database", fail_with_secret)
         failed_response = TestClient(main.app).get("/api/source-health")
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
     finally:
@@ -296,3 +317,105 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
     assert secret not in rendered
     assert secret not in failed_response.text
     assert "Traceback" not in failed_response.text
+
+
+class _ExplodingConnector:
+    """A connector that fails loudly and records the fact it was reached."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[object] = []
+
+    def __call__(self, *arguments):
+        self.calls.append(arguments)
+        raise AssertionError(f"{self.name} must never be called by source health")
+
+
+def _forbid_every_remote_connector(monkeypatch) -> dict[str, _ExplodingConnector]:
+    """Replace every route to a remote backend with one that cannot stay silent.
+
+    Source health must refuse a non-SQLite backend locally. If it instead reached
+    the backend factory or the Turso connector, these stubs record it and raise
+    rather than letting a real network call happen.
+    """
+    connectors = {
+        "connect_configured_database": _ExplodingConnector("connect_configured_database"),
+        "connect_turso": _ExplodingConnector("connect_turso"),
+        "connect_readonly_database": _ExplodingConnector("connect_readonly_database"),
+    }
+    for name, connector in connectors.items():
+        monkeypatch.setattr(connection_module, name, connector, raising=False)
+        monkeypatch.setattr(turso_module, name, connector, raising=False)
+        monkeypatch.setattr(source_health, name, connector, raising=False)
+    return connectors
+
+
+def test_a_turso_backend_is_refused_locally_without_contacting_anything(
+    monkeypatch,
+) -> None:
+    connectors = _forbid_every_remote_connector(monkeypatch)
+    monkeypatch.setattr(source_health, "load_settings", _turso_settings)
+    monkeypatch.setattr(source_health, "_configured_sources", _registry)
+
+    response = TestClient(main.app).get("/api/source-health")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": PUBLIC_SOURCE_HEALTH_ERROR}
+    for name, connector in connectors.items():
+        assert connector.calls == [], f"{name} was reached"
+    assert TURSO_SECRET not in response.text
+    assert "libsql://test-only.invalid" not in response.text
+    assert "Traceback" not in response.text
+
+
+def test_refusing_a_turso_backend_logs_no_credential(monkeypatch) -> None:
+    stream = StringIO()
+    logging.getLogger(logging_config.LOGGER_NAME).handlers.clear()
+    service_logger = logging_config.configure_logging(stream)
+    connectors = _forbid_every_remote_connector(monkeypatch)
+    monkeypatch.setattr(source_health, "load_settings", _turso_settings)
+    monkeypatch.setattr(source_health, "_configured_sources", _registry)
+
+    try:
+        response = TestClient(main.app).get("/api/source-health")
+        records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    finally:
+        service_logger.handlers.clear()
+
+    assert response.status_code == 503
+    failed = next(
+        record
+        for record in records
+        if record["event"] == "source_health_api_request_failed"
+    )
+    assert failed["context"] == {"error_type": "SourceHealthBackendError"}
+    rendered = stream.getvalue()
+    assert TURSO_SECRET not in rendered
+    assert "libsql://test-only.invalid" not in rendered
+    assert all(connector.calls == [] for connector in connectors.values())
+
+
+def test_a_sqlite_backend_without_a_path_is_refused_locally(monkeypatch) -> None:
+    connectors = _forbid_every_remote_connector(monkeypatch)
+    monkeypatch.setattr(
+        source_health,
+        "load_settings",
+        lambda: Settings(
+            environment=ApplicationEnvironment.TEST,
+            database_backend=DatabaseBackend.SQLITE,
+            sqlite_database_path=None,
+        ),
+    )
+    monkeypatch.setattr(source_health, "_configured_sources", _registry)
+
+    response = TestClient(main.app).get("/api/source-health")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": PUBLIC_SOURCE_HEALTH_ERROR}
+    assert all(connector.calls == [] for connector in connectors.values())
+
+
+def test_the_service_never_imports_the_backend_factory(monkeypatch) -> None:
+    """The remote route is not merely unused here; it is not reachable at all."""
+    assert not hasattr(source_health, "connect_configured_database")
+    assert not hasattr(source_health, "connect_turso")

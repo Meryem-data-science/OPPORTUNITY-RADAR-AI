@@ -143,10 +143,12 @@ def read_source_health(
 
     A source is known when the validated registry configures it or when the
     database already holds it. The registry wins on ``enabled`` for a source it
-    configures, because a persisted row is registered once at a source's first
-    run and is never rewritten afterwards, so the configured flag is the fresher
-    truth. Nothing is inserted for a source the registry knows and the database
-    does not: it is simply reported as never run.
+    still configures: the current configuration is the most direct authority on
+    whether a source is enabled, while the persisted row records what some
+    earlier run observed — it can be missing entirely for a source that has
+    never run, and it lags the configuration until a run refreshes it. Nothing
+    is inserted for a source the registry knows and the database does not: it is
+    simply reported as never run.
 
     Entries are ordered by ``source_id`` so two reads of the same database
     always produce the same list.

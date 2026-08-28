@@ -4,13 +4,18 @@ The database is disposable, the runs are written by the real persistence layer,
 and the source catalogue is a real YAML registry parsed by the real loader.
 """
 
+import sqlite3
 import textwrap
 
 from fastapi.testclient import TestClient
+import pytest
 
 from services.api import source_health as source_health_service
 from services.api.main import app
-from services.collector.database.connection import connect_database
+from services.collector.database.connection import (
+    connect_database,
+    connect_readonly_database,
+)
 from services.collector.database.migrations import apply_migrations
 from services.collector.database.source_health import (
     ZERO_RESULT_ANOMALY_CODE,
@@ -204,13 +209,20 @@ def test_real_sqlite_source_health_is_deterministic_honest_and_read_only(
     assert _counts(path) == before
 
 
-def test_a_missing_database_returns_a_safe_unavailable_response(
+def test_a_missing_database_stays_missing_and_answers_unavailable(
     tmp_path, monkeypatch
 ) -> None:
+    """A read must never bring the database it was pointed at into existence."""
     registry_path = tmp_path / "sources.yaml"
     registry_path.write_text(REGISTRY, encoding="utf-8")
+    # A missing file inside a missing directory: neither may be created.
+    missing_directory = tmp_path / "absent"
+    database_path = missing_directory / "not-migrated.db"
+    assert database_path.exists() is False
+    assert missing_directory.exists() is False
+
     monkeypatch.setenv("DATABASE_BACKEND", "sqlite")
-    monkeypatch.setenv("SQLITE_DATABASE_PATH", str(tmp_path / "not-migrated.db"))
+    monkeypatch.setenv("SQLITE_DATABASE_PATH", str(database_path))
     monkeypatch.setattr(
         source_health_service,
         "_configured_sources",
@@ -224,3 +236,28 @@ def test_a_missing_database_returns_a_safe_unavailable_response(
         "detail": source_health_service.PUBLIC_SOURCE_HEALTH_ERROR
     }
     assert "Traceback" not in response.text
+    assert database_path.exists() is False
+    assert missing_directory.exists() is False
+    assert list(tmp_path.iterdir()) == [registry_path]
+
+
+def test_an_existing_database_is_opened_read_only(tmp_path, monkeypatch) -> None:
+    """The connection itself must refuse a write, not merely decline to make one."""
+    path = tmp_path / "read-only.db"
+    registry_path = tmp_path / "sources.yaml"
+    registry_path.write_text(REGISTRY, encoding="utf-8")
+    before = _seed(path)
+
+    connection = connect_readonly_database(path)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute(
+                "INSERT INTO sources (id, type, enabled, status)"
+                " VALUES ('test_api_injected', 'greenhouse', 1, 'active')"
+            )
+        with pytest.raises(sqlite3.OperationalError):
+            connection.execute("CREATE TABLE test_api_injected (id INTEGER)")
+    finally:
+        connection.close()
+
+    assert _counts(path) == before
