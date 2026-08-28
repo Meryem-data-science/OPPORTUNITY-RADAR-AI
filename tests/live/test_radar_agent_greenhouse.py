@@ -20,7 +20,7 @@ def test_live_greenhouse_agent_is_idempotent(tmp_path):
     path = tmp_path / "live-radar.db"
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
     finally:
         connection.close()
     settings = Settings(ApplicationEnvironment.TEST, DatabaseBackend.SQLITE, path)

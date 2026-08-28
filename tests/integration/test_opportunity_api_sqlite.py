@@ -49,7 +49,7 @@ def test_real_sqlite_listing_is_filtered_ordered_counted_and_read_only(
     )
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
         assert persist_opportunities(
             connection, source, candidates, clock=lambda: next(timestamps)
         ).created == 4

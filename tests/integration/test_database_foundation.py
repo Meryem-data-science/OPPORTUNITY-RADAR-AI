@@ -8,7 +8,7 @@ def test_file_database_is_ready_after_migrations(tmp_path) -> None:
     database = tmp_path / "integration.db"
 
     with connect_database(database) as connection:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
 
     assert database.is_file()
 
@@ -24,4 +24,4 @@ def test_file_database_is_ready_after_migrations(tmp_path) -> None:
         ).fetchall()
 
     assert {"schema_migrations", "sources", "opportunities", "opportunity_sources"} <= tables
-    assert applied == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",)]
+    assert applied == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",), ("0006",)]
