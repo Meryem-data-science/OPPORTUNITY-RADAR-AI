@@ -127,6 +127,10 @@ def finalize_source_run(
     terminal state is never rewritten. Closing the run and stamping the source
     share one transaction, so the stamp can never disagree with the run that
     produced it.
+
+    The handle is checked against the stored row rather than trusted: a handle
+    naming one source while pointing at another source's run would otherwise
+    close that run and stamp an unrelated source.
     """
     if status not in TERMINAL_STATUSES:
         raise SourceRunPersistenceError(f"unsupported terminal status: {status!r}")
@@ -141,15 +145,22 @@ def finalize_source_run(
     connection.execute("BEGIN")
     try:
         current = connection.execute(
-            "SELECT status, started_at FROM source_runs WHERE id = ?", (attempt.id,)
+            "SELECT source_id, status, started_at FROM source_runs WHERE id = ?",
+            (attempt.id,),
         ).fetchone()
         if current is None:
             raise SourceRunPersistenceError(f"source run {attempt.id} does not exist")
-        if current[0] != RUNNING:
+        stored_source_id, stored_status, stored_started_at = str(current[0]), current[1], current[2]
+        if stored_source_id != attempt.source_id:
             raise SourceRunPersistenceError(
-                f"source run {attempt.id} is already {current[0]} and cannot be finalized again"
+                f"source run {attempt.id} belongs to source {stored_source_id!r}, "
+                f"not {attempt.source_id!r}"
             )
-        finished_at = max(clock(), str(current[1]))
+        if stored_status != RUNNING:
+            raise SourceRunPersistenceError(
+                f"source run {attempt.id} is already {stored_status} and cannot be finalized again"
+            )
+        finished_at = max(clock(), str(stored_started_at))
         row = connection.execute(
             f"""
             UPDATE source_runs SET
@@ -183,10 +194,20 @@ def finalize_source_run(
         ).fetchone()
         if row is None:
             raise SourceRunPersistenceError(f"source run {attempt.id} was not finalized")
-        connection.execute(
-            "UPDATE sources SET last_run_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (finished_at, attempt.source_id),
-        )
+        stamped = connection.execute(
+            """
+            UPDATE sources SET last_run_at = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            RETURNING id
+            """,
+            (finished_at, stored_source_id),
+        ).fetchone()
+        if stamped is None:
+            # The foreign key should make this unreachable; the invariant that a
+            # finalized run always stamps its own source is asserted regardless.
+            raise SourceRunPersistenceError(
+                f"source run {attempt.id} has no source {stored_source_id!r} to stamp"
+            )
         connection.execute("COMMIT")
     except Exception as failure:
         try:

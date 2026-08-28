@@ -148,6 +148,44 @@ def test_a_terminal_run_can_never_be_finalized_again(connection):
     assert stored == [(succeeded.id, SUCCESS), (failed.id, FAILED)]
 
 
+def test_a_handle_naming_another_source_cannot_finalize_or_stamp_anything(connection):
+    running = start_source_run(connection, source("source_a"))
+    finalize_successful_source_run(connection, start_source_run(connection, source("source_b")))
+    source_b_stamp = last_run_at(connection, "source_b")
+    assert source_b_stamp is not None
+
+    # A handle that points at source_a's run while claiming to be source_b must
+    # not close that run, and must not stamp either source.
+    forged = SourceRunAttempt(running.id, "source_b", running.started_at)
+    with pytest.raises(SourceRunPersistenceError, match="belongs to source 'source_a'"):
+        finalize_source_run(connection, forged, status=SUCCESS)
+
+    untouched = recent_source_runs(connection, "source_a")
+    assert len(untouched) == 1
+    assert untouched[0].id == running.id
+    assert untouched[0].status == RUNNING
+    assert untouched[0].finished_at is None
+    assert last_run_at(connection, "source_a") is None
+    assert last_run_at(connection, "source_b") == source_b_stamp
+    assert connection.execute("SELECT COUNT(*) FROM source_runs").fetchone() == (2,)
+
+    # The rejected attempt rolled back cleanly, so the real handle still works.
+    finalized = finalize_successful_source_run(connection, running)
+    assert finalized.id == running.id
+    assert finalized.status == SUCCESS
+    assert last_run_at(connection, "source_a") == finalized.finished_at
+    assert last_run_at(connection, "source_b") == source_b_stamp
+
+
+def test_a_finalized_run_always_stamps_its_own_source(connection):
+    attempt = start_source_run(connection, source())
+    run = finalize_successful_source_run(connection, attempt)
+    stamps = connection.execute(
+        "SELECT id, last_run_at FROM sources ORDER BY id"
+    ).fetchall()
+    assert stamps == [("source_a", run.finished_at)]
+
+
 def test_starting_registers_a_missing_source_and_leaves_an_existing_one_alone(connection):
     connection.execute(
         """INSERT INTO sources (id, type, enabled, category, country, status, last_run_at)
