@@ -153,9 +153,14 @@ python -m services.digital_twin.cli show-profile
 The command prints `user_id` and `profile_id` only, never the address, and
 never logs it. A non-SQLite backend is refused locally, before any connection.
 
-Not implemented by this slice: CV parsing, `cv_versions`, `profile_facts`,
-skills, education, experiences, projects, certifications, languages,
-preferences, eligibility, matching, scoring, and any profile HTTP API.
+Not implemented by this slice: `cv_versions`, `profile_facts`, skills,
+education, experiences, projects, certifications, languages, preferences,
+eligibility, matching, scoring, and any profile HTTP API.
+
+The Phase 3.2A CV parser adds no table and no migration. It reads a local PDF
+and returns a result in memory; nothing it extracts is written to the database,
+and no `profile_facts` row exists yet. See
+[operations.md](operations.md#cv-parser-phase-32a).
 
 ## Source run history
 

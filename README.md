@@ -22,11 +22,24 @@ Implemented now:
   source's Enabled flag, last run, status, items found, new items, relevant
   items, and errors.
 
+Phase 3 has started, and only these two slices of it exist:
+
+- **Phase 3.1A** — the Digital Twin root: a `users` row, the one `profiles` row
+  it owns, and a local CLI to create or read that pair. The profile holds no
+  fact about the person.
+- **Phase 3.2A** — the CV parser foundation: reading a local PDF, conservative
+  text normalization, per-page provenance, and deterministic detection of
+  French/English section headings. It creates no Profile Fact, stores nothing,
+  and treats nothing it reads as a verified fact.
+
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
-jobs, rank opportunities for a person, compare a CV, implement a Digital Twin,
-or provide ML recommendations. Qualification is deterministic categorization,
-not personalized matching. Source health is a read model and a page: it sends no
+jobs, rank opportunities for a person, match a CV against an offer, or provide
+ML recommendations. The Digital Twin exists only as the two slices listed above:
+there is no validated Master CV, no accept/correct/reject workflow, no
+`profile_facts`, no skill table or skill level, no eligibility rule, and no
+match score. Qualification is deterministic categorization, not personalized
+matching. Source health is a read model and a page: it sends no
 notification, retries nothing, reschedules nothing, and judges no `RUNNING` run
 stale.
 
@@ -35,6 +48,7 @@ stale.
 - `services/collector/`: collectors, orchestration, persistence, qualification,
   and duplicate-review tools.
 - `services/api/`: read-only FastAPI opportunity API.
+- `services/digital_twin/`: the user/profile root and the local CV PDF parser.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.
