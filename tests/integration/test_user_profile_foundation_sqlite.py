@@ -104,7 +104,7 @@ def test_0006_upgrades_an_existing_phase_two_database_without_losing_data(tmp_pa
             "SELECT id, opportunity_id, source_id FROM opportunity_sources ORDER BY id"
         ).fetchall()
 
-        assert apply_migrations(connection) == ["0006", "0007"]
+        assert apply_migrations(connection) == ["0006", "0007", "0008"]
 
         assert {"users", "profiles"} <= _tables(connection)
         assert (
@@ -146,7 +146,7 @@ def test_reapplying_migrations_is_idempotent_and_records_0006_once(tmp_path):
             "SELECT version FROM schema_migrations WHERE version = '0006'"
         ).fetchall()
 
-        assert first[-1] == "0007"
+        assert first[-1] == "0008"
         assert recorded == [("0006",)]
         assert _counts(connection) == (0, 0)
     finally:

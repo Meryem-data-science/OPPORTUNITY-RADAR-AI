@@ -140,7 +140,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
         assert _apply_up_to_0006(connection, tmp_path) == list(BEFORE_THIS_SLICE)
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
 
-        assert apply_migrations(connection) == ["0007"]
+        assert apply_migrations(connection) == ["0007", "0008"]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
         assert (
@@ -160,7 +160,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0007",)
+    assert recorded[-1] == ("0008",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -182,10 +182,18 @@ def test_no_table_carries_a_persistent_verified_flag(migrated):
             assert "verified" not in column.casefold(), (table, column)
 
 
-def test_no_phase_34_table_exists_yet(migrated):
-    forbidden = ("skill", "user_skill", "alias", "preference", "eligib", "match")
+def test_no_table_beyond_the_skill_projection_exists_yet(migrated):
+    """Phase 3.4A projects skills and stops there.
 
-    for table in _tables(migrated):
+    The three tables `0008` adds are named here explicitly, so this assertion
+    keeps saying what it has always said: nothing else of Phase 3.4 and beyond
+    exists — no administrable alias table, no preference, no availability, no
+    mobility, no eligibility and no matching table.
+    """
+    projected = {"skills", "profile_skills", "profile_skill_evidence"}
+    forbidden = ("alias", "preference", "eligib", "match", "score", "ranking")
+
+    for table in _tables(migrated) - projected:
         folded = table.casefold()
         assert not any(word in folded for word in forbidden), table
 

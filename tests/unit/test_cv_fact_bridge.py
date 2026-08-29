@@ -288,8 +288,13 @@ def test_the_candidate_package_still_ignores_the_fact_store() -> None:
         assert "fact_bridge" not in source
 
 
-def test_this_slice_still_stops_the_migrations_at_0007() -> None:
-    """Phase 3.3B reuses the 0007 schema and adds no table of its own."""
+def test_this_slice_still_adds_no_migration_of_its_own() -> None:
+    """Phase 3.3B reuses the 0007 schema and adds no table of its own.
+
+    `0008` belongs to the Phase 3.4A skill projection, which reads accepted
+    facts and is not part of this bridge; the list is written out so a
+    migration added without a decided owner shows up here.
+    """
     migrations = sorted(Path("migrations").glob("*.sql"))
 
     assert [migration.name for migration in migrations] == [
@@ -300,6 +305,7 @@ def test_this_slice_still_stops_the_migrations_at_0007() -> None:
         "0005_source_runs.sql",
         "0006_user_profile_foundation.sql",
         "0007_profile_facts.sql",
+        "0008_normalized_profile_skills.sql",
     ]
 
 

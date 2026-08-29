@@ -13,9 +13,11 @@ Phase 3.3A now provides the place a validated fact would live
 (`services/digital_twin/facts/`), but this package is not connected to it: no
 code here imports it, no candidate becomes a `profile_facts` row, and the
 mapping from an `ExtractedCandidate` to a proposed fact is Phase 3.3B and does
-not exist. The business normalization of institutions, employers, dates and
-skill aliases is Phase 3.4 and does not exist either, so Phase 3.2 as a whole
-is still not a validated Master CV.
+not exist. The business normalization of institutions, employers and dates is
+Phase 3.4 and does not exist either; skill aliases are resolved by Phase 3.4A,
+from facts a human has accepted rather than from a candidate, so no mention
+produced here reaches a normalized skill without being validated first. Phase
+3.2 as a whole is still not a validated Master CV.
 
 Every rule is local, free, deterministic and explainable — regular expressions,
 closed dictionaries and fixed segmentation rules, all readable in this package.

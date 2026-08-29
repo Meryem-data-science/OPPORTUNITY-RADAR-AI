@@ -155,9 +155,9 @@ python -m services.digital_twin.cli show-profile
 The command prints `user_id` and `profile_id` only, never the address, and
 never logs it. A non-SQLite backend is refused locally, before any connection.
 
-Not implemented by that slice: `cv_versions`, skills, preferences,
-eligibility, matching, scoring, and any profile HTTP API. `profile_facts`
-arrives with `0007` below.
+Not implemented by that slice: `cv_versions`, preferences, eligibility,
+matching, scoring, and any profile HTTP API. `profile_facts` arrives with
+`0007` below, and the skills projected from it with `0008`.
 
 The Phase 3.2A CV parser adds no table and no migration. It reads a local PDF
 and returns a result in memory; nothing it extracts is written to the database,
@@ -170,12 +170,16 @@ no candidate table, no `cv_versions`, no SQLite write, and no row in `users`,
 `profiles` or `profile_facts`. See
 [operations.md](operations.md#cv-candidate-extraction-phase-32b).
 
-The Phase 3.3B bridge adds no table and no migration either, and the migrations
-still stop at `0007`. It writes candidates into the `profile_facts` and
-`profile_fact_provenance` tables `0007` already created, always as `PROPOSED`
-rows, and it stores no candidate table of its own: there is no import log, no
-second registry and no `cv_versions`. See
+The Phase 3.3B bridge adds no table and no migration either. It writes
+candidates into the `profile_facts` and `profile_fact_provenance` tables `0007`
+already created, always as `PROPOSED` rows, and it stores no candidate table of
+its own: there is no import log, no second registry and no `cv_versions`. See
 [operations.md](operations.md#cv-review-phase-33b).
+
+`0008` adds the Phase 3.4A skill projection described in
+[Normalized profile skills](#normalized-profile-skills) below. It adds no
+column to `profiles`, `profile_facts` or `profile_fact_provenance`, and the
+migrations stop there.
 
 ## Profile facts and their provenance
 
@@ -341,14 +345,143 @@ proposals; no consolidation across CV versions is attempted.
 
 ### Not implemented by these slices
 
-Nothing here normalizes an institution, an employer, a date, a canonical role or
-a skill alias, and no skill, `user_skills`, alias, preference, eligibility or
-matching table exists — that is Phase 3.4 and beyond, and it has not started. No
-Master CV, cover letter, application, form or CV adaptation is generated from
-these facts, and no future application flow may write to them directly. There is
-no HTTP endpoint, no web interface and no authentication over these tables: the
-only review that exists is the local terminal command described in
-[operations.md](operations.md#cv-review-phase-33b).
+Nothing in `0007` normalizes an institution, an employer, a date or a canonical
+role, and no preference, availability, mobility, eligibility or matching table
+exists anywhere. Skill aliases are normalized by `0008` below, and by nothing
+else. No Master CV, cover letter, application, form or CV adaptation is
+generated from these facts, and no future application flow may write to them
+directly. There is no HTTP endpoint, no web interface and no authentication
+over these tables: the only review that exists is the local terminal command
+described in [operations.md](operations.md#cv-review-phase-33b).
+
+## Normalized profile skills
+
+Migration `0008` adds the Phase 3.4A projection of **verified** skill facts, and
+nothing else: three tables, no column on any existing table, no seeded row.
+
+`profile_facts` stays the source of truth. Every row below is derived from
+facts whose status is already `ACCEPTED`, and the projection reads
+`fact_type = 'SKILL' AND status = 'ACCEPTED'` and nothing else.
+
+**No level exists in this schema.** There is no level, proficiency, score,
+confidence, seniority or occurrence-count column, and none may be added without
+first defining what evidence would prove it. Several accepted facts naming one
+skill are several evidences of one association, never "more" of that skill.
+
+No row of these three tables is ever updated by the projection, so none carries
+`updated_at`: reconciliation inserts what is missing and deletes what has
+stopped being justified.
+
+### `skills`
+
+The canonical identity of a skill, shared by every profile.
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `canonical_key` | `NOT NULL UNIQUE`, non-empty and already trimmed; the conservative technical key |
+| `canonical_name` | `NOT NULL`, non-empty and already trimmed; the display form |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+A row here is **vocabulary, not a claim**: it says the canonical name exists
+under this key, never that anybody holds it. Only a `profile_skills` row says
+that, and a `skills` row left behind by a rejected fact is harmless.
+
+### `profile_skills`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `skill_id` | `NOT NULL`, `FOREIGN KEY → skills(id) ON DELETE RESTRICT` |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`UNIQUE(profile_id, skill_id)` is what makes **one profile holds one skill at
+most once** a database rule rather than an application convention: two accepted
+facts naming the same skill are two evidences of this single row. The cascade
+expresses that a projection exists only for as long as the profile it describes;
+the `RESTRICT` expresses that a skill still held cannot be deleted from the
+vocabulary. Indexes: `idx_profile_skills_profile`, `idx_profile_skills_skill`.
+
+### `profile_skill_evidence`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_skill_id` | `NOT NULL`, `FOREIGN KEY → profile_skills(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, `FOREIGN KEY → profile_facts(id) ON DELETE CASCADE` |
+| `normalizer_version` | `NOT NULL`, non-empty and already trimmed |
+| `normalization_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`UNIQUE(fact_id)` — global, not per association — says that one verified fact
+justifies exactly one skill of one profile: a fact appearing under two skills
+would mean the projection read one claim two ways, which is a defect rather
+than corroboration. Several facts may justify the same association, which is
+what an alias and its canonical spelling produce. Index:
+`idx_profile_skill_evidence_profile_skill`.
+
+The table deliberately **does not duplicate `profile_fact_provenance`**. It
+records only what the projection itself decided — which normalizer version,
+which normalization rule — and points at the fact for everything else, so the
+audit chain stays a chain:
+
+```text
+profile_skill → profile_skill_evidence → profile_fact → profile_fact_provenance
+```
+
+### The normalizer
+
+`SKILL_NORMALIZER_VERSION` is `skill-normalizer-v1`. The comparison key is
+exactly four operations — Unicode NFKC, trim, inner whitespace runs collapsed
+to one space, casefold — so punctuation, symbols and accents survive and `C`,
+`C++` and `C#` are three keys and three skills. On top of it sits a **closed**
+v1 alias registry:
+
+| written | canonical |
+| --- | --- |
+| `PowerBI` | `Power BI` |
+| `Postgres` | `PostgreSQL` |
+| `sklearn` | `Scikit-learn` |
+| `ML` | `Machine Learning` |
+| `IA` | `Artificial Intelligence` |
+
+Each canonical form resolves to its own entry, so an alias and the canonical
+spelling of it are one skill; the rule recorded on the evidence distinguishes
+the two (`ALIAS_REGISTRY_V1`, `CANONICAL_FORM_V1`, or `LITERAL_V1` for a
+mention no entry knows). Two canonical skills claiming one key is a collision
+the registry refuses at import time. There is no stemming, no fuzzy matching,
+no edit distance, no similarity, no punctuation or accent stripping, no
+splitting of a mention and no enrichment of a name, and the registry is not
+administrable from the database: growing it is a code change that moves the
+normalizer version.
+
+### Synchronizing
+
+`synchronize_profile_skills(connection, profile_id)` is a reconciliation, not
+an append, and the whole of it is one `BEGIN IMMEDIATE` transaction:
+
+1. the profile must exist — synchronizing creates no user and no profile;
+2. the `ACCEPTED` `SKILL` facts are read **inside** the transaction;
+3. evidence pointing at a fact that is no longer one of them is deleted;
+4. missing canonical skills, associations and evidences are created;
+5. an association left with no evidence at all is deleted;
+6. `profile_facts` and `profile_fact_provenance` are never written.
+
+A second run on unchanged facts writes nothing, keeps every id and timestamp,
+and reports `changed=false`. A fact corrected or rejected after a run stops
+justifying a skill at the next run, and its `ACCEPTED` replacement becomes the
+current proof. See [operations.md](operations.md#profile-skills-phase-34a).
+
+### Not implemented by `0008`
+
+No administrable alias table, no structured project, experience, education,
+certification, language, preference, availability, mobility or career
+objective; no opportunity constraint, no eligibility rule, no skill extraction
+from an offer, no TF-IDF, no cosine similarity, no matching, no `match_score`,
+no ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. There is no HTTP endpoint and no remote write path over these
+tables.
 
 ## Source run history
 

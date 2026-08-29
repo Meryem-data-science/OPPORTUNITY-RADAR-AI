@@ -23,7 +23,7 @@ def connection(tmp_path):
     """A disposable, fully migrated SQLite database."""
     handle = connect_database(tmp_path / "source-health.db")
     try:
-        assert apply_migrations(handle) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+        assert apply_migrations(handle) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
         yield handle
     finally:
         handle.close()
