@@ -73,11 +73,19 @@ def _header_index(segments: Sequence[SectionSegment]) -> int | None:
 class _Builder:
     """Collects candidates in production order, keeping the first of each value.
 
-    Deduplication is by `(candidate_type, comparison form of the text)`. A CV
-    that repeats its email in a header and a footer describes one address, and
-    a validating human should see it once; the occurrence that is kept is the
-    first in document order, so the provenance stays the earliest place the
-    value appears.
+    Deduplication is by `(candidate_type, comparison value)`, where the
+    comparison value is the candidate's `normalized_value` when it has one and
+    the compared form of its `raw_text` otherwise. `normalized_value` exists
+    exactly where a technical normal form is unambiguous, so using it is what
+    makes "+33 6 00 00 00 00" and "+33600000000" one phone number rather than
+    two. Where it is `None` — URLs, section entries, skill mentions — the text
+    itself is compared, because any further folding would already be an
+    interpretation.
+
+    A CV that repeats its email in a header and a footer describes one address,
+    and a validating human should see it once; the occurrence that is kept is
+    the first in document order, so both the `raw_text` and the provenance stay
+    those of the earliest place the value appears.
     """
 
     def __init__(self, *, cv_sha256: str, parser_version: str) -> None:
@@ -97,7 +105,11 @@ class _Builder:
         section_index: int | None,
         normalized_value: str | None = None,
     ) -> None:
-        compared = comparison_form(raw_text)
+        compared = (
+            normalized_value
+            if normalized_value is not None
+            else comparison_form(raw_text)
+        )
         if not compared:
             return
         key = (candidate_type, compared)

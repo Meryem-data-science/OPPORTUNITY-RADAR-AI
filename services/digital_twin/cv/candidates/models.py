@@ -139,13 +139,18 @@ class CandidateWarning:
 
 
 def candidate_fingerprint(candidate_type: CandidateType, comparison_value: str) -> str:
-    """Return the stable identity of "this kind of value, in this document".
+    """Return the stable identity of "this kind of value", and of nothing else.
 
-    It is a pure function of the extractor version, the type and the compared
-    form of the value, so re-running the extractor on the same CV gives the
-    same fingerprints, and two runs can be lined up field by field. It is
-    **not** a persistent identifier: no `fact_id` exists in this slice, nothing
-    is stored, and a later phase is free to key its own rows differently.
+    It is a pure function of exactly three things — the extractor version, the
+    candidate type and the compared form of the value. The document is
+    deliberately **not** part of it: the same address read from two different
+    CVs fingerprints the same, which is what lets two runs, or two versions of
+    one CV, be lined up value by value. What ties a candidate to the file it
+    came from is its own `cv_sha256`, not this.
+
+    It is **not** a persistent identifier either: no `fact_id` exists in this
+    slice, nothing is stored, and a later phase is free to key its own rows
+    differently.
     """
     payload = "\x1f".join(
         (CANDIDATE_EXTRACTOR_VERSION, candidate_type.value, comparison_value)
@@ -177,7 +182,8 @@ class ExtractedCandidate:
     #: stays distinguishable.
     section_index: int | None
     rule_id: ExtractionRule
-    #: Stable across runs; see `candidate_fingerprint`.
+    #: Stable across runs and across documents for one value of one type; it
+    #: identifies the value, not this candidate. See `candidate_fingerprint`.
     fingerprint: str
     cv_sha256: str
     parser_version: str

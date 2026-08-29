@@ -223,14 +223,23 @@ What the rules refuse to do is the design:
   `NO_IDENTITY_CANDIDATE` and proposes nothing.
 - **Phone.** A digit run is a phone number only where an explicit `+` prefix, a
   phone label on the line, or a trunk zero *inside the header block* justifies
-  it, with 9 to 15 digits and no `/` as a separator. Dates and reference
-  numbers in an experience section are therefore not phone numbers, and no
+  it, with 9 to 15 digits and no `/` as a separator — and, before any of those,
+  only where no digit group of the run reads as a calendar year. "01 2020 -
+  12 2024" is a period wherever it appears, including in the header and next to
+  the word "portable"; "06 11 22 33 44" and "0470 12 34 56" are untouched,
+  because the test is on the grouping, not on four-digit groups being
+  suspicious. A real number carrying a year-shaped group is missed rather than
+  a period being announced, which is the trade-off this slice always takes. No
   country code or area code is ever added to a number the CV wrote without one.
 - **URLs.** GitHub and LinkedIn are decided by hostname, which is a fact about
-  the URL. Anything else is `PORTFOLIO_URL` only where a label of the closed
-  dictionary ("portfolio", "site", "website"…) introduces it earlier on the
-  same line, and `PROFESSIONAL_URL` otherwise — a personal-looking domain is
-  never promoted to a portfolio on a guess.
+  the URL. A host written without a scheme is recognised only from a closed
+  list and only where the hostname really ends, so `github.com.evil.invalid`
+  and `github.community` are never truncated into a GitHub link; written in
+  full, such a host is kept whole and classified on what it actually is.
+  Anything else is `PORTFOLIO_URL` only where a label of the closed dictionary
+  ("portfolio", "site", "website"…) introduces it earlier on the same line, and
+  `PROFESSIONAL_URL` otherwise — a personal-looking domain is never promoted to
+  a portfolio on a guess.
 - **Entries.** Education, experience, project, certification and language
   sections are cut into blocks on the separator the section actually uses —
   blank lines, else list markers, else one entry per line — and the block is
@@ -242,9 +251,15 @@ What the rules refuse to do is the design:
   one mention whose text is `Azure Data Platform (avancé)`, and an umbrella
   mention is never expanded into the technologies that usually go with it.
 
-Candidates are deduplicated by type and by the compared form of their text,
-keeping the first occurrence in document order, so a CV repeating its email in a
-header and a footer proposes it once.
+Candidates are deduplicated by type and by their comparison value — the
+`normalized_value` where one exists, the compared form of the text otherwise —
+keeping the first occurrence in document order with its own text and
+provenance. A CV repeating its email in a header and a footer proposes it once,
+and so does one writing its number as `+33 6 00 00 00 00` and `+33600000000`.
+The `fingerprint` is that comparison value hashed with the type and the
+extractor version: it identifies a value, not a document, so the same address
+in two CVs fingerprints the same and `cv_sha256` is what ties a candidate to
+its file.
 
 Phase 3.2B stops there. It creates **no** `profile_facts` row, persists nothing,
 adds no migration and no table, and not one candidate is a verified fact. The

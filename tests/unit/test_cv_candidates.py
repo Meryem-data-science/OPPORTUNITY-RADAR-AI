@@ -223,6 +223,57 @@ def test_dates_and_reference_numbers_are_not_read_as_phone_numbers(extract) -> N
     assert result.of_type(CandidateType.PHONE) == ()
 
 
+@pytest.mark.parametrize(
+    "header_line",
+    [
+        "01 2020 - 12 2024",
+        "09 2019 - 06 2023",
+        "Disponible 01 2020 - 12 2024",
+        "2019 2020 2021 2022",
+    ],
+)
+def test_a_period_in_the_header_is_never_read_as_a_phone_number(
+    extract, header_line: str
+) -> None:
+    """The header holds availability dates next to the contact details."""
+    result = extract(["Jeanne Exemple", header_line, "PROFIL", "Texte fictif."])
+
+    assert result.of_type(CandidateType.PHONE) == ()
+
+
+def test_a_phone_label_does_not_turn_a_period_into_a_phone_number(extract) -> None:
+    """"Portable" is a French adjective as often as it is a phone label."""
+    result = extract(
+        [
+            "Jeanne Exemple",
+            "EXPERIENCE",
+            "Poste portable de 01 2020 a 12 2024 chez Societe Exemple",
+        ]
+    )
+
+    assert result.of_type(CandidateType.PHONE) == ()
+
+
+@pytest.mark.parametrize(
+    "header_line",
+    [
+        "06 11 22 33 44",
+        "0611223344",
+        "06.11.22.33.44",
+        # A four-digit group that is not a year: the rule is about the shape of
+        # the grouping, not about four-digit groups being suspicious.
+        "0470 12 34 56",
+    ],
+)
+def test_a_national_number_written_the_usual_ways_still_survives(
+    extract, header_line: str
+) -> None:
+    result = extract(["Jeanne Exemple", header_line, "PROFIL", "Texte fictif."])
+
+    (phone,) = result.of_type(CandidateType.PHONE)
+    assert phone.rule_id is ExtractionRule.PHONE_HEADER_TRUNK_ZERO
+
+
 # --------------------------------------------------------------------------
 # 6-9. URLs
 # --------------------------------------------------------------------------
@@ -276,6 +327,73 @@ def test_a_url_is_not_carved_out_of_an_email_address(extract) -> None:
 
     assert _texts(result, CandidateType.EMAIL) == ["contact@github.com.invalid"]
     assert result.of_type(CandidateType.GITHUB_URL) == ()
+
+
+@pytest.mark.parametrize(
+    "look_alike",
+    [
+        "github.com.evil.invalid",
+        "linkedin.com.attacker.invalid",
+        "foo.github.com.evil.invalid",
+        "github.com.evil.invalid/user",
+        # A known name that is only the start of a longer label.
+        "github.community/topic",
+    ],
+)
+def test_a_host_that_merely_opens_with_a_known_name_is_not_that_host(
+    extract, look_alike: str
+) -> None:
+    """A bare host is recognised only where the hostname really ends."""
+    result = extract(["Jeanne Exemple", look_alike])
+
+    assert result.of_type(CandidateType.GITHUB_URL) == ()
+    assert result.of_type(CandidateType.LINKEDIN_URL) == ()
+    # Nothing was carved out of the middle of the name either.
+    assert all(
+        candidate.raw_text == look_alike for candidate in result.candidates[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    "written",
+    ["https://github.com.evil.invalid/user", "www.linkedin.com.attacker.invalid"],
+)
+def test_a_look_alike_host_written_in_full_stays_a_plain_professional_url(
+    extract, written: str
+) -> None:
+    """A complete URL is kept whole and classified on its real hostname."""
+    result = extract(["Jeanne Exemple", written])
+
+    (url,) = result.of_type(CandidateType.PROFESSIONAL_URL)
+    assert url.raw_text == written
+    assert url.rule_id is ExtractionRule.URL_UNLABELLED_PROFESSIONAL
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("github.com/user", CandidateType.GITHUB_URL),
+        ("foo.github.com/user", CandidateType.GITHUB_URL),
+        ("exemple.github.io/projet", CandidateType.GITHUB_URL),
+        ("linkedin.com/in/example", CandidateType.LINKEDIN_URL),
+        ("fr.linkedin.com/in/example", CandidateType.LINKEDIN_URL),
+    ],
+)
+def test_the_legitimate_bare_hosts_are_still_recognised(
+    extract, written: str, expected: CandidateType
+) -> None:
+    result = extract(["Jeanne Exemple", written])
+
+    (url,) = result.of_type(expected)
+    assert url.raw_text == written
+
+
+def test_a_host_ending_a_sentence_keeps_its_full_name(extract) -> None:
+    """A trailing dot closes a sentence; it is not a further hostname label."""
+    result = extract(["Jeanne Exemple", "Code publie sur github.com/user."])
+
+    (url,) = result.of_type(CandidateType.GITHUB_URL)
+    assert url.raw_text == "github.com/user"
 
 
 # --------------------------------------------------------------------------
@@ -511,6 +629,91 @@ def test_a_fingerprint_is_stable_across_two_documents_holding_the_value(
     assert left.fingerprint == right.fingerprint
     # The fingerprint identifies a value, not a stored fact.
     assert left.section_type is not right.section_type
+
+
+def test_one_phone_number_written_two_ways_yields_one_candidate(extract) -> None:
+    """The technical normal form is what two spellings are compared on."""
+    result = extract(
+        [
+            "Jeanne Exemple",
+            "Tel : +33 6 00 00 00 00",
+            "Mobile : +33600000000",
+        ]
+    )
+
+    (phone,) = result.of_type(CandidateType.PHONE)
+    # The first occurrence keeps its own text and its own provenance.
+    assert phone.raw_text == "+33 6 00 00 00 00"
+    assert phone.normalized_value == "+33600000000"
+
+
+def test_two_numbers_that_differ_stay_two_candidates(extract) -> None:
+    """A trunk zero is not the same number as an international prefix here.
+
+    Deciding they are the same would mean inferring a country, which no rule of
+    this package is allowed to do.
+    """
+    result = extract(["Jeanne Exemple", "+33 6 00 00 00 00", "06 00 00 00 00"])
+
+    phones = result.of_type(CandidateType.PHONE)
+    assert [phone.normalized_value for phone in phones] == [
+        "+33600000000",
+        "0600000000",
+    ]
+
+
+def test_one_email_written_two_ways_yields_one_candidate(extract) -> None:
+    result = extract(
+        [
+            "Jeanne Exemple",
+            "Jeanne.EXEMPLE@Example.Invalid",
+            "PROFIL",
+            "Ecrire a jeanne.exemple@example.invalid.",
+        ]
+    )
+
+    (email,) = result.of_type(CandidateType.EMAIL)
+    assert email.raw_text == "Jeanne.EXEMPLE@Example.Invalid"
+    assert email.normalized_value == "jeanne.exemple@example.invalid"
+
+
+def test_values_with_no_normal_form_are_compared_on_their_own_text(extract) -> None:
+    """URLs, entries and skills have no unambiguous normal form, so none is used."""
+    result = extract(
+        [
+            "Jeanne Exemple",
+            "https://exemple.invalid/page-a",
+            "https://exemple.invalid/page-b",
+            "COMPETENCES",
+            "Python, python, Python 3",
+        ]
+    )
+
+    assert _texts(result, CandidateType.PROFESSIONAL_URL) == [
+        "https://exemple.invalid/page-a",
+        "https://exemple.invalid/page-b",
+    ]
+    # Case folding is all the text comparison does, so "python" is "Python"
+    # and "Python 3" is a different mention.
+    assert _texts(result, CandidateType.SKILL) == ["Python", "Python 3"]
+    assert all(
+        candidate.normalized_value is None
+        for candidate in result.candidates
+        if candidate.candidate_type
+        not in {CandidateType.EMAIL, CandidateType.PHONE}
+    )
+
+
+def test_the_fingerprint_identifies_a_value_and_not_a_document(extract) -> None:
+    """Two CVs carrying one address fingerprint it the same; `cv_sha256` differs."""
+    first = extract(["Alex Exemple", "alex@example.invalid"])
+    second = extract(["Autre Exemple", "PROFIL", "Ecrire a ALEX@EXAMPLE.INVALID."])
+
+    (left,) = first.of_type(CandidateType.EMAIL)
+    (right,) = second.of_type(CandidateType.EMAIL)
+    assert left.fingerprint == right.fingerprint
+    assert left.raw_text != right.raw_text
+    assert left.cv_sha256 != right.cv_sha256
 
 
 def test_ambiguous_prose_produces_no_assertion_of_any_kind(extract) -> None:

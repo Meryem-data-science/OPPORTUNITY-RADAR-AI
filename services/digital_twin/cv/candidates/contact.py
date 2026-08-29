@@ -6,6 +6,12 @@ they would rather miss a contact written in an unusual way than assert one that
 is not there, and none of them ever adds information the CV did not write —
 no country code is inferred for a phone number, no scheme or host is completed
 for a URL, and no link is called a portfolio because it looks like one.
+
+Two refusals follow from that and are worth stating, because each one costs a
+real match somewhere: a digit run carrying a calendar-year group is read as a
+date rather than as a phone number, and a bare host is recognised only where
+the hostname really ends, so "github.com.evil.invalid" — a different host that
+merely opens with a known name — yields no bare-host link at all.
 """
 
 from __future__ import annotations
@@ -51,10 +57,18 @@ KNOWN_BARE_HOSTS: tuple[str, ...] = (
     "behance.net",
     "dribbble.com",
 )
+#: The end of a hostname. A known host is only recognised where the name
+#: really stops there: not in the middle of a label ("github.community"), and
+#: not as the prefix of a longer name ("github.com.evil.invalid"), which is a
+#: different host and must never be truncated into a GitHub link. A trailing
+#: dot that ends a sentence is not a further label, so it still stops the name.
+_HOSTNAME_END = r"(?![A-Za-z0-9\-])(?!\.[A-Za-z0-9\-])"
 _BARE_HOST_URL = re.compile(
     r"(?<![\w@.\-/])(?:[A-Za-z0-9\-]+\.)*(?:"
     + "|".join(re.escape(host) for host in KNOWN_BARE_HOSTS)
-    + r")(?:/[^\s<>\"']*)?",
+    + r")"
+    + _HOSTNAME_END
+    + r"(?:/[^\s<>\"']*)?",
     re.IGNORECASE,
 )
 
@@ -69,6 +83,13 @@ _PHONE_PATTERN = re.compile(r"(?<![\w+])\+?\d[\d .\-–—()]{7,20}\d(?![\w])")
 #: identifier far more often than it is a phone number.
 _PHONE_MIN_DIGITS = 9
 _PHONE_MAX_DIGITS = 15
+#: A group of exactly four digits reading as a calendar year. A CV writes those
+#: in dates and periods — "01 2020 - 12 2024" — and a phone number is not
+#: grouped that way in any plan: its groups are two, three or four digits that
+#: do not spell a year. The trade-off is deliberate and stated in the module
+#: docstring: a real number that happens to carry a year-shaped group is missed
+#: rather than a period being announced as a phone number.
+_CALENDAR_YEAR = re.compile(r"(?:19|20)\d{2}")
 #: Closed dictionary of words a CV puts in front of a phone number.
 PHONE_LABELS: tuple[str, ...] = (
     "tel",
@@ -149,17 +170,41 @@ def classify_url(url: str, *, line_prefix: str) -> tuple[CandidateType, Extracti
     return CandidateType.PROFESSIONAL_URL, ExtractionRule.URL_UNLABELLED_PROFESSIONAL
 
 
+def holds_calendar_year(matched: str) -> bool:
+    """Say whether a digit group of the run reads as a calendar year.
+
+    The check is on the *grouping*, not on the value of the run: a group of
+    exactly four digits spelling 19xx or 20xx is how a CV writes a date, and no
+    numbering plan groups a phone number that way. "01 2020 - 12 2024" and
+    "09 2019 - 06 2023" are therefore periods; "06 11 22 33 44" (groups of
+    two), "0611223344" (one group) and "0470 12 34 56" (a four-digit group that
+    is not a year) are untouched.
+    """
+    return any(
+        _CALENDAR_YEAR.fullmatch(group)
+        for group in re.split(r"\D+", matched)
+        if group
+    )
+
+
 def _phone_rule(
     matched: str, *, line_prefix: str, in_header: bool
 ) -> ExtractionRule | None:
     """Return the rule that justifies reading this run as a phone number.
 
-    An explicit "+" prefix is unambiguous anywhere. A phone label announces one
-    anywhere. A leading trunk zero is only trusted inside the header block,
-    where a CV writes its contact details: elsewhere a run opening on a zero is
-    as likely to be a date or a reference, and a wrong phone number is worse
-    than a missing one.
+    A run carrying a calendar-year group is a date or a period whatever else
+    points at it, so it is refused first, for every rule below: the header
+    block of a CV holds availability dates next to its contact details, and a
+    "portable"/"mobile" label sits in French sentences that are about neither.
+
+    Past that, an explicit "+" prefix is unambiguous anywhere, and a phone
+    label announces a number anywhere. A leading trunk zero is only trusted
+    inside the header block, where a CV writes its contact details: elsewhere a
+    run opening on a zero is as likely to be a reference, and a wrong phone
+    number is worse than a missing one.
     """
+    if holds_calendar_year(matched):
+        return None
     compact = matched.strip()
     if compact.startswith("+"):
         return ExtractionRule.PHONE_INTERNATIONAL_PREFIX
