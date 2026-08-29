@@ -343,6 +343,45 @@ that was refused and never duplicates one that was confirmed. Because the key
 includes `cv_sha256`, two different CVs are two different proofs and produce two
 proposals; no consolidation across CV versions is attempted.
 
+### Re-reading one CV into these same tables (Phase 3.3C)
+
+A newer parser or extractor reading the same file is a **new campaign**: same
+`cv_sha256`, different `parser_version` and `extractor_version`, therefore a
+different `provenance_key` for every candidate. Left to
+`ensure_profile_fact_proposal` alone, that would propose the whole document
+again, so Phase 3.3C compares the two campaigns first and writes through two
+primitives instead of one.
+
+`list_profile_facts_by_cv_evidence` reads the older campaign back:
+`profile_facts` joined to `profile_fact_provenance` on `profile_id`,
+`source_type = 'CV'`, `cv_sha256`, `parser_version` and `extractor_version`.
+`source_type` is written into the statement rather than passed in, so a
+person's own `USER_INPUT` corrections can never be read back as if a document
+had produced them, and `DISTINCT` keeps a fact carrying several proofs of one
+campaign from being listed twice. `status` takes no part: a fact belongs to the
+campaign that read it whatever was decided about it since.
+
+`ensure_profile_fact_provenance` is then the primitive for a reading that has
+not changed: it inserts a `profile_fact_provenance` row for an existing fact
+unless that exact `provenance_key` is already attached to that exact fact, in
+which case it returns the existing row and reports `created = false`. Where
+`add_profile_fact_provenance` lets `UNIQUE (fact_id, provenance_key)` refuse a
+duplicate, this is the no-op form of the same write, so a reconciliation can be
+re-run. It refuses rather than guesses in the same two ways as the proposal
+primitive — several facts of one profile sharing a proof, or that proof already
+justifying a *different* fact — and it reads nothing about the fact's status,
+because attaching evidence is not a decision.
+
+No `profile_facts` row is created for an unchanged reading, so a re-read never
+duplicates a fact, and none is ever deleted: retiring an old reading is an
+`ACCEPTED → REJECTED` transition of the ordinary cycle, leaving the row, its
+`value`, its `normalized_value` and its own campaign's provenance in place. A
+fact that is already `REJECTED`, one that is terminal `CORRECTED` and one still
+`PROPOSED` are all left exactly as they are.
+
+Phase 3.3C adds no table, no column and no migration. The local command is in
+[operations.md](operations.md#cv-reconciliation-phase-33c).
+
 ### Not implemented by these slices
 
 Nothing in `0007` normalizes an institution, an employer, a date or a canonical
@@ -352,7 +391,8 @@ else. No Master CV, cover letter, application, form or CV adaptation is
 generated from these facts, and no future application flow may write to them
 directly. There is no HTTP endpoint, no web interface and no authentication
 over these tables: the only review that exists is the local terminal command
-described in [operations.md](operations.md#cv-review-phase-33b).
+described in [operations.md](operations.md#cv-review-phase-33b), and the
+reconciliation above confirms nothing on its own either.
 
 ## Normalized profile skills
 

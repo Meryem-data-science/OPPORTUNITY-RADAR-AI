@@ -72,11 +72,13 @@ class AmbiguousFactEvidenceError(ProfileFactError):
 
 
 class ConflictingFactEvidenceError(ProfileFactError):
-    """Raised when known evidence already justifies a fact of a different type.
+    """Raised when known evidence already justifies another reading of a profile.
 
-    A piece of evidence identifies one reading of one document, so the type it
-    supports cannot change between two runs. If it appears to have changed,
-    something upstream is wrong and a second fact must not be invented for it.
+    A piece of evidence identifies one reading of one document, so neither the
+    type it supports nor the fact it belongs to can change between two runs. If
+    either appears to have changed, something upstream is wrong: a second fact
+    must not be invented for it, and it must not be silently moved onto a fact
+    a caller happens to name.
     """
 
 
@@ -198,6 +200,18 @@ def _insert_provenance(
     if row is None:
         raise ProfileFactError("provenance insert returned no row")
     return _provenance_from_row(row)
+
+
+def _select_provenance(
+    connection: sqlite3.Connection, fact_id: int, provenance_key: str
+) -> FactProvenance | None:
+    """The evidence this fact already holds under that key, or None."""
+    row = connection.execute(
+        f"SELECT {_PROVENANCE_COLUMNS} FROM profile_fact_provenance "
+        "WHERE fact_id = ? AND provenance_key = ?",
+        (fact_id, provenance_key),
+    ).fetchone()
+    return None if row is None else _provenance_from_row(row)
 
 
 def _insert_fact(
@@ -399,6 +413,87 @@ def add_profile_fact_provenance(
     return recorded
 
 
+@dataclass(frozen=True)
+class FactProvenanceAttachment:
+    """The outcome of one idempotent attachment: the evidence, and whether it is new."""
+
+    #: The evidence this fact holds under that key, whether this call wrote it
+    #: or found it already recorded.
+    provenance: FactProvenance
+    #: True only when this call inserted it. A second call with the same proof
+    #: reports False and writes nothing.
+    created: bool
+
+
+def ensure_profile_fact_provenance(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_id: int,
+    provenance: ProvenanceInput,
+    after_lookup: Callable[[], None] | None = None,
+) -> FactProvenanceAttachment:
+    """Attach this evidence to this fact, unless it is already attached to it.
+
+    `add_profile_fact_provenance` appends and lets the schema refuse a
+    duplicate; this is the no-op form of the same operation, for a caller that
+    re-runs. Identity is the resolved `provenance_key`, exactly as it is for
+    `ensure_profile_fact_proposal`: the same proof presented twice for the same
+    fact resolves to the same key, so a second call reports `created=False` and
+    writes nothing at all — no second row, no `updated_at` touched anywhere, no
+    `IntegrityError` for the caller to interpret.
+
+    Three states are refused rather than guessed at:
+
+    * the fact does not belong to this profile — `ProfileFactNotFoundError`;
+    * that proof already justifies several facts of this profile —
+      `AmbiguousFactEvidenceError`, because the database is already
+      inconsistent and picking one of them would decide which reading counts;
+    * that proof already justifies a *different* fact of this profile —
+      `ConflictingFactEvidenceError`. One piece of evidence identifies one
+      reading, so moving it onto another fact would silently rewrite what the
+      document was read as saying.
+
+    The whole operation is one `BEGIN IMMEDIATE` transaction scoped by
+    `profile_id`. Nothing about the fact itself is read as part of the
+    decision: evidence accumulates on a `PROPOSED`, `ACCEPTED`, `CORRECTED` or
+    `REJECTED` fact alike, and attaching it decides nothing and re-opens
+    nothing — a status is moved by the decision calls of this module, never by
+    a piece of evidence arriving.
+
+    `after_lookup` is a test seam invoked once the lookup is done and before
+    anything is written; production callers leave it unset.
+    """
+    if not isinstance(provenance, ProvenanceInput):
+        raise ProfileFactError("provenance must be a ProvenanceInput")
+    provenance_key = provenance.resolved_provenance_key()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_fact(connection, profile_id, fact_id)
+        known = _select_facts_by_evidence(connection, profile_id, provenance_key)
+        if after_lookup is not None:
+            after_lookup()
+        if len(known) > 1:
+            raise AmbiguousFactEvidenceError(
+                f"{len(known)} facts of profile {profile_id} share one proof"
+            )
+        if known and known[0].id != fact_id:
+            raise ConflictingFactEvidenceError(
+                f"that proof already justifies fact {known[0].id} of profile "
+                f"{profile_id}, not fact {fact_id}"
+            )
+        recorded = _select_provenance(connection, fact_id, provenance_key)
+        if recorded is not None:
+            connection.execute("COMMIT")
+            return FactProvenanceAttachment(provenance=recorded, created=False)
+        attached = _insert_provenance(connection, fact_id, provenance)
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return FactProvenanceAttachment(provenance=attached, created=True)
+
+
 def get_profile_fact(
     connection: sqlite3.Connection, profile_id: int, fact_id: int
 ) -> ProfileFact | None:
@@ -434,6 +529,56 @@ def list_profile_facts(
         f"SELECT {_FACT_COLUMNS} FROM profile_facts "
         f"WHERE {' AND '.join(clauses)} ORDER BY id",
         tuple(parameters),
+    ).fetchall()
+    return tuple(_fact_from_row(row) for row in rows)
+
+
+def list_profile_facts_by_evidence(
+    connection: sqlite3.Connection, profile_id: int, provenance_key: str
+) -> tuple[ProfileFact, ...]:
+    """Every fact of this profile that this exact proof justifies, oldest first.
+
+    Normally none or one. Two or more is the inconsistency
+    `AmbiguousFactEvidenceError` names, and this reading is how a caller sees
+    it rather than being handed one of the two.
+    """
+    return _select_facts_by_evidence(connection, profile_id, provenance_key)
+
+
+def list_profile_facts_by_cv_evidence(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    *,
+    cv_sha256: str,
+    parser_version: str,
+    extractor_version: str,
+) -> tuple[ProfileFact, ...]:
+    """Every fact of this profile read from that document by those versions.
+
+    The filter is the whole point: one document digest, one parser version and
+    one extractor version identify a single *reading campaign* of a CV, and a
+    later campaign over the same file is a different set of rows even where the
+    values are identical. `source_type = 'CV'` is written into the statement
+    rather than passed in, so no caller can widen it to `USER_INPUT` and read a
+    person's own corrections back as if a document had produced them.
+
+    Status takes no part: a fact read by that campaign belongs to it whether a
+    human has since accepted, corrected or rejected it. `DISTINCT` is what
+    keeps a fact carrying several proofs of one campaign from being listed
+    twice.
+    """
+    columns = ", ".join("f." + column for column in _FACT_COLUMNS.split(", "))
+    rows = connection.execute(
+        f"""SELECT DISTINCT {columns}
+              FROM profile_facts AS f
+              JOIN profile_fact_provenance AS p ON p.fact_id = f.id
+             WHERE f.profile_id = ?
+               AND p.source_type = 'CV'
+               AND p.cv_sha256 = ?
+               AND p.parser_version = ?
+               AND p.extractor_version = ?
+             ORDER BY f.id""",
+        (profile_id, cv_sha256, parser_version, extractor_version),
     ).fetchall()
     return tuple(_fact_from_row(row) for row in rows)
 

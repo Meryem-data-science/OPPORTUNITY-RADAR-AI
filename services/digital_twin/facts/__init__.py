@@ -25,7 +25,10 @@ What this slice does **not** do:
   this package offers that bridge is `ensure_profile_fact_proposal`, which
   records one claim as `PROPOSED` unless the exact proof behind it is already
   known — so importing a CV twice proposes nothing twice, and a decision a
-  human already took is never asked again;
+  human already took is never asked again — together with
+  `ensure_profile_fact_provenance`, the same no-op form for attaching one more
+  proof to a fact that already exists, and the two evidence-scoped readings a
+  reconciliation of two extraction campaigns needs;
 * it offers no user interface, no HTTP endpoint and no authentication; the
   local review CLI built on it is Phase 3.3B and lives beside that bridge;
 * it normalizes no business content: no institution, employer, date, canonical
@@ -55,6 +58,7 @@ from services.digital_twin.facts.repository import (
     ConflictingFactEvidenceError,
     FactCorrection,
     FactProposal,
+    FactProvenanceAttachment,
     InvalidFactTransitionError,
     ProfileFactError,
     ProfileFactNotFoundError,
@@ -62,9 +66,12 @@ from services.digital_twin.facts.repository import (
     add_profile_fact_provenance,
     correct_profile_fact,
     ensure_profile_fact_proposal,
+    ensure_profile_fact_provenance,
     get_profile_fact,
     list_profile_fact_provenance,
     list_profile_facts,
+    list_profile_facts_by_cv_evidence,
+    list_profile_facts_by_evidence,
     list_verified_profile_facts,
     propose_profile_fact,
     reject_profile_fact,
@@ -78,6 +85,7 @@ __all__ = [
     "FactCorrection",
     "FactProposal",
     "FactProvenance",
+    "FactProvenanceAttachment",
     "FactSourceType",
     "FactStatus",
     "InvalidFactTransitionError",
@@ -93,9 +101,12 @@ __all__ = [
     "decode_page_numbers",
     "encode_page_numbers",
     "ensure_profile_fact_proposal",
+    "ensure_profile_fact_provenance",
     "get_profile_fact",
     "list_profile_fact_provenance",
     "list_profile_facts",
+    "list_profile_facts_by_cv_evidence",
+    "list_profile_facts_by_evidence",
     "list_verified_profile_facts",
     "propose_profile_fact",
     "reject_profile_fact",

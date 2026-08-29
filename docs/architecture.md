@@ -434,6 +434,85 @@ and it computes no eligibility, match, ranking or score. There is no web
 interface, no HTTP endpoint and no authentication for any of it, and no network
 call or model takes part.
 
+## Reconciling a re-read CV (Phase 3.3C)
+
+A CV is read by a *campaign*: one document digest, one parser version, one
+extractor version. When the parser or the extractor is fixed, the same file is
+read again — and Phase 3.3B, whose idempotence is keyed on the evidence, sees a
+new campaign as a new proof for every candidate. Importing it the ordinary way
+would therefore propose the whole document a second time, including the
+readings a person already accepted.
+
+`services/digital_twin/cv/reconciliation.py` is the re-read. It compares the
+two campaigns for one profile and one document and splits the newer one in
+three:
+
+```text
+old campaign facts ─┬─ same fact_type + same value ─ unchanged ─ attach the new
+   (3.3B import)    │                                            proof, keep the
+                    │                                            fact and its
+                    │                                            decision
+                    ├─ no counterpart in the new  ── superseded ─ finalize may
+                    │  campaign                                   REJECT it
+                    │
+new candidates ─────┴─ no counterpart in the old  ── changed ──── PROPOSED, for
+                       campaign                                   a human
+```
+
+**Identity is exact equality, and deliberately nothing else.** Two readings are
+the same reading only when the profile, the CV provenance, the digest, the old
+campaign's two versions and the `fact_type` all match and the `value` equals
+the candidate's `raw_text` byte for byte. There is no normalization, no case
+folding, no whitespace collapsing, no substring rule, no edit distance, no
+similarity, no fingerprint comparison and no model anywhere in the module; a
+test walks its source to keep it that way. A text differing by one character is
+a different thing to say about the person and becomes a proposal, because the
+failure worth engineering against is a changed reading slipping in under an old
+acceptance. Where the old campaign holds two facts for one reading, the module
+raises instead of choosing: picking one would silently decide which of two
+human decisions counts.
+
+**Status takes no part in identity.** A reading the person corrected is still
+the same reading: `prepare` attaches the new proof to the `CORRECTED` fact and
+leaves both it and its `USER_INPUT` replacement exactly as they are. Attaching
+evidence is not a decision and re-opens nothing.
+
+The operation is split in two, with a person in between.
+`prepare_cv_fact_reconciliation` attaches the new campaign's provenance to every
+unchanged reading through `ensure_profile_fact_provenance` — the no-op form of
+the append, so a second `prepare` writes nothing and raises nothing — and puts
+every changed reading through the ordinary 3.3B bridge as a `PROPOSED` fact. It
+accepts nothing, corrects nothing and rejects nothing, and the review CLI of
+Phase 3.3B is what answers the proposals.
+
+`finalize_cv_fact_reconciliation` recomputes the same plan from the same three
+inputs, then, **before any mutation**, resolves each changed reading through its
+own evidence and requires it to be ground truth: `ACCEPTED`, or `CORRECTED`
+with an `ACCEPTED` replacement. One still `PROPOSED`, one `REJECTED`, one whose
+fact is missing and one whose proof justifies several facts each stop the run
+with not a single old fact touched. Only once they are all answered does each
+superseded reading that is still `ACCEPTED` become `REJECTED` — meaning "that
+type and that text, under that segmentation, is no longer active truth". The
+row stays, its value stays, its own campaign's provenance stays, an already
+rejected one is a no-op, a terminal `CORRECTED` one is left as the person left
+it, and one nobody ever decided is left `PROPOSED`, because turning an
+unanswered proposal into a refusal would be the module deciding. There is no
+`DELETE` in the package.
+
+Each attachment, each proposal and each rejection is its own `BEGIN IMMEDIATE`
+transaction, so both operations are restartable rather than all-or-nothing, and
+a second complete run of either writes nothing. Every report they return is
+counters, canonical fact types, version strings and the document digest — no
+value, no `raw_text` — and the module itself prints and logs nothing.
+
+Phase 3.3C reuses the `0007` schema and adds no migration and no table. It
+writes to `profile_facts` and `profile_fact_provenance` and to nothing else: it
+imports no skill, opportunity or migration module, and it never runs
+`synchronize_profile_skills` — reconciling non-`SKILL` readings leaves the
+accepted `SKILL` facts, and therefore the Phase 3.4A projection, exactly where
+they were. The local command is in
+[operations.md](operations.md#cv-reconciliation-phase-33c).
+
 ## Normalized profile skills (Phase 3.4A)
 
 `services/digital_twin/skills/` derives one reading from facts a person already
@@ -548,6 +627,13 @@ in [operations.md](operations.md#profile-skills-phase-34a).
   a person answering the review prompt. An import that runs twice proposes
   nothing twice, and an import can never revive a claim somebody already
   refused.
+- Re-reading a CV reconciles; it confirms nothing. A newer campaign that reads
+  the same type and the same text is the same reading, so it attaches its proof
+  to the fact that already exists rather than duplicating it, and a reading
+  that changed is a proposal a person answers. Retiring an old reading is a
+  `REJECTED` status and never a deletion, it happens only after every new
+  reading has been confirmed, and an old proposal nobody ever answered is left
+  as it is.
 - A skill is a projection, not a source. A `profile_skills` row exists because
   an `ACCEPTED` `SKILL` fact says so, and it stops existing when no accepted
   fact says so any more. It carries no level and no count, holding a skill
@@ -575,8 +661,8 @@ CV-to-offer recommendation engine, or ML recommendation model. The Digital
 Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
 read-only CV parser added by Phase 3.2A, the unverified candidates added by
 Phase 3.2B, the validated fact store added by Phase 3.3A, the bridge and
-local review command added by Phase 3.3B, and the skill projection added by
-Phase 3.4A, all described above; no matching, ranking or scoring is derived
+local review command added by Phase 3.3B, the re-read reconciliation added by
+Phase 3.3C, and the skill projection added by Phase 3.4A, all described above; no matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, and the only review that exists is a
 terminal command — there is no web profile interface and no Master CV PDF.

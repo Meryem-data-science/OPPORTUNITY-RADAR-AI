@@ -424,6 +424,90 @@ and calls no model, and there is no web interface or HTTP endpoint for any of
 it. Skill aliases are resolved by the separate projection below, from facts
 this review has already accepted.
 
+## CV reconciliation (Phase 3.3C)
+
+Use this when a **newer parser or extractor** re-reads a CV that has already
+been imported and reviewed. Importing it again with the review command would
+propose the whole document a second time, because the import is idempotent on
+the evidence and a new campaign is new evidence. This command lines the two
+campaigns up instead:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+
+# 1. look, without writing anything
+python -m services.digital_twin.cv.reconciliation_cli plan /path/to/cv.pdf
+
+# 2. attach the new evidence, propose what changed
+python -m services.digital_twin.cv.reconciliation_cli prepare /path/to/cv.pdf
+
+# 3. answer the proposals by hand
+python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
+
+# 4. retire the old readings the confirmed new ones replaced
+python -m services.digital_twin.cv.reconciliation_cli finalize /path/to/cv.pdf
+```
+
+It reuses migration `0007` and adds no table and no migration. It asks for the
+address without echo, so it never enters the shell history; `--email` stays
+available for tests and automation. The profile must already exist, this
+command creates no user and no profile, and it refuses a non-SQLite backend
+before it connects and before it asks for anything.
+
+The older campaign is named by two options, which default to the campaign this
+project moved off:
+
+| Option | Default |
+| --- | --- |
+| `--old-parser-version` | `cv-parser-v1` |
+| `--old-extractor-version` | `cv-candidates-v1` |
+
+Both are technical version strings and never CV content. The command also
+refuses to run if the checkout does not itself produce a *newer* campaign than
+the one named, so a stale reading can never retire a good fact.
+
+**What each command does.** `plan` writes nothing at all. `prepare` attaches the
+current campaign's provenance to every reading that is unchanged — same fact
+type, same value, byte for byte — so those facts keep their id, their value and
+the decision already taken about them, and creates a `PROPOSED` fact for every
+reading that changed. `finalize` marks the superseded old readings `REJECTED`.
+
+**Nothing is ever accepted automatically, and nothing is ever deleted.** Every
+changed reading is `PROPOSED` until you answer it in the review command, and
+`finalize` refuses to run at all while any of them is still `PROPOSED`, was
+`REJECTED`, is missing, or is `CORRECTED` with a replacement nobody accepted —
+it names them by fact type, id and reason, and rejects no old fact in that
+case. Retiring a reading is a status change: the row, its value, its
+`normalized_value` and its own campaign's provenance all stay, so both
+segmentations of the document remain auditable side by side.
+
+Re-running any of the three is expected and safe. A second `prepare` attaches
+nothing and proposes nothing; a second `finalize` rejects nothing and reports
+`changed_anything=false`. A run interrupted partway is resumed by running it
+again.
+
+The output is counters, canonical fact types, version strings and the document
+digest, on stdout and in the structured log alike:
+
+| Reported by | Counters |
+| --- | --- |
+| all three | `historical_facts`, `new_candidates`, `unchanged_candidates`, `changed_candidates`, `superseded_old_facts`, and the same three broken down by fact type |
+| `prepare` | `provenance_attached`, `provenance_already_present`, `newly_proposed`, `already_proposed`, `pending_review` |
+| `finalize` | `resolved_changed`, `newly_rejected`, `already_rejected`, `left_terminal_corrected`, `left_undecided`, `changed_anything` |
+
+**This command prints no CV content at all** — no value, no `raw_text`, no
+name, employer, school, project or skill mention — and there is no flag that
+would print one; the review command above is the only place values are shown.
+The CV path is never echoed back either, not even in an error message.
+
+What it does **not** do: it accepts nothing, it deletes no fact and no
+provenance row, it rewrites no value, it runs no migration, and it never
+touches a skill, opportunity or matching row — reconciling non-`SKILL` readings
+leaves the accepted `SKILL` facts, and therefore the projection below, exactly
+where they were. Run that projection yourself afterwards if a `SKILL` reading
+did change. It opens no network connection and calls no model.
+
 ## Profile skills (Phase 3.4A)
 
 Migration `0008` is applied by the ordinary explicit command, like every other
