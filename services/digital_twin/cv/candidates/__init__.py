@@ -7,11 +7,15 @@ This slice takes the `ParsedCv` Phase 3.2A produced and turns it into a list of
 
 It never means "this is true of the person". Nothing here is verified,
 accepted, corrected or rejected; there is no `profile_fact`, no validated
-Master CV, no skill level or proficiency, no confidence and no score. The
-human validation workflow that turns a candidate into a fact is Phase 3.3, and
-the business normalization of institutions, employers, dates and skill aliases
-is Phase 3.4. Neither exists yet, and Phase 3.2 as a whole is not a validated
-Master CV.
+Master CV, no skill level or proficiency, no confidence and no score.
+
+Phase 3.3A now provides the place a validated fact would live
+(`services/digital_twin/facts/`), but this package is not connected to it: no
+code here imports it, no candidate becomes a `profile_facts` row, and the
+mapping from an `ExtractedCandidate` to a proposed fact is Phase 3.3B and does
+not exist. The business normalization of institutions, employers, dates and
+skill aliases is Phase 3.4 and does not exist either, so Phase 3.2 as a whole
+is still not a validated Master CV.
 
 Every rule is local, free, deterministic and explainable — regular expressions,
 closed dictionaries and fixed segmentation rules, all readable in this package.

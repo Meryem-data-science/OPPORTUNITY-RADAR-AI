@@ -294,7 +294,59 @@ Phase 3.2A parser failures in the table above, because it parses the file first.
 What a candidate is: one named deterministic rule found this text on this page
 of this section. What it is **not**: a fact about the person. Nothing here is
 verified, accepted, corrected or rejected, no candidate carries a level, a
-proficiency, a confidence or a score, no `profile_facts` row exists, and the
-result lives in memory until you export it yourself. The human validation
-workflow is Phase 3.3 and the advanced business normalization is Phase 3.4;
-neither exists yet, so Phase 3.2 is still not a validated Master CV.
+proficiency, a confidence or a score, and the result lives in memory until you
+export it yourself.
+
+Phase 3.3A now provides a `profile_facts` table (see the next section), but
+this command does not write to it: no candidate is imported, automatically or
+otherwise, and there is no review workflow that would let you accept one. That
+import is Phase 3.3B, the advanced business normalization is Phase 3.4, and
+neither exists, so Phase 3.2 is still not a validated Master CV.
+
+## Profile facts (Phase 3.3A)
+
+Migration `0007` is applied by the ordinary explicit command, like every other
+one:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `profile_facts` and `profile_fact_provenance` and inserts no row.
+
+**There is no command, interface or endpoint for reviewing facts.** This slice
+is persistence and its validation rules, nothing else: no CLI subcommand, no
+page, no HTTP route, no authentication, and no import of the Phase 3.2B CV
+candidates. Extracting a CV and recording what it found are still two separate
+things, and nothing connects them — that connection is Phase 3.3B. The only way
+to record or decide a fact today is to call
+`services/digital_twin/facts/repository.py` from Python against a database you
+name explicitly.
+
+What the operations layer guarantees:
+
+- a fact is created only together with its evidence, in one transaction; if the
+  evidence is refused, no fact is left behind;
+- a fact is verified when, and only when, its status is `ACCEPTED`.
+  `list_verified_profile_facts` returns those and nothing else, filtering in
+  SQL, so a proposal, a rejection or a correction cannot leak into a later
+  reading;
+- a correction never overwrites. It writes a new `ACCEPTED` fact with a
+  `USER_INPUT` provenance, marks the previous one `CORRECTED` and links the two,
+  in one transaction that either commits whole or rolls back whole, so the
+  previous value is still readable afterwards;
+- accepting an accepted fact and rejecting a rejected one are no-ops that keep
+  the original decision date; every other move raises an explicit error;
+- every mutation is scoped by `profile_id`, so a fact id belonging to another
+  profile is reported as missing rather than changed.
+
+The rules, the taxonomies and the exact schema are in
+[database.md](database.md#profile-facts-and-their-provenance).
+
+What this slice does **not** do: it generates no Master CV, cover letter,
+application, form or CV adaptation; it computes no eligibility, match, ranking
+or score; it derives no skill level, alias, employer, institution or date; and
+it opens no network connection and calls no model. Phase 3.4 has not started
+and no matching of any kind exists.

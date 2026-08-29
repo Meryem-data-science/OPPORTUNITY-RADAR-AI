@@ -24,7 +24,9 @@ recorded. The migrations currently present are:
 4. `0004_opportunity_qualifications.sql`: persistent versioned qualification;
 5. `0005_source_runs.sql`: persistent history of attempted source runs;
 6. `0006_user_profile_foundation.sql`: the `users` identity root and the
-   `profiles` Digital Twin root.
+   `profiles` Digital Twin root;
+7. `0007_profile_facts.sql`: the validated `profile_facts` and their
+   `profile_fact_provenance` evidence.
 
 Apply every pending migration to configured local SQLite explicitly:
 
@@ -119,9 +121,9 @@ profile exists only for as long as its owner does. The migration creates the
 two tables and inserts no row: an identity is created by an explicit local
 command, never by applying a migration.
 
-`profiles` deliberately carries no factual column. A headline, a location, an
-education level, a skill level, mobility, or availability are facts with a
-provenance, and provenance is the subject of `profile_facts` in a later slice.
+`profiles` deliberately carries no factual column, and `0007` adds none. A
+headline, a location, an education level, mobility, or availability are facts
+with a provenance, and provenance is the subject of `profile_facts` below.
 Putting them here would make the root itself the place where facts are
 overwritten without any record of where they came from.
 
@@ -153,9 +155,9 @@ python -m services.digital_twin.cli show-profile
 The command prints `user_id` and `profile_id` only, never the address, and
 never logs it. A non-SQLite backend is refused locally, before any connection.
 
-Not implemented by this slice: `cv_versions`, `profile_facts`, skills,
-education, experiences, projects, certifications, languages, preferences,
-eligibility, matching, scoring, and any profile HTTP API.
+Not implemented by that slice: `cv_versions`, skills, preferences,
+eligibility, matching, scoring, and any profile HTTP API. `profile_facts`
+arrives with `0007` below.
 
 The Phase 3.2A CV parser adds no table and no migration. It reads a local PDF
 and returns a result in memory; nothing it extracts is written to the database,
@@ -164,11 +166,161 @@ and no `profile_facts` row exists yet. See
 
 The Phase 3.2B candidate extractor adds no table and no migration either. It
 turns that in-memory parse into unverified candidates that also stay in memory:
-no `profile_facts`, no candidate table, no `cv_versions`, no SQLite write, and
-no row in `users` or `profiles`. `0006_user_profile_foundation.sql` is still the
-last migration. Persisting anything read from a CV requires the Phase 3.3
-validation workflow, which does not exist. See
+no candidate table, no `cv_versions`, no SQLite write, and no row in `users`,
+`profiles` or `profile_facts`. Migration `0007` below creates the fact tables,
+but nothing in the CV packages writes to them: no candidate is imported, and
+that mapping is Phase 3.3B. See
 [operations.md](operations.md#cv-candidate-extraction-phase-32b).
+
+## Profile facts and their provenance
+
+Migration `0007` adds the persistent anti-hallucination foundation, and nothing
+else: two tables, no column on `profiles`, no seeded row.
+
+### `profile_facts`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_type` | `NOT NULL`, non-empty and already trimmed |
+| `value` | `NOT NULL`, non-blank; the source's own wording, kept verbatim |
+| `normalized_value` | nullable; set only where a technical normal form is unambiguous, and non-blank when present |
+| `status` | `NOT NULL`, one of `PROPOSED`, `ACCEPTED`, `CORRECTED`, `REJECTED` |
+| `replaced_by_fact_id` | nullable, `FOREIGN KEY → profile_facts(id) ON DELETE RESTRICT` |
+| `created_at`, `updated_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+| `decided_at` | nullable: when a human decided |
+
+A table `CHECK` makes the four shapes of a fact a database rule rather than an
+application convention:
+
+| status | `decided_at` | `replaced_by_fact_id` |
+| --- | --- | --- |
+| `PROPOSED` | `NULL` | `NULL` |
+| `ACCEPTED` | set | `NULL` |
+| `REJECTED` | set | `NULL` |
+| `CORRECTED` | set | set |
+
+A proposal has been decided by nobody, so it carries no decision date; a
+decision is always dated; and only a corrected fact carries a replacement — and
+a corrected fact always carries one, which is what keeps the previous value
+reachable instead of lost. A fact cannot replace itself, `decided_at` cannot
+precede `created_at`, and a partial unique index on `replaced_by_fact_id` makes
+a replacement replace exactly one fact, so a correction chain stays a chain.
+
+There is deliberately **no `verified` column**, and no column named anything
+like it. "Verified" has exactly one definition — `status = 'ACCEPTED'` — because
+two places to say the same thing is one place too many, and the one that drifts
+is the one that gets believed. `ProfileFact.is_verified` is a computed Python
+property over the status, never a stored second answer. There is no confidence,
+no score, no proficiency and no skill level anywhere in the slice either.
+
+No factual column is added to `profiles`. A fact belongs beside the evidence
+that produced it, never in the root that owns it, where it could be overwritten
+without a trace.
+
+### `profile_fact_provenance`
+
+Evidence, stored separately from the decision it supports. Every fact the
+repository creates gets at least one provenance row in the same transaction: a
+fact with no evidence would be an assertion nobody could check.
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `fact_id` | `NOT NULL`, `FOREIGN KEY → profile_facts(id) ON DELETE CASCADE` |
+| `source_type` | `NOT NULL`, one of `CV`, `GITHUB`, `USER_INPUT`, `OTHER_ACCEPTED_EVIDENCE` |
+| `provenance_key` | `NOT NULL`, non-empty, `UNIQUE (fact_id, provenance_key)` |
+| `source_locator` | nullable |
+| `cv_sha256` | nullable; exactly 64 lowercase hex characters when present |
+| `parser_version`, `extractor_version` | nullable |
+| `candidate_fingerprint` | nullable; hexadecimal when present |
+| `rule_id` | nullable |
+| `page_numbers` | nullable; canonical JSON array of ascending page numbers written without spaces, `'[1,2]'` |
+| `section_type`, `section_index` | nullable |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+Those columns are exactly what one Phase 3.2B `ExtractedCandidate` already
+carries — `cv_sha256`, `parser_version`, `extractor_version`, `fingerprint`,
+`rule_id`, the pages, the section and its index — so a candidate's provenance
+can later be stored field for field, without loss. **That import is not
+implemented**: nothing maps an `ExtractedCandidate` to a `profile_facts` row,
+and building it is Phase 3.3B.
+
+`UNIQUE (fact_id, provenance_key)` is what stops the same proof from being
+recorded twice for one fact, so a duplicate can never look like corroboration.
+The key may be given explicitly; left unset, the repository derives it as a pure
+function of the evidence fields, with no clock and no counter in it, so the same
+proof always resolves to the same key. Evidence accumulates and is never
+rewritten: a second, genuinely different proof is added beside the first.
+
+A provenance row never invents what its source did not carry. An absent page,
+rule or version stays `NULL` and is never defaulted to a plausible value, and
+`NULL` means "this source did not carry it", never zero.
+
+### The validation cycle
+
+`services/digital_twin/facts/repository.py` owns every operation, in the style
+of the user/profile root: plain SQLite, no ORM, and one explicit
+`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` around each multi-step write, so a
+failure rolls the whole operation back.
+
+| from | to | how |
+| --- | --- | --- |
+| — | `PROPOSED` | `propose_profile_fact`, with its first provenance |
+| `PROPOSED` | `ACCEPTED` | `accept_profile_fact` |
+| `PROPOSED` | `REJECTED` | `reject_profile_fact` |
+| `PROPOSED` | `CORRECTED` | `correct_profile_fact` |
+| `ACCEPTED` | `REJECTED` | `reject_profile_fact` |
+| `ACCEPTED` | `CORRECTED` | `correct_profile_fact` |
+
+`REJECTED` and `CORRECTED` are terminal. Accepting an already-accepted fact and
+rejecting an already-rejected one are idempotent no-ops that leave the original
+`decided_at` alone, so re-clicking never restamps the moment the real decision
+was taken. Every other move — accepting a rejection, correcting a correction —
+raises `InvalidFactTransitionError` rather than being silently absorbed.
+
+Every mutation is scoped by `profile_id` as well as by `fact_id`. A fact id from
+another profile is reported as missing rather than mutated, so no cross-profile
+write is possible even with a valid id.
+
+### Correction never overwrites
+
+A correction is one transaction that does five things and commits or rolls back
+as a whole:
+
+1. the new value is written as a **new** `profile_facts` row, `ACCEPTED`,
+   because a person typing the right value is an explicit human validation and
+   not another proposal to review;
+2. that new fact receives a `USER_INPUT` provenance;
+3. the previous fact becomes `CORRECTED`;
+4. its `replaced_by_fact_id` points at the replacement;
+5. its own `value` is left exactly as it was.
+
+There is no `UPDATE profile_facts SET value = ...` anywhere in the package, and
+a test asserts that on the SQL the module actually executes. Successive
+corrections therefore build a chain in which every value ever proposed stays
+readable, and only the last link is `ACCEPTED`.
+
+### The verified reading
+
+`list_verified_profile_facts(connection, profile_id)` is the one reading later
+phases are meant to build on. It filters on `status = 'ACCEPTED'` in SQL, so a
+`PROPOSED`, `REJECTED` or `CORRECTED` fact cannot leak into it and a caller
+cannot forget the filter. `list_profile_facts` is the separate review and audit
+reading that deliberately shows every status.
+
+### Not implemented by this slice
+
+The Phase 3.2B candidates are **not** imported: no candidate-to-fact mapping,
+no CV review command, no interface, no HTTP endpoint and no authentication
+exist, so the only way to record a fact today is to call the repository from
+Python. Nothing here normalizes an institution, an employer, a date, a canonical
+role or a skill alias, and no skill, `user_skills`, alias, preference,
+eligibility or matching table exists — that is Phase 3.4 and beyond, and it has
+not started. No Master CV, cover letter, application, form or CV adaptation is
+generated from these facts, and no future application flow may write to them
+directly.
 
 ## Source run history
 
