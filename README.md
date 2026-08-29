@@ -22,7 +22,7 @@ Implemented now:
   source's Enabled flag, last run, status, items found, new items, relevant
   items, and errors.
 
-Phase 3 has started, and only these five slices of it exist:
+Phase 3 has started, and only these six slices of it exist:
 
 - **Phase 3.1A** — the Digital Twin root: a `users` row, the one `profiles` row
   it owns, and a local CLI to create or read that pair. The profile holds no
@@ -51,6 +51,17 @@ Phase 3 has started, and only these five slices of it exist:
   section — and the import is idempotent on that evidence, so re-running one CV
   proposes nothing twice. A local CLI then shows each undecided proposal and
   asks a person to accept, reject, correct, skip or quit.
+- **Phase 3.4A** — a deterministic projection of the **verified** skill facts
+  onto normalized skills. It reads `fact_type = 'SKILL' AND status = 'ACCEPTED'`
+  and nothing else, normalizes each mention with a closed registry of five
+  aliases (`PowerBI → Power BI`, `Postgres → PostgreSQL`,
+  `sklearn → Scikit-learn`, `ML → Machine Learning`,
+  `IA → Artificial Intelligence`) over a conservative technical key, and
+  reconciles `skills`, `profile_skills` and `profile_skill_evidence` so that a
+  fact later corrected or rejected stops justifying a skill at the next run.
+  **No level is inferred**: no proficiency, no score, no confidence, no
+  seniority, and several facts naming one skill are several proofs of one
+  association, never "more" of it.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is
@@ -61,18 +72,22 @@ auto-accept, no confidence and no threshold anywhere in the path, and only
 Phase 3.2 as a whole is therefore still **not** a validated Master CV, and
 neither is Phase 3.3. What 3.3A adds is the reliable place a validated fact
 lives and the reading — `list_verified_profile_facts` — that returns only
-`ACCEPTED` facts; what 3.3B adds is the honest way a CV reaches it. No Master CV
-PDF is generated, Phase 3.4 has not started — the advanced business structuring
-and normalization (institutions, employers, dates, canonical roles, skill
-aliases and levels) does not exist — and there is no eligibility, matching,
-ranking or score, and no web profile interface of any kind.
+`ACCEPTED` facts; what 3.3B adds is the honest way a CV reaches it; what 3.4A
+adds is one derived reading of those accepted facts and no new truth. No Master
+CV PDF is generated. Of Phase 3.4, only the skill projection above exists: no
+structured project, experience, education, certification or language, no
+employer, institution, date or canonical role, no administrable alias table and
+no skill level. There is no eligibility, matching, ranking or score, and no web
+profile interface of any kind.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, match a CV against an offer, or provide
-ML recommendations. The Digital Twin exists only as the four slices listed
+ML recommendations. The Digital Twin exists only as the six slices listed
 above: there is no validated Master CV, no generated Master CV PDF, no skill
-table or skill level, no eligibility rule, and no match score. CV candidates do
+level, no eligibility rule, and no match score. Skills exist only as the
+projection of facts a person already accepted, and holding a skill says nothing
+about how well. CV candidates do
 reach `profile_facts` now, but only as proposals a person reviews by hand — no
 import accepts anything, and the review is a local terminal command, not a web
 interface. Phase 3.2B itself still produces candidates in memory only: it adds
@@ -89,8 +104,9 @@ stale.
 - `services/api/`: read-only FastAPI opportunity API.
 - `services/digital_twin/`: the user/profile root, the local CV PDF parser, the
   unverified candidate extractor built on it, the validated `profile_facts`
-  store with its provenance, and the bridge and review CLI that turn candidates
-  into proposals a human decides.
+  store with its provenance, the bridge and review CLI that turn candidates
+  into proposals a human decides, and the skill projection derived from the
+  facts those decisions accepted.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

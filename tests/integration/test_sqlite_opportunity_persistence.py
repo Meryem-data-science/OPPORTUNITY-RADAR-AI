@@ -34,7 +34,7 @@ def test_sqlite_persistence_is_same_source_idempotent(tmp_path) -> None:
     )
     timestamps = iter(["2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"])
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
         first = persist_opportunities(
             connection, source, [candidate], clock=lambda: next(timestamps)
         )

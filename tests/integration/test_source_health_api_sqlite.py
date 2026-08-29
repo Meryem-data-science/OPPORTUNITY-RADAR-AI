@@ -103,7 +103,7 @@ def _failure(connection, source: SourceConfig, *, day: int, error: BaseException
 def _seed(path) -> tuple[int, int]:
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
         anomalous = _source("test_api_anomalous")
         failing = _source("test_api_failing")
         running = _source("test_api_running")

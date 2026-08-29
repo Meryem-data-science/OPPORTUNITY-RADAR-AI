@@ -266,8 +266,10 @@ adds no migration and no table, and not one candidate is a verified fact.
 Phase 3.3B does now carry candidates into the fact store, but it does so from
 *outside* this package: no module here imports `services/digital_twin/facts`
 and none imports the bridge either, and a test asserts both. Institutions,
-employers, canonical roles, normalized dates and skill aliases and levels are
-Phase 3.4. Matching, eligibility, ranking and scores are further out still.
+employers, canonical roles and normalized dates are Phase 3.4 and do not
+exist; skill aliases are resolved by Phase 3.4A, downstream of a human's
+acceptance and never from a candidate, and no skill level is derived anywhere.
+Matching, eligibility, ranking and scores are further out still.
 Phase 3.2 as a whole is finished as a *reading* of a document, and is not a
 validated Master CV.
 
@@ -333,9 +335,11 @@ is: the mapping lives outside it, in the Phase 3.3B bridge described below, and
 what this package offers that bridge is one primitive,
 `ensure_profile_fact_proposal`. Nothing here generates a Master CV, a cover
 letter, an application, a form or an adapted CV, and nothing computes an
-eligibility, a match, a ranking or a score. No skill, alias, preference,
-eligibility or matching table exists: Phase 3.4 has not started. No network
-call, no model and no remote write path takes part.
+eligibility, a match, a ranking or a score. No preference, availability,
+mobility, eligibility or matching table exists, and no administrable alias
+table either; the skill tables `0008` adds are a projection *of* this store,
+described below, and nothing in this package knows about them. No network call,
+no model and no remote write path takes part.
 
 ## CV candidates into proposed facts (Phase 3.3B)
 
@@ -372,7 +376,8 @@ becomes `normalized_value`, both verbatim, and the candidate's provenance is
 copied field for field — digest, parser and extractor versions, candidate
 fingerprint, rule id, pages, section and index. No skill alias, no skill level,
 no employer, institution, date or country parsed out of a value, no canonical
-role and no rewording: that is Phase 3.4 and it has not started. `source_locator`
+role and no rewording. Skill aliases are resolved by Phase 3.4A, downstream of
+a human's acceptance and never here. `source_locator`
 stays `NULL` on purpose, because the only locator this side could supply is the
 local path of the PDF and a CV filename usually carries the person's name.
 
@@ -416,6 +421,85 @@ and it computes no eligibility, match, ranking or score. There is no web
 interface, no HTTP endpoint and no authentication for any of it, and no network
 call or model takes part.
 
+## Normalized profile skills (Phase 3.4A)
+
+`services/digital_twin/skills/` derives one reading from facts a person already
+accepted, and adds no new truth:
+
+```text
+profile_facts ── ACCEPTED + SKILL ── normalize_skill ── profile_skills
+   (3.3A)          (the filter)        (3.4A)              │
+                                                           └─ profile_skill_evidence
+                                                                    │
+                                                              profile_facts
+                                                                    │
+                                                          profile_fact_provenance
+```
+
+`profile_facts` stays the source of truth. The projection reads
+`fact_type = 'SKILL' AND status = 'ACCEPTED'`, written into the SQL rather than
+passed in, so a `PROPOSED`, `REJECTED` or `CORRECTED` fact and an `ACCEPTED`
+fact of any other type are invisible to it and no caller can widen the filter.
+Nothing from the Phase 3.2B extractor reaches a skill without passing through a
+fact a human accepted: this package imports no CV module.
+
+It is built out of four refusals.
+
+**It refuses to infer a level.** There is no level, proficiency, score,
+confidence or seniority column in `0008`, no such field in the package, and no
+count that could be read as one. Several accepted facts naming one skill are
+several *evidences* of one association, never "more" of that skill, and a
+mention like `Azure Data Platform (avancé)` stays one skill whose canonical name
+still carries the parenthesis. Recording a level that is genuinely known is a
+separate slice, and it starts by defining what evidence would prove it.
+
+**It refuses to guess what somebody meant.** The comparison key is conservative
+and exactly four operations — Unicode NFKC, trim, inner whitespace runs
+collapsed to one space, casefold — so punctuation, symbols and accents all
+survive it and `C`, `C++` and `C#` are three keys and three skills. On top of
+it sits a **closed** registry of five aliases: `PowerBI → Power BI`,
+`Postgres → PostgreSQL`, `sklearn → Scikit-learn`, `ML → Machine Learning`,
+`IA → Artificial Intelligence`. Each canonical form resolves to its own entry,
+so an alias and the canonical spelling of it are one skill. There is no
+stemming, no fuzzy matching, no edit distance, no similarity, no punctuation or
+accent stripping, no splitting of a mention and no enrichment of a name; a
+mention no entry knows is kept literally, and a neighbouring technology is
+never substituted for it. Two canonical skills claiming one key is a collision
+the registry refuses at import time rather than resolving by priority. Every
+result explains itself: the technical input, the comparison key, the canonical
+key and name, `SKILL_NORMALIZER_VERSION` and the named rule that applied.
+
+**It refuses to append blindly.** `synchronize_profile_skills` is a
+reconciliation inside one `BEGIN IMMEDIATE` transaction: the profile must
+exist, the accepted facts are read inside the transaction, associations still
+justified are left exactly as they are — ids and timestamps included — what is
+missing is created, evidence pointing at a fact that stopped being an accepted
+skill fact is deleted, and an association left with no evidence at all is
+deleted with it. Running it twice on unchanged facts writes nothing and reports
+`changed=false`. A fact corrected or rejected after a run therefore stops
+justifying a skill at the next run, and its `ACCEPTED` replacement becomes the
+current proof, without anything else being asked of the operator.
+
+**It refuses to write back.** No statement in the package inserts, updates or
+deletes a `profile_facts` or `profile_fact_provenance` row, and a test reads
+the SQL to keep it that way. The evidence table duplicates no provenance
+column either: it records what the projection itself decided — which normalizer
+version, which normalization rule — and points at the fact for everything else,
+so the audit chain stays a chain rather than a copy that can drift. A canonical
+`skills` row is never deleted: it is shared vocabulary, and on its own it says
+nothing about any profile.
+
+Phase 3.4A stops there. It adds no administrable alias table, no structured
+project, experience, education, certification, language, preference,
+availability, mobility or career objective, no opportunity constraint, no
+eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
+similarity, no matching, no match score, no ranking, no recommendation, no
+notification, no CV adaptation and no auto-apply. There is no HTTP endpoint, no
+web interface and no remote write path, and no network call or model takes
+part. The exact schema is in
+[database.md](database.md#normalized-profile-skills), and the local command is
+in [operations.md](operations.md#profile-skills-phase-34a).
+
 ## Data-processing boundaries
 
 - Opportunity persistence provides repeat-observation idempotence for a source.
@@ -451,6 +535,11 @@ call or model takes part.
   a person answering the review prompt. An import that runs twice proposes
   nothing twice, and an import can never revive a claim somebody already
   refused.
+- A skill is a projection, not a source. A `profile_skills` row exists because
+  an `ACCEPTED` `SKILL` fact says so, and it stops existing when no accepted
+  fact says so any more. It carries no level and no count, holding a skill
+  says nothing about how well, and a `skills` row on its own is vocabulary
+  rather than a claim about anybody.
 - A CV candidate is a reading, not a fact. An `ExtractedCandidate` states that
   one named rule found this text on this page of this section; it does not
   state that the person is called that, works there or knows that. Nothing is
@@ -472,10 +561,11 @@ LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, or ML recommendation model. The Digital
 Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
 read-only CV parser added by Phase 3.2A, the unverified candidates added by
-Phase 3.2B, the validated fact store added by Phase 3.3A, and the bridge and
-local review command added by Phase 3.3B, all described above; no matching,
-ranking or scoring is derived from any of them, no CV candidate is ever
-imported as anything but a proposal, and the only review that exists is a
+Phase 3.2B, the validated fact store added by Phase 3.3A, the bridge and
+local review command added by Phase 3.3B, and the skill projection added by
+Phase 3.4A, all described above; no matching, ranking or scoring is derived
+from any of them, no CV candidate is ever imported as anything but a proposal,
+no skill level is inferred from anything, and the only review that exists is a
 terminal command — there is no web profile interface and no Master CV PDF.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,

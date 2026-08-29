@@ -66,7 +66,7 @@ def migrated_settings(tmp_path, name):
     path = tmp_path / name
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
     finally:
         connection.close()
     return path, Settings(ApplicationEnvironment.TEST, DatabaseBackend.SQLITE, path)

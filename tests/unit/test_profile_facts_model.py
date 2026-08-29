@@ -262,7 +262,8 @@ def test_the_fact_package_never_overwrites_a_value_in_place() -> None:
         assert "delete from" not in folded
 
 
-def test_migrations_stop_at_0007_and_0007_adds_only_the_two_fact_tables() -> None:
+def test_0007_adds_only_the_two_fact_tables() -> None:
+    """The fact store is `0007` alone; `0008` projects it and adds no column."""
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
     assert names == [
@@ -273,7 +274,11 @@ def test_migrations_stop_at_0007_and_0007_adds_only_the_two_fact_tables() -> Non
         "0005_source_runs.sql",
         "0006_user_profile_foundation.sql",
         "0007_profile_facts.sql",
+        "0008_normalized_profile_skills.sql",
     ]
+    assert "ALTER TABLE" not in Path(
+        "migrations/0008_normalized_profile_skills.sql"
+    ).read_text(encoding="utf-8")
     statements = Path("migrations/0007_profile_facts.sql").read_text(encoding="utf-8")
     created = [
         line for line in statements.splitlines() if line.startswith("CREATE TABLE")

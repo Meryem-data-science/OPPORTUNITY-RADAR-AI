@@ -300,8 +300,10 @@ export it yourself.
 This command still writes nothing. Importing those candidates as reviewable
 proposals is a separate, explicit command — see
 [CV review](#cv-review-phase-33b) below — and even that accepts nothing on its
-own. The advanced business normalization is Phase 3.4 and does not exist, so
-Phase 3.2 is still not a validated Master CV.
+own. The advanced business normalization of institutions, employers, dates and
+canonical roles does not exist, so Phase 3.2 is still not a validated Master CV;
+the one normalization that does exist, for skills, reads accepted facts rather
+than candidates — see [Profile skills](#profile-skills-phase-34a) below.
 
 ## Profile facts (Phase 3.3A)
 
@@ -346,8 +348,9 @@ The rules, the taxonomies and the exact schema are in
 What this slice does **not** do: it generates no Master CV, cover letter,
 application, form or CV adaptation; it computes no eligibility, match, ranking
 or score; it derives no skill level, alias, employer, institution or date; and
-it opens no network connection and calls no model. Phase 3.4 has not started
-and no matching of any kind exists.
+it opens no network connection and calls no model. Skill aliases are resolved
+by the Phase 3.4A projection built on top of these facts, which reads them and
+never writes one; no matching of any kind exists.
 
 ## CV review (Phase 3.3B)
 
@@ -415,7 +418,85 @@ above, plus a refused backend and a missing profile, each with exit code 1.
 
 What this command does **not** do: it accepts nothing on its own, it generates
 no Master CV PDF, cover letter, application or CV adaptation, it derives no
-skill level, alias, employer, institution, date or canonical role — Phase 3.4
-has not started — and it computes no eligibility, match, ranking or score. It
-opens no network connection and calls no model, and there is no web interface or
-HTTP endpoint for any of it.
+skill level, alias, employer, institution, date or canonical role, and it
+computes no eligibility, match, ranking or score. It opens no network connection
+and calls no model, and there is no web interface or HTTP endpoint for any of
+it. Skill aliases are resolved by the separate projection below, from facts
+this review has already accepted.
+
+## Profile skills (Phase 3.4A)
+
+Migration `0008` is applied by the ordinary explicit command, like every other
+one:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `skills`, `profile_skills` and `profile_skill_evidence` and inserts
+no row. No vocabulary is seeded: a skill exists because an accepted fact named
+it.
+
+Project the accepted skill facts of one existing profile onto normalized
+skills:
+
+```bash
+python -m services.digital_twin.skills.cli sync
+```
+
+The command asks for the address without echo, so it never enters the shell
+history; `--email` stays available for tests and automation. The profile must
+already exist — create it with `python -m services.digital_twin.cli init-profile`
+first. This command creates no user and no profile, and it refuses a non-SQLite
+backend before it connects and before it asks for anything.
+
+**It decides nothing.** Every fact it reads was already accepted by a person in
+the [CV review](#cv-review-phase-33b); a fact nobody accepted is invisible to
+it. It reads `fact_type = 'SKILL' AND status = 'ACCEPTED'` and nothing else, so
+a `PROPOSED`, `REJECTED` or `CORRECTED` fact and an `ACCEPTED` fact of any other
+type never reach a skill, and it never writes to `profile_facts` or
+`profile_fact_provenance`.
+
+**No level is inferred, from anything.** There is no proficiency, score,
+confidence or seniority in the schema or in the output, and several accepted
+facts naming one skill are several *evidences* of one association rather than
+"more" of that skill. A mention like `Azure Data Platform (avancé)` is one
+skill whose name still carries the parenthesis.
+
+Re-running is expected and is the normal way to apply a decision. The run is a
+reconciliation, not an append: associations still justified keep their ids and
+timestamps, missing ones are created, evidence whose fact was corrected or
+rejected is dropped, and an association left with no evidence at all is
+deleted. A second run on unchanged facts writes nothing and reports
+`changed=false`.
+
+The output is counters and a version, and it names **no skill**:
+
+| key | meaning |
+| --- | --- |
+| `verified_skill_facts` | how many `ACCEPTED` `SKILL` facts the run read |
+| `profile_skills` | how many skills the profile holds afterwards |
+| `skills_created` | new canonical rows added to the shared vocabulary |
+| `profile_skills_created` / `profile_skills_removed` | associations added / dropped |
+| `evidence_created` / `evidence_removed` | proofs added / dropped |
+| `normalizer_version` | `skill-normalizer-v1` |
+| `changed` | `false` when the run found the projection already correct |
+
+Unlike the CV review, this command prints no skill value at all — not on
+stdout, not in the structured log, not in an error message — and it has no flag
+that would print one. Reading the projection back is a Python call against a
+database you name explicitly.
+
+The failures it can report are a refused backend and a missing profile, each
+with exit code 1.
+
+What this slice does **not** do: no administrable alias table, no structured
+project, experience, education, certification, language, preference,
+availability, mobility or career objective; no opportunity constraint, no
+eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
+similarity, no matching, no match score, no ranking, no recommendation, no
+notification, no CV adaptation and no auto-apply. It opens no network connection
+and calls no model, and there is no web interface or HTTP endpoint for any of
+it.
