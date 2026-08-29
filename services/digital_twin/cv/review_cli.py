@@ -70,8 +70,9 @@ SENSITIVE_OUTPUT_NOTICE = (
 )
 NOTHING_TO_REVIEW_NOTICE = "nothing left to review for this CV"
 
-#: The five decisions, and the only five. Any other input decides nothing and
-#: asks again: a mistyped key must never accept somebody's CV for them.
+#: The five decisions, and the only five. They are matched exactly, so a
+#: capital, a stray space or anything longer decides nothing and asks again: a
+#: mistyped key must never accept somebody's CV for them.
 ACCEPT_ACTION = "a"
 REJECT_ACTION = "r"
 CORRECT_ACTION = "c"
@@ -146,14 +147,20 @@ class _Session:
         answer prints a notice and asks again, it does not fall through to a
         default, and it does not skip either — skipping is `s`, typed on
         purpose.
+
+        The comparison is exact. `"A"`, `"a "` and `" a"` are not the answer
+        `a`, and none of them accepts anything: tidying an answer up before
+        reading it would be this command guessing what somebody meant, on the
+        one prompt where guessing is the whole thing to avoid. The correction
+        value is a different matter and is still read as typed, then trimmed —
+        that is a value, not a decision.
         """
         fact_id = entry.fact.id
         while True:
-            answer = self._prompt(ACTION_PROMPT)
-            if answer is None:
+            action = self._prompt(ACTION_PROMPT)
+            if action is None:
                 self.outcome.quit_requested = True
                 return False
-            action = answer.strip().casefold()
             if action == ACCEPT_ACTION:
                 accept_profile_fact(self.connection, self.profile_id, fact_id)
                 self.outcome.accepted += 1

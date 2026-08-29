@@ -388,7 +388,9 @@ produced it — and then asks:
 | `s` | Skip. Nothing is written; the fact stays `PROPOSED`. |
 | `q` | Quit. The remaining facts stay `PROPOSED`. |
 
-Any other input prints a notice and asks again. No other character decides
+Those five answers are matched **exactly**, in lower case and with nothing
+around them: `A`, `a ` and ` a` are not the answer `a` and accept nothing. Any
+other input prints a notice and asks again, so no other character decides
 anything, an empty correction decides nothing either, and a closed stdin is a
 quit rather than an implicit acceptance.
 

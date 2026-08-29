@@ -325,6 +325,56 @@ def test_an_unknown_answer_decides_nothing_and_asks_again(
     assert statuses(database) == [FactStatus.PROPOSED] * CANDIDATE_COUNT
 
 
+def test_an_action_is_matched_exactly_and_never_tidied_up(
+    silence_logging, database, cv_path, capsys
+) -> None:
+    """A capital or a stray space is not the answer `a`, and accepts nothing.
+
+    Trimming or lowercasing the answer would be the command guessing what
+    somebody meant, on the one prompt where guessing is the whole thing to
+    avoid. The exact answer typed afterwards still works normally.
+    """
+    review_cli.main(
+        [review_cli.REVIEW_COMMAND, str(cv_path), "--email", TEST_ONLY_EMAIL],
+        ask=asker("A", " a ", "a", "q"),
+    )
+    output = capsys.readouterr().out
+    summary = summary_of(output)
+
+    # The two near-misses were refused, and only the exact answer decided.
+    assert output.count(review_cli.INVALID_ACTION_NOTICE) == 2
+    assert summary["accepted_this_run"] == "1"
+    assert summary["rejected_this_run"] == "0"
+    assert summary["corrected_this_run"] == "0"
+    assert summary["skipped_this_run"] == "0"
+    recorded = facts(database)
+    assert recorded[0].status is FactStatus.ACCEPTED
+    assert [fact.status for fact in recorded[1:]] == [FactStatus.PROPOSED] * 8
+
+
+@pytest.mark.parametrize(
+    "near_miss", ["A", "R", "C", "S", "Q", " a", "a ", " a ", "", "yes", "ac"]
+)
+def test_no_near_miss_of_any_action_decides_anything(
+    silence_logging, database, cv_path, capsys, near_miss
+) -> None:
+    """Every one of these is refused, including a capital of each action."""
+    review_cli.main(
+        [review_cli.REVIEW_COMMAND, str(cv_path), "--email", TEST_ONLY_EMAIL],
+        ask=asker(near_miss, "q"),
+    )
+    output = capsys.readouterr().out
+    summary = summary_of(output)
+
+    assert review_cli.INVALID_ACTION_NOTICE in output
+    assert summary["accepted_this_run"] == "0"
+    assert summary["rejected_this_run"] == "0"
+    assert summary["corrected_this_run"] == "0"
+    assert summary["skipped_this_run"] == "0"
+    assert summary["remaining_proposed"] == str(CANDIDATE_COUNT)
+    assert statuses(database) == [FactStatus.PROPOSED] * CANDIDATE_COUNT
+
+
 def test_a_decided_fact_is_never_offered_again(
     silence_logging, database, cv_path, capsys
 ) -> None:
