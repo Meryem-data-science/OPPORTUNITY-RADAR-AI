@@ -62,6 +62,11 @@ def code_only(path: Path) -> str:
         "January 2024",
         "2023 - présent",
         "janvier 2024 — aujourd'hui",
+        "2025-2026 (en cours)",
+        "2025 - 2026 (en cours)",
+        "2023/2024 (en cours)",
+        "2022-2024 (présent)",
+        "2025-2026 (EN COURS)",
     ],
 )
 def test_a_closed_explicit_form_is_a_period(fragment: str) -> None:
@@ -88,6 +93,33 @@ def test_a_closed_explicit_form_is_a_period(fragment: str) -> None:
 )
 def test_anything_else_is_not_a_period(fragment: str) -> None:
     """A year buried in prose is prose. The rule reads whole fragments only."""
+    assert not is_explicit_period(fragment)
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        "2022-2024 (6 mois)",
+        "2022-2024 (stage)",
+        "2022-2024 (Paris)",
+        "2022-2024 (temps plein)",
+        "2022-2024 (approx.)",
+        "2022-2024 (CDD)",
+        "2024 (en cours)",
+        "(en cours)",
+        "2022-2024 (en cours) suite",
+        "2022-2024 (en cours, télétravail)",
+    ],
+)
+def test_a_parenthesis_outside_the_closed_registry_is_not_a_period(
+    fragment: str,
+) -> None:
+    """The qualifier must be a word of `OPEN_END_MARKERS`, exactly.
+
+    A duration, a contract type, a city or an approximation is free text, and a
+    closed range is required in front of it — `2024 (en cours)` names one end,
+    not two.
+    """
     assert not is_explicit_period(fragment)
 
 
@@ -215,6 +247,37 @@ def test_an_employer_is_never_deduced_from_a_sentence() -> None:
 
     assert reading.organization_text is None
     assert reading.role_text is None
+
+
+def test_a_closed_range_qualified_as_ongoing_is_structured() -> None:
+    """`2025-2026 (en cours)` is a period the source wrote whole.
+
+    Both ends are written and the parenthesis holds a word of the closed
+    registry, so the segment is named — and stored exactly as written. Nothing
+    is read out of the qualifier: no `current` flag, no end date, no duration
+    and no employment status exists anywhere in this slice.
+    """
+    reading = structure_experience(
+        "Rôle fictif | Organisation fictive | 2025-2026 (en cours)"
+    )
+
+    assert reading.structuring_rule_id is StructuringRule.EXPERIENCE_PIPE_HEADER_V1
+    assert reading.role_text == "Rôle fictif"
+    assert reading.organization_text == "Organisation fictive"
+    assert reading.period_text == "2025-2026 (en cours)"
+    assert reading.description_text is None
+    for forbidden in ("current", "is_current", "ongoing", "end_date", "start_date"):
+        assert not hasattr(reading, forbidden), forbidden
+
+
+@pytest.mark.parametrize("qualifier", ["6 mois", "stage", "Paris", "temps plein"])
+def test_a_range_with_a_free_text_qualifier_is_not_structured(qualifier: str) -> None:
+    reading = structure_experience(
+        f"Rôle fictif | Organisation fictive | 2022-2024 ({qualifier})"
+    )
+
+    assert reading.structuring_rule_id is StructuringRule.UNPARSED_V1
+    assert reading.period_text is None
 
 
 def test_a_school_year_is_never_converted_into_calendar_dates() -> None:

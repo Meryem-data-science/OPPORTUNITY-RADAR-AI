@@ -628,7 +628,11 @@ a period leaves the title only as a final parenthesis holding a closed range of
 two four-digit years. An explicit period is a **whole** fragment matching one
 closed form — a year, `MM/YYYY`, a month from a closed French/English registry
 with a year, a dash range of two of those, a range closed by one of the
-open-end markers, or a school year `YYYY/YYYY` kept verbatim. No employer is
+open-end markers, a school year `YYYY/YYYY` kept verbatim, or a closed range
+qualified by a parenthesis holding exactly one of those same open-end markers
+(`2025-2026 (en cours)`), from which nothing is read: no `current` flag, no end
+date, no duration and no employment status. A parenthesis holding free text —
+`(6 mois)`, `(stage)`, `(Paris)` — is not one. No employer is
 deduced from a sentence, no role from a technology, no seniority from the word
 "stage", no duration, no calendar date from a school year, no skill from a
 description, no certification and no language.

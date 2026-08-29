@@ -88,14 +88,25 @@ _NAMED_MONTH_YEAR = (
 _ENDPOINT = rf"(?:{_NAMED_MONTH_YEAR}|{_NUMERIC_MONTH_YEAR}|{_YEAR})"
 _DASH = rf"\s*[{re.escape(RANGE_DASHES)}]\s*"
 _OPEN_END = "|".join(re.escape(marker) for marker in OPEN_END_MARKERS)
+#: A range whose two ends the document wrote: two endpoints separated by a
+#: dash, or a school year written `2023/2024`.
+_CLOSED_RANGE = rf"(?:{_ENDPOINT}{_DASH}{_ENDPOINT}|{_YEAR}/{_YEAR})"
 
 #: The complete grammar of an explicit period, matched against a **whole**
 #: fragment: one endpoint, a closed range of two endpoints, a range left open
-#: by one of the closed markers, or a school year written `2023/2024`. A
-#: fragment holding anything else — prose around a year, an unbounded "depuis",
-#: a season, a bare month — is not a period here.
+#: by one of the closed markers, a school year written `2023/2024`, or a closed
+#: range followed by a parenthesis holding **exactly** one of those same closed
+#: markers — `2025-2026 (en cours)`. That last form is still a period the
+#: source wrote whole: both ends are written, and the parenthesis is a word
+#: from the closed registry, not free text. Nothing is read out of it — no
+#: `current` flag, no end date, no duration and no employment status — and
+#: `period_text` stays the fragment as written. A parenthesis holding anything
+#: else is free text, so `2022-2024 (6 mois)`, `(stage)`, `(Paris)` and
+#: `(approx.)` are not periods. A fragment holding anything else — prose around
+#: a year, an unbounded "depuis", a season, a bare month — is not one either.
 _TEMPORAL_FRAGMENT = re.compile(
-    rf"(?:{_ENDPOINT}{_DASH}(?:{_ENDPOINT}|{_OPEN_END})"
+    rf"(?:{_CLOSED_RANGE}\s*\((?:{_OPEN_END})\)"
+    rf"|{_ENDPOINT}{_DASH}(?:{_ENDPOINT}|{_OPEN_END})"
     rf"|{_YEAR}/{_YEAR}"
     rf"|{_ENDPOINT})"
 )

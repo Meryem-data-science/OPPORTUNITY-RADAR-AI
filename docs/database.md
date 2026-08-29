@@ -639,9 +639,16 @@ An explicit period, for the experience rule, is a **whole** fragment matching
 one closed form: a four-digit year, `MM/YYYY`, a month named in the closed
 French/English registry followed by a year, a dash-separated range of two of
 those, a range closed by one of the open-end markers (`présent`, `aujourd'hui`,
-`today`, `now`, `en cours`, …), or a school year written `YYYY/YYYY` — kept
-verbatim, never converted into calendar dates. `depuis 2023`, `6 mois`,
-`printemps 2024` and `2022 - 2024 (6 mois)` are not periods.
+`today`, `now`, `en cours`, …), a school year written `YYYY/YYYY`, or a
+**closed** range followed by a parenthesis holding **exactly** one of those
+same open-end markers — `2025-2026 (en cours)`. Whatever the form, the fragment
+is stored as written and never converted into calendar dates. The parenthesised
+qualifier is read as nothing at all: no `current` flag, no end date, no
+duration and no employment status exists in this schema. A parenthesis holding
+free text is not a period, so `2022-2024 (6 mois)`, `2022-2024 (stage)`,
+`2022-2024 (Paris)` and `2022-2024 (approx.)` are refused, and so is
+`2024 (en cours)` — one end is written, not two. `depuis 2023`, `6 mois` and
+`printemps 2024` are not periods either.
 
 `UNPARSED_V1` is everything else. The fact is still projected, with every
 fragment `NULL`: no accepted fact is ever dropped silently, and no fragment is
