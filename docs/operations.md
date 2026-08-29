@@ -262,3 +262,39 @@ in the Digital Twin, creates no validated Master CV, offers no accept, correct
 or reject workflow, derives no skill or skill level, and computes no match,
 eligibility or score. Its output is a description of a document, not a set of
 verified facts about a person.
+
+## CV candidate extraction (Phase 3.2B)
+
+Read the unverified candidates one local CV PDF yields, still without writing
+anything anywhere:
+
+```bash
+python -m services.digital_twin.cv.candidates.cli extract /path/to/cv.pdf
+```
+
+The default output is privacy-safe: the extractor version, the parser version,
+the file's SHA-256, how many candidates of each type were produced, the rule
+identifiers that produced them, and the warnings. It prints no candidate text,
+so no name, email address, phone number, URL, employer, school or skill mention
+reaches the terminal. The file path is never echoed back, not even in an error
+message.
+
+Add `--json-out <path>` to write the detailed candidates — `raw_text` included —
+to a path you name explicitly. The guarantees are the ones the parser CLI
+already makes and are implemented once, in `services/digital_twin/cv/export.py`:
+nothing is written without the flag, an existing file is never overwritten, the
+file is created with mode `0600`, and no path appears in an error. The
+destination belongs outside the repository.
+
+The command reads one PDF and returns. It opens no database connection, writes
+no row, applies no migration, needs no environment variable, no network access
+and no API key, and calls no model. The failures it can report are exactly the
+Phase 3.2A parser failures in the table above, because it parses the file first.
+
+What a candidate is: one named deterministic rule found this text on this page
+of this section. What it is **not**: a fact about the person. Nothing here is
+verified, accepted, corrected or rejected, no candidate carries a level, a
+proficiency, a confidence or a score, no `profile_facts` row exists, and the
+result lives in memory until you export it yourself. The human validation
+workflow is Phase 3.3 and the advanced business normalization is Phase 3.4;
+neither exists yet, so Phase 3.2 is still not a validated Master CV.

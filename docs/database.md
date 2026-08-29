@@ -162,6 +162,14 @@ and returns a result in memory; nothing it extracts is written to the database,
 and no `profile_facts` row exists yet. See
 [operations.md](operations.md#cv-parser-phase-32a).
 
+The Phase 3.2B candidate extractor adds no table and no migration either. It
+turns that in-memory parse into unverified candidates that also stay in memory:
+no `profile_facts`, no candidate table, no `cv_versions`, no SQLite write, and
+no row in `users` or `profiles`. `0006_user_profile_foundation.sql` is still the
+last migration. Persisting anything read from a CV requires the Phase 3.3
+validation workflow, which does not exist. See
+[operations.md](operations.md#cv-candidate-extraction-phase-32b).
+
 ## Source run history
 
 Migration `0005` stores one row per attempted execution of a source by
