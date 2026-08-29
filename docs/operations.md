@@ -220,3 +220,45 @@ sources, 373 opportunities and qualifications, 373 classifier comparisons with
 zero mismatches, 37,711 cross-source pairs with zero retained candidates in that
 dataset, and the FastAPI-to-Next.js display/original links. Those values are a
 dated snapshot, not stable production counts because upstream sources change.
+
+## CV parser (Phase 3.2A)
+
+Parse a local CV PDF without writing anything anywhere:
+
+```bash
+python -m services.digital_twin.cv.cli parse /path/to/cv.pdf
+```
+
+The default output is privacy-safe: parser version, the file's SHA-256, the
+page count, the empty pages, the canonical section types found, and the
+warnings. It prints no CV text, no heading as written, and therefore no name,
+email address, phone number or postal address — and neither does the structured
+log event, which carries counts, canonical types and warning codes only. The
+file path is never echoed back, not even in an error message, because a CV
+filename usually carries the person's name.
+
+Add `--json-out <path>` to write the detailed result — page texts and section
+contents included — to a path you name explicitly. Nothing is written without
+that flag, an existing file is never overwritten, and the destination belongs
+outside the repository: keep your real CV and any detailed export out of git.
+
+The command needs nothing but the file. No database connection, no environment
+variable, no network access, no OCR engine and no API key are involved.
+
+Expected failures, each reported explicitly with exit code 1:
+
+| Situation | Error |
+| --- | --- |
+| The path does not exist | `PdfFileNotFoundError` |
+| The path is a directory | `PdfNotAFileError` |
+| The file is empty, or not a readable PDF | `InvalidPdfError` |
+| The PDF is encrypted | `EncryptedPdfError` |
+| The PDF has no text layer (a scan) | `EmptyPdfTextError` |
+
+A scanned CV is refused rather than guessed at: `cv-parser-v1` performs no OCR.
+
+What this command does **not** do: it stores no `profile_facts`, writes no row
+in the Digital Twin, creates no validated Master CV, offers no accept, correct
+or reject workflow, derives no skill or skill level, and computes no match,
+eligibility or score. Its output is a description of a document, not a set of
+verified facts about a person.

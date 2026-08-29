@@ -112,12 +112,67 @@ Twin table will point at. One user owns at most one profile, enforced by
 rest of the project does, and a local CLI initialises or reads the real profile
 without echoing or logging the address.
 
-This slice implements the root only. CV parsing, `cv_versions`, `profile_facts`,
-skills, education, experiences, projects, certifications, languages,
-preferences, eligibility, matching, scoring, personal notifications, a personal
-frontend, and any public profile API are **not** implemented — neither Phase 3.1
-as a whole nor Phase 3 is complete. No LLM, no external API, and no remote
-write path is introduced: the operational database stays local SQLite.
+That slice implements the root only. `cv_versions`, `profile_facts`, skills,
+education, experiences, projects, certifications, languages, preferences,
+eligibility, matching, scoring, personal notifications, a personal frontend,
+and any public profile API are **not** implemented — neither Phase 3.1 as a
+whole nor Phase 3 is complete. No LLM, no external API, and no remote write
+path is introduced: the operational database stays local SQLite.
+
+## CV parser foundation (Phase 3.2A)
+
+`services/digital_twin/cv/` reads one local PDF and describes it. It is a pure
+function of the file, deliberately kept apart from the opportunity collectors:
+
+```text
+local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ ParsedCv
+   (bytes)  extract    conservative      lexicon       assemble    (frozen)
+            + SHA-256  text clean-up     headings
+```
+
+- `models.py` holds the frozen result vocabulary: `ExtractedPage`,
+  `DetectedSection`, `ParserWarning`, `ParsedCv`, and the `PARSER_VERSION`
+  (`cv-parser-v1`) every result carries. `pypdf` is pinned to an exact
+  version in `pyproject.toml` because the extracted text depends on it:
+  changing that pin, or any extraction, normalization or segmentation rule, is
+  a change of the rules `cv-parser-v1` names, so it requires deciding whether
+  `PARSER_VERSION` must move with it. Without that, two different outputs could
+  claim the same provenance.
+- `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
+  file, and raises one explicit error per failure mode: missing path, path that
+  is not a file, unreadable PDF, encrypted PDF, and a PDF with no extractable
+  text at all.
+- `normalization.py` normalizes exactly one closed list of text-layer
+  artefacts and nothing else: line-ending conventions become `\n`, space-like
+  and zero-width characters are folded away, runs of spaces inside a line and
+  runs of blank lines each collapse to one, and leading and trailing blank
+  lines go. Those are the only characters it touches: every character carrying
+  visible text comes through untouched, and nothing is reordered, reworded,
+  translated, spell-checked or de-hyphenated. The separation into lines
+  survives because it is all the parser has to segment on.
+- `sections.py` splits the document on headings whose folded form is listed
+  verbatim in one French/English lexicon. There is no model, no scoring and no
+  fuzzy match, so any classification can be checked against that table.
+- `parser.py` composes the pipeline; `cli.py` exposes it locally.
+
+The result is deterministic: nothing reads the clock, the environment or the
+network, so the same PDF gives the same `ParsedCv`, field for field. There is
+no OCR — a scanned CV raises `EmptyPdfTextError` rather than producing invented
+content — and no LLM, CV-parsing service or remote call anywhere in the parse.
+
+Ambiguity stays ambiguity. Text before the first recognised heading is kept as
+one `UNCLASSIFIED` section, never given a category; a heading the lexicon does
+not know is not a boundary, so its lines stay in the preceding section instead
+of being classified on a guess; and warnings (`EMPTY_PAGE`,
+`NO_SECTION_HEADING_DETECTED`, `UNCLASSIFIED_LEADING_CONTENT`,
+`REPEATED_SECTION_TYPE`, `EMPTY_SECTION_CONTENT`) report what the parse could
+not resolve.
+
+Phase 3.2A stops there. It creates **no** `profile_facts` row, persists nothing
+in the Digital Twin, adds no migration and no table, and no value it extracts is
+a verified fact about the person. The validated Master CV and the
+accept/correct/reject workflow, skills and skill levels, matching, eligibility,
+ranking and scores are all still to come; Phase 3.2 as a whole is not finished.
 
 ## Data-processing boundaries
 
@@ -137,7 +192,11 @@ write path is introduced: the operational database stays local SQLite.
   an invented ending.
 - The user/profile root records ownership, not knowledge. It stores who owns
   a Digital Twin and the stable profile that owns nothing yet, and it asserts
-  no fact about the person. Reading an unknown address returns an explicit
+  no fact about the person.
+- The CV parser describes a document, not a person. A `DetectedSection` states
+  that a recognised heading introduced these lines on these pages; it does not
+  state that the person holds a diploma, a skill or a job. No parsed value is
+  validated, and none of it is stored. Reading an unknown address returns an explicit
   absence and never invents a profile; a user and its profile are created only
   by the explicit `ensure_user_profile` operation behind `init-profile`.
 - Source health reads that evidence back without adding to it. It derives one
@@ -150,8 +209,9 @@ write path is introduced: the operational database stays local SQLite.
 There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, or ML recommendation model. The Digital
-Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A,
-described above; no profile content, matching, or scoring is derived from it.
+Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A and
+the read-only CV parser added by Phase 3.2A, both described above; no profile
+content, matching, or scoring is derived from either.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,
 no web push, no notification path, no scheduler and no GitHub Actions schedule,
