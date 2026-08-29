@@ -51,6 +51,17 @@ Phase 3 has started, and only these six slices of it exist:
   section — and the import is idempotent on that evidence, so re-running one CV
   proposes nothing twice. A local CLI then shows each undecided proposal and
   asks a person to accept, reject, correct, skip or quit.
+- **Phase 3.3C** — a non-destructive reconciliation of a *re-read* CV with the
+  facts an older parser and extractor already produced for the same document. A
+  reading the newer campaign produces byte for byte under the same fact type is
+  the same reading: the new evidence is attached to the fact that already
+  exists, which keeps its id, its value and the decision a human took about it,
+  so re-reading a CV creates no duplicate. A reading that changed — the same
+  text under another type, or a block cut on different boundaries — becomes a
+  `PROPOSED` fact like any other, and only once a person has answered every one
+  of them does `finalize` retire the old readings they replaced, by marking
+  them `REJECTED` and never by deleting anything. Identity is exact equality:
+  no normalization, no fuzzy matching, no similarity and no model.
 - **Phase 3.4A** — a deterministic projection of the **verified** skill facts
   onto normalized skills. It reads `fact_type = 'SKILL' AND status = 'ACCEPTED'`
   and nothing else, normalizes each mention with a closed registry of five
@@ -85,7 +96,8 @@ schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, match a CV against an offer, or provide
 ML recommendations. The Digital Twin exists only as the six slices listed
 above: there is no validated Master CV, no generated Master CV PDF, no skill
-level, no eligibility rule, and no match score. Skills exist only as the
+level, no eligibility rule, and no match score. Reconciling a re-read CV
+proposes and retires readings; it confirms none of them by itself. Skills exist only as the
 projection of facts a person already accepted, and holding a skill says nothing
 about how well. CV candidates do
 reach `profile_facts` now, but only as proposals a person reviews by hand — no
