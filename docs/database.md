@@ -167,10 +167,15 @@ and no `profile_facts` row exists yet. See
 The Phase 3.2B candidate extractor adds no table and no migration either. It
 turns that in-memory parse into unverified candidates that also stay in memory:
 no candidate table, no `cv_versions`, no SQLite write, and no row in `users`,
-`profiles` or `profile_facts`. Migration `0007` below creates the fact tables,
-but nothing in the CV packages writes to them: no candidate is imported, and
-that mapping is Phase 3.3B. See
+`profiles` or `profile_facts`. See
 [operations.md](operations.md#cv-candidate-extraction-phase-32b).
+
+The Phase 3.3B bridge adds no table and no migration either, and the migrations
+still stop at `0007`. It writes candidates into the `profile_facts` and
+`profile_fact_provenance` tables `0007` already created, always as `PROPOSED`
+rows, and it stores no candidate table of its own: there is no import log, no
+second registry and no `cv_versions`. See
+[operations.md](operations.md#cv-review-phase-33b).
 
 ## Profile facts and their provenance
 
@@ -242,10 +247,11 @@ fact with no evidence would be an assertion nobody could check.
 
 Those columns are exactly what one Phase 3.2B `ExtractedCandidate` already
 carries — `cv_sha256`, `parser_version`, `extractor_version`, `fingerprint`,
-`rule_id`, the pages, the section and its index — so a candidate's provenance
-can later be stored field for field, without loss. **That import is not
-implemented**: nothing maps an `ExtractedCandidate` to a `profile_facts` row,
-and building it is Phase 3.3B.
+`rule_id`, the pages, the section and its index — and the Phase 3.3B bridge
+stores them field for field, without loss and without adding anything the
+candidate did not carry. `source_locator` stays `NULL` for CV evidence: the only
+locator that side could supply is the local path of the PDF, and a CV filename
+usually carries the person's name.
 
 `UNIQUE (fact_id, provenance_key)` is what stops the same proof from being
 recorded twice for one fact, so a duplicate can never look like corroboration.
@@ -310,17 +316,39 @@ phases are meant to build on. It filters on `status = 'ACCEPTED'` in SQL, so a
 cannot forget the filter. `list_profile_facts` is the separate review and audit
 reading that deliberately shows every status.
 
-### Not implemented by this slice
+### Importing a CV into these tables (Phase 3.3B)
 
-The Phase 3.2B candidates are **not** imported: no candidate-to-fact mapping,
-no CV review command, no interface, no HTTP endpoint and no authentication
-exist, so the only way to record a fact today is to call the repository from
-Python. Nothing here normalizes an institution, an employer, a date, a canonical
-role or a skill alias, and no skill, `user_skills`, alias, preference,
-eligibility or matching table exists — that is Phase 3.4 and beyond, and it has
-not started. No Master CV, cover letter, application, form or CV adaptation is
-generated from these facts, and no future application flow may write to them
-directly.
+`ensure_profile_fact_proposal` is the primitive the CV bridge uses, and the only
+one that writes a fact whose existence depends on what is already there. In one
+`BEGIN IMMEDIATE` transaction it resolves the deterministic `provenance_key` of
+the evidence, joins `profile_facts` to `profile_fact_provenance` to find a fact
+**of this profile** that key already justifies, and either returns that fact or
+creates a `PROPOSED` fact and its provenance row together. It reports whether it
+created anything, so a caller can count new proposals without comparing rows.
+
+The join is what scopes the lookup: `provenance_key` is unique per fact, not per
+profile and not per database, so the same proof may legitimately exist under
+another profile and must stay invisible from here. Two rules are enforced rather
+than guessed at — if two facts of one profile share a proof, or if a known proof
+would suddenly justify a different `fact_type`, the call raises instead of
+choosing.
+
+The lookup ignores `status`. A fact already `ACCEPTED`, `REJECTED` or
+`CORRECTED` is returned as it stands, so re-importing a CV never revives a claim
+that was refused and never duplicates one that was confirmed. Because the key
+includes `cv_sha256`, two different CVs are two different proofs and produce two
+proposals; no consolidation across CV versions is attempted.
+
+### Not implemented by these slices
+
+Nothing here normalizes an institution, an employer, a date, a canonical role or
+a skill alias, and no skill, `user_skills`, alias, preference, eligibility or
+matching table exists — that is Phase 3.4 and beyond, and it has not started. No
+Master CV, cover letter, application, form or CV adaptation is generated from
+these facts, and no future application flow may write to them directly. There is
+no HTTP endpoint, no web interface and no authentication over these tables: the
+only review that exists is the local terminal command described in
+[operations.md](operations.md#cv-review-phase-33b).
 
 ## Source run history
 
