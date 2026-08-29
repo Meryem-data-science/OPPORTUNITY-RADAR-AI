@@ -19,10 +19,15 @@ of successive corrections keeps its whole history.
 
 What this slice does **not** do:
 
-* it does not import the Phase 3.2B `ExtractedCandidate` values — no
-  candidate-to-fact mapping exists here, and building it is Phase 3.3B;
-* it offers no review CLI, no user interface, no HTTP endpoint and no
-  authentication;
+* it does not know what an `ExtractedCandidate` is: no module here imports
+  the Phase 3.2B package, and the mapping between the two lives outside both,
+  in the Phase 3.3B bridge `services/digital_twin/cv/fact_bridge.py`. What
+  this package offers that bridge is `ensure_profile_fact_proposal`, which
+  records one claim as `PROPOSED` unless the exact proof behind it is already
+  known — so importing a CV twice proposes nothing twice, and a decision a
+  human already took is never asked again;
+* it offers no user interface, no HTTP endpoint and no authentication; the
+  local review CLI built on it is Phase 3.3B and lives beside that bridge;
 * it normalizes no business content: no institution, employer, date, canonical
   role, skill alias or skill level is derived, which is Phase 3.4;
 * it generates no Master CV, cover letter, application or form, and it computes
@@ -46,13 +51,17 @@ from services.digital_twin.facts.models import (
     encode_page_numbers,
 )
 from services.digital_twin.facts.repository import (
+    AmbiguousFactEvidenceError,
+    ConflictingFactEvidenceError,
     FactCorrection,
+    FactProposal,
     InvalidFactTransitionError,
     ProfileFactError,
     ProfileFactNotFoundError,
     accept_profile_fact,
     add_profile_fact_provenance,
     correct_profile_fact,
+    ensure_profile_fact_proposal,
     get_profile_fact,
     list_profile_fact_provenance,
     list_profile_facts,
@@ -64,7 +73,10 @@ from services.digital_twin.facts.repository import (
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "TERMINAL_STATUSES",
+    "AmbiguousFactEvidenceError",
+    "ConflictingFactEvidenceError",
     "FactCorrection",
+    "FactProposal",
     "FactProvenance",
     "FactSourceType",
     "FactStatus",
@@ -80,6 +92,7 @@ __all__ = [
     "correct_profile_fact",
     "decode_page_numbers",
     "encode_page_numbers",
+    "ensure_profile_fact_proposal",
     "get_profile_fact",
     "list_profile_fact_provenance",
     "list_profile_facts",

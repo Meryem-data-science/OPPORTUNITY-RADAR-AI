@@ -60,6 +60,26 @@ class InvalidFactTransitionError(ProfileFactError):
     """Raised when a decision would move a fact somewhere the cycle forbids."""
 
 
+class AmbiguousFactEvidenceError(ProfileFactError):
+    """Raised when one piece of evidence is attached to several facts of a profile.
+
+    `UNIQUE (fact_id, provenance_key)` stops the same proof from being recorded
+    twice *for one fact*; it cannot stop two facts of the same profile from
+    each claiming it. That state is a business integrity failure, and the only
+    honest answer to it is to say so: picking one of the two would silently
+    decide which reading of the CV counts.
+    """
+
+
+class ConflictingFactEvidenceError(ProfileFactError):
+    """Raised when known evidence already justifies a fact of a different type.
+
+    A piece of evidence identifies one reading of one document, so the type it
+    supports cannot change between two runs. If it appears to have changed,
+    something upstream is wrong and a second fact must not be invented for it.
+    """
+
+
 @dataclass(frozen=True)
 class FactCorrection:
     """The outcome of one correction: the old fact and the one that replaced it."""
@@ -245,6 +265,112 @@ def propose_profile_fact(
         connection.execute("ROLLBACK")
         raise
     return fact
+
+
+@dataclass(frozen=True)
+class FactProposal:
+    """The outcome of one idempotent import: the fact, and whether it is new."""
+
+    #: The fact this evidence justifies, whatever its status has become since.
+    fact: ProfileFact
+    #: True only when this call created it. A second call with the same proof
+    #: reports False and creates nothing.
+    created: bool
+
+
+def _select_facts_by_evidence(
+    connection: sqlite3.Connection, profile_id: int, provenance_key: str
+) -> tuple[ProfileFact, ...]:
+    """Every fact of this profile that this exact proof already justifies.
+
+    The join is what scopes the lookup: `provenance_key` is unique per fact,
+    not per profile and not per database, so one key may legitimately appear
+    under another profile and must not be visible from here.
+    """
+    rows = connection.execute(
+        f"""SELECT {', '.join('f.' + column for column in _FACT_COLUMNS.split(', '))}
+              FROM profile_facts AS f
+              JOIN profile_fact_provenance AS p ON p.fact_id = f.id
+             WHERE f.profile_id = ? AND p.provenance_key = ?
+             ORDER BY f.id""",
+        (profile_id, provenance_key),
+    ).fetchall()
+    return tuple(_fact_from_row(row) for row in rows)
+
+
+def ensure_profile_fact_proposal(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_type: ProfileFactType | str,
+    value: str,
+    provenance: ProvenanceInput,
+    normalized_value: str | None = None,
+    after_lookup: Callable[[], None] | None = None,
+) -> FactProposal:
+    """Record this claim as `PROPOSED`, unless this exact proof is already known.
+
+    Identity here is the **evidence**, not the text: two facts are the same
+    import when the same `provenance_key` resolves for both. That key is a pure
+    function of the source, the document digest, the parser and extractor
+    versions, the candidate fingerprint, the rule and the place in the
+    document, so re-reading one CV proposes nothing new, while the same value
+    read from a *different* CV is a different proof and a fact of its own. No
+    consolidation across CV versions happens here, and none is implied.
+
+    Idempotence deliberately ignores status. A fact whose proof is already
+    recorded is returned as it stands — `PROPOSED`, `ACCEPTED`, `REJECTED` or
+    `CORRECTED` — because a decision a human already took must survive the next
+    import. A rejected reading that came back as a fresh proposal would ask the
+    person to refuse it again, and an accepted one would be duplicated.
+
+    The whole operation is one `BEGIN IMMEDIATE` transaction scoped by
+    `profile_id`, so a run interrupted between two candidates leaves every
+    candidate it did import complete, with its evidence, and re-importing
+    resumes without duplicating any of them.
+
+    `after_lookup` is a test seam invoked once the lookup is done and before
+    anything is written; production callers leave it unset.
+    """
+    if not isinstance(provenance, ProvenanceInput):
+        raise ProfileFactError("provenance must be a ProvenanceInput")
+    if value is None or str(value).strip() == "":
+        raise ProfileFactError("value must not be empty")
+    stored_type = _fact_type_value(fact_type)
+    provenance_key = provenance.resolved_provenance_key()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_profile(connection, profile_id)
+        known = _select_facts_by_evidence(connection, profile_id, provenance_key)
+        if after_lookup is not None:
+            after_lookup()
+        if len(known) > 1:
+            raise AmbiguousFactEvidenceError(
+                f"{len(known)} facts of profile {profile_id} share one proof"
+            )
+        if known:
+            existing = known[0]
+            if existing.fact_type != stored_type:
+                raise ConflictingFactEvidenceError(
+                    f"that proof already justifies a {existing.fact_type} fact, "
+                    f"not a {stored_type} one"
+                )
+            connection.execute("COMMIT")
+            return FactProposal(fact=existing, created=False)
+        fact = _insert_fact(
+            connection,
+            profile_id=profile_id,
+            fact_type=stored_type,
+            value=value,
+            normalized_value=normalized_value,
+            status=FactStatus.PROPOSED,
+        )
+        _insert_provenance(connection, fact.id, provenance)
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return FactProposal(fact=fact, created=True)
 
 
 def add_profile_fact_provenance(

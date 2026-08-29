@@ -262,14 +262,14 @@ in two CVs fingerprints the same and `cv_sha256` is what ties a candidate to
 its file.
 
 Phase 3.2B stops there. It creates **no** `profile_facts` row, persists nothing,
-adds no migration and no table, and not one candidate is a verified fact. The
-proposed/accepted/corrected/rejected cycle now exists, in Phase 3.3A below, but
-nothing in this package reaches it: no module here imports
-`services/digital_twin/facts`, and a test asserts that. Turning a candidate into
-a proposed fact is Phase 3.3B; institutions, employers, canonical roles,
-normalized dates and skill aliases and levels are Phase 3.4. Matching,
-eligibility, ranking and scores are further out still. Phase 3.2 as a whole is
-finished as a *reading* of a document, and is not a validated Master CV.
+adds no migration and no table, and not one candidate is a verified fact.
+Phase 3.3B does now carry candidates into the fact store, but it does so from
+*outside* this package: no module here imports `services/digital_twin/facts`
+and none imports the bridge either, and a test asserts both. Institutions,
+employers, canonical roles, normalized dates and skill aliases and levels are
+Phase 3.4. Matching, eligibility, ranking and scores are further out still.
+Phase 3.2 as a whole is finished as a *reading* of a document, and is not a
+validated Master CV.
 
 ## Validated profile facts (Phase 3.3A)
 
@@ -328,15 +328,93 @@ every other move raises an explicit business error. The exact schema, the
 transition table and the provenance columns are in
 [database.md](database.md#profile-facts-and-their-provenance).
 
-Phase 3.3A stops at the store. The Phase 3.2B candidates are **not** imported —
-no mapping from an `ExtractedCandidate` to a proposed fact exists, and building
-it is Phase 3.3B — and there is no review CLI, no interface, no HTTP endpoint
-and no authentication, so the only way to record a fact today is to call the
-repository from Python. Nothing here generates a Master CV, a cover letter, an
-application, a form or an adapted CV, and nothing computes an eligibility, a
-match, a ranking or a score. No skill, alias, preference, eligibility or
-matching table exists: Phase 3.4 has not started. No network call, no model and
-no remote write path takes part.
+Phase 3.3A stops at the store. It does not know what an `ExtractedCandidate`
+is: the mapping lives outside it, in the Phase 3.3B bridge described below, and
+what this package offers that bridge is one primitive,
+`ensure_profile_fact_proposal`. Nothing here generates a Master CV, a cover
+letter, an application, a form or an adapted CV, and nothing computes an
+eligibility, a match, a ranking or a score. No skill, alias, preference,
+eligibility or matching table exists: Phase 3.4 has not started. No network
+call, no model and no remote write path takes part.
+
+## CV candidates into proposed facts (Phase 3.3B)
+
+`services/digital_twin/cv/fact_bridge.py` is the one place a CV candidate
+becomes a claim about a person, and `services/digital_twin/cv/review_cli.py` is
+the one place a person decides about it:
+
+```text
+PDF ─ parse_cv_pdf ─ extract_candidates ─ fact_bridge ─ PROPOSED fact
+     (3.2A)            (3.2B)             (3.3B)         (3.3A)
+                                                            │
+                                              human review ─┴─ ACCEPT / REJECT
+                                              (review_cli)     CORRECT / SKIP
+                                                               / QUIT
+```
+
+The bridge exists so that neither side has to know about the other. The
+candidate package still imports no fact module and the fact package still
+imports no CV module; the translation happens once, in the open, in a file that
+imports both. It is built out of three refusals of its own.
+
+**It refuses an implicit mapping.** `CANDIDATE_TYPE_TO_FACT_TYPE` is written out
+entry by entry, is total over `CandidateType`, and is checked to be total at
+import time, so a candidate type added later without a decided meaning breaks
+loudly instead of having its candidates silently dropped. The two taxonomies are
+allowed to disagree and one of them does: `NAME_CANDIDATE` proposes a plain
+`NAME`, because "candidate" describes the reading, not the confirmed identity.
+Nothing maps to `PREFERENCE`, `AVAILABILITY`, `MOBILITY` or `CAREER_OBJECTIVE`:
+no rule produces those, and a mapping to a category nothing feeds would be a
+promise the extractor does not keep.
+
+**It refuses to interpret.** `raw_text` becomes `value` and `normalized_value`
+becomes `normalized_value`, both verbatim, and the candidate's provenance is
+copied field for field — digest, parser and extractor versions, candidate
+fingerprint, rule id, pages, section and index. No skill alias, no skill level,
+no employer, institution, date or country parsed out of a value, no canonical
+role and no rewording: that is Phase 3.4 and it has not started. `source_locator`
+stays `NULL` on purpose, because the only locator this side could supply is the
+local path of the PDF and a CV filename usually carries the person's name.
+
+**It refuses to decide.** Every fact the import creates is `PROPOSED`. There is
+no threshold, no confidence, no score, no accept-all and no auto-accept
+anywhere in the path, and the bridge never calls `accept_profile_fact` at all.
+
+Idempotence is keyed on the **evidence**, not on the text.
+`ensure_profile_fact_proposal` resolves the deterministic `provenance_key` of a
+candidate, looks for a fact of *this profile* that key already justifies —
+through a join, because a provenance key is unique per fact rather than per
+database — and returns it if there is one, or creates the fact and its
+provenance together if there is not. It reports `created` either way, and it
+raises rather than choosing if two facts of one profile share a proof or if a
+known proof would suddenly justify a different type of fact. The lookup ignores
+status on purpose: a fact already `ACCEPTED`, `REJECTED` or `CORRECTED` is
+returned as it stands, so a decision a human already took survives the next
+import and a refused reading never comes back as a fresh proposal. Two different
+CVs carry two different digests, so they are two proofs and two proposals;
+consolidating several versions of a CV into one reading is not attempted here.
+
+Each candidate is its own `BEGIN IMMEDIATE` transaction, so the import is
+restartable rather than all-or-nothing: a run that stops after N candidates
+leaves those N facts complete with their evidence, and re-running imports the
+rest without duplicating any of them.
+
+The review CLI is deliberately the one command in the project that prints CV
+content — a person cannot accept a value they are not shown — and the exception
+is bounded to the review prompt: never the closing summary, which is counters,
+never the structured log, which carries counters, versions, canonical types and
+ids, and never a file, because the command writes none. It refuses a non-SQLite
+backend before connecting and before asking for an address, it reads an existing
+profile and never creates one, and it offers exactly five answers. Any other
+input prints a notice and asks again rather than falling through to a default.
+Quitting is safe and resuming is expected: undecided facts stay `PROPOSED`,
+decided ones are never offered again, and a second run re-imports nothing.
+
+Phase 3.3B reuses the `0007` schema and adds no migration and no table. It
+generates no Master CV PDF, no cover letter, no application and no adapted CV,
+and it computes no eligibility, match, ranking or score. There is no web
+interface, no HTTP endpoint and no authentication for any of it, and no network
+call or model takes part.
 
 ## Data-processing boundaries
 
@@ -367,6 +445,12 @@ no remote write path takes part.
   thing that means verified, a correction adds a fact instead of replacing a
   value, and a rejection is kept rather than deleted, so the record of what was
   once proposed survives the decision taken about it.
+- Importing a CV proposes; it never confirms. The bridge turns every candidate
+  into a `PROPOSED` fact and stops there, its identity is the evidence rather
+  than the text, and the only thing that can make one of those facts verified is
+  a person answering the review prompt. An import that runs twice proposes
+  nothing twice, and an import can never revive a claim somebody already
+  refused.
 - A CV candidate is a reading, not a fact. An `ExtractedCandidate` states that
   one named rule found this text on this page of this section; it does not
   state that the person is called that, works there or knows that. Nothing is
@@ -388,9 +472,11 @@ LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, or ML recommendation model. The Digital
 Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
 read-only CV parser added by Phase 3.2A, the unverified candidates added by
-Phase 3.2B, and the validated fact store added by Phase 3.3A, all described
-above; no matching, ranking or scoring is derived from any of them, no CV
-candidate is imported into the fact store, and no review interface exists.
+Phase 3.2B, the validated fact store added by Phase 3.3A, and the bridge and
+local review command added by Phase 3.3B, all described above; no matching,
+ranking or scoring is derived from any of them, no CV candidate is ever
+imported as anything but a proposal, and the only review that exists is a
+terminal command — there is no web profile interface and no Master CV PDF.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,
 no web push, no notification path, no scheduler and no GitHub Actions schedule,

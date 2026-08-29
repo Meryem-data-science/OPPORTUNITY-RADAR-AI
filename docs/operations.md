@@ -297,11 +297,11 @@ verified, accepted, corrected or rejected, no candidate carries a level, a
 proficiency, a confidence or a score, and the result lives in memory until you
 export it yourself.
 
-Phase 3.3A now provides a `profile_facts` table (see the next section), but
-this command does not write to it: no candidate is imported, automatically or
-otherwise, and there is no review workflow that would let you accept one. That
-import is Phase 3.3B, the advanced business normalization is Phase 3.4, and
-neither exists, so Phase 3.2 is still not a validated Master CV.
+This command still writes nothing. Importing those candidates as reviewable
+proposals is a separate, explicit command — see
+[CV review](#cv-review-phase-33b) below — and even that accepts nothing on its
+own. The advanced business normalization is Phase 3.4 and does not exist, so
+Phase 3.2 is still not a validated Master CV.
 
 ## Profile facts (Phase 3.3A)
 
@@ -316,12 +316,10 @@ python -m services.collector.cli.migrate_configured --apply
 
 It creates `profile_facts` and `profile_fact_provenance` and inserts no row.
 
-**There is no command, interface or endpoint for reviewing facts.** This slice
-is persistence and its validation rules, nothing else: no CLI subcommand, no
-page, no HTTP route, no authentication, and no import of the Phase 3.2B CV
-candidates. Extracting a CV and recording what it found are still two separate
-things, and nothing connects them — that connection is Phase 3.3B. The only way
-to record or decide a fact today is to call
+This slice is persistence and its validation rules, nothing else: no page, no
+HTTP route and no authentication. The command that reviews facts is Phase 3.3B
+and is described in [CV review](#cv-review-phase-33b) below; outside it, the
+only way to record or decide a fact is to call
 `services/digital_twin/facts/repository.py` from Python against a database you
 name explicitly.
 
@@ -350,3 +348,74 @@ application, form or CV adaptation; it computes no eligibility, match, ranking
 or score; it derives no skill level, alias, employer, institution or date; and
 it opens no network connection and calls no model. Phase 3.4 has not started
 and no matching of any kind exists.
+
+## CV review (Phase 3.3B)
+
+Import one local CV PDF as reviewable proposals, then decide about each of them
+by hand:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
+```
+
+The command runs the whole path in one go — parse the PDF, extract the
+candidates, map each one to a profile fact type, import them as `PROPOSED`, then
+ask you about every one that is still undecided. It reuses migration `0007` and
+adds no table, no migration and no second registry.
+
+It asks for the address without echo, so it never enters the shell history;
+`--email` stays available for tests and automation. The profile must already
+exist — create it with `python -m services.digital_twin.cli init-profile` first.
+This command never creates a user or a profile, and it refuses a non-SQLite
+backend before it connects and before it asks for anything.
+
+**No candidate is ever accepted automatically.** Every fact the import creates
+is `PROPOSED`, and it stays there until you answer. There is no accept-all, no
+yes-to-all, no auto-accept, no confidence and no threshold, and no flag adds
+one.
+
+For each undecided proposal the command shows the fact type, the value, and the
+provenance you need to judge it — the pages, the section and the rule that
+produced it — and then asks:
+
+| Answer | Effect |
+| --- | --- |
+| `a` | Accept. The fact becomes `ACCEPTED`; that, and only that, means verified. |
+| `r` | Reject. The fact becomes `REJECTED` and the row is kept, so the refusal stays auditable. |
+| `c` | Correct. You type the right value; it becomes a new `ACCEPTED` fact with `USER_INPUT` evidence, and the old fact becomes `CORRECTED` and keeps its own value. |
+| `s` | Skip. Nothing is written; the fact stays `PROPOSED`. |
+| `q` | Quit. The remaining facts stay `PROPOSED`. |
+
+Those five answers are matched **exactly**, in lower case and with nothing
+around them: `A`, `a ` and ` a` are not the answer `a` and accept nothing. Any
+other input prints a notice and asks again, so no other character decides
+anything, an empty correction decides nothing either, and a closed stdin is a
+quit rather than an implicit acceptance.
+
+Quitting is safe and re-running is expected. The import is idempotent on the
+CV's own evidence, so a second run on the same file proposes nothing new,
+resumes where you stopped, and never offers a fact you already accepted,
+rejected or corrected. A run interrupted partway leaves every candidate it did
+import complete, with its provenance.
+
+**This is the one command in the project that prints CV content**, because a
+person cannot decide about a value they are not shown. That exception is bounded
+to the review prompt itself. The closing summary is counters only —
+`candidates`, `newly_proposed`, `already_imported`, `accepted_this_run`,
+`rejected_this_run`, `corrected_this_run`, `skipped_this_run`,
+`remaining_proposed`, `quit_requested` — the structured log carries counters,
+versions, canonical types and ids and never a value, the CV path is never echoed
+back, not even in an error message, and the command writes no file at all. Keep
+your real CV out of the repository.
+
+The failures it can report are the Phase 3.2A parser failures in the table
+above, plus a refused backend and a missing profile, each with exit code 1.
+
+What this command does **not** do: it accepts nothing on its own, it generates
+no Master CV PDF, cover letter, application or CV adaptation, it derives no
+skill level, alias, employer, institution, date or canonical role — Phase 3.4
+has not started — and it computes no eligibility, match, ranking or score. It
+opens no network connection and calls no model, and there is no web interface or
+HTTP endpoint for any of it.
