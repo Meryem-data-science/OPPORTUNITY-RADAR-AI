@@ -22,7 +22,7 @@ Implemented now:
   source's Enabled flag, last run, status, items found, new items, relevant
   items, and errors.
 
-Phase 3 has started, and only these two slices of it exist:
+Phase 3 has started, and only these three slices of it exist:
 
 - **Phase 3.1A** — the Digital Twin root: a `users` row, the one `profiles` row
   it owns, and a local CLI to create or read that pair. The profile holds no
@@ -31,14 +31,27 @@ Phase 3 has started, and only these two slices of it exist:
   text normalization, per-page provenance, and deterministic detection of
   French/English section headings. It creates no Profile Fact, stores nothing,
   and treats nothing it reads as a verified fact.
+- **Phase 3.2B** — structured **unverified candidates** read out of that parse:
+  identity, contact details, links, education, experience, project,
+  certification and language entries, and skill mentions, each with the page it
+  came from and the named rule that produced it. A candidate means "a rule
+  found this text in this document", never "this is true of the person".
+  Nothing is validated and nothing is stored.
+
+Phase 3.2 as a whole is therefore still **not** a validated Master CV. Phase 3.3
+will add the human proposed/accepted/corrected/rejected workflow and the
+persistence of verified facts; Phase 3.4 will add the advanced business
+structuring and normalization (institutions, employers, dates, skill aliases and
+levels). Neither exists yet.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, match a CV against an offer, or provide
-ML recommendations. The Digital Twin exists only as the two slices listed above:
-there is no validated Master CV, no accept/correct/reject workflow, no
+ML recommendations. The Digital Twin exists only as the three slices listed
+above: there is no validated Master CV, no accept/correct/reject workflow, no
 `profile_facts`, no skill table or skill level, no eligibility rule, and no
-match score. Qualification is deterministic categorization, not personalized
+match score. Phase 3.2B produces candidates in memory only — it adds no table,
+no migration and no database write. Qualification is deterministic categorization, not personalized
 matching. Source health is a read model and a page: it sends no
 notification, retries nothing, reschedules nothing, and judges no `RUNNING` run
 stale.
@@ -48,7 +61,8 @@ stale.
 - `services/collector/`: collectors, orchestration, persistence, qualification,
   and duplicate-review tools.
 - `services/api/`: read-only FastAPI opportunity API.
-- `services/digital_twin/`: the user/profile root and the local CV PDF parser.
+- `services/digital_twin/`: the user/profile root, the local CV PDF parser, and
+  the unverified candidate extractor built on it.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

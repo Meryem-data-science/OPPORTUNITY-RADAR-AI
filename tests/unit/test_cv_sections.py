@@ -13,6 +13,7 @@ from services.digital_twin.cv.sections import (
     classify_heading,
     detect_sections,
     fold_heading,
+    segment_document,
 )
 
 
@@ -204,3 +205,37 @@ def test_detection_is_repeatable_for_the_same_pages() -> None:
     pages = _pages("PROFIL\nEtudiante.\nCOMPETENCES\nPython")
 
     assert detect_sections(pages) == detect_sections(pages)
+
+
+def test_segments_carry_the_page_of_every_line_they_hold() -> None:
+    pages = _pages("Jeanne Exemple\nFORMATION\nMaster fictif", "Licence fictive")
+
+    segments, _ = segment_document(pages)
+
+    header, education = segments
+    assert header.section_type is SectionType.UNCLASSIFIED
+    assert header.heading_line is None
+    assert [(line.text, line.page_number) for line in header.body] == [
+        ("Jeanne Exemple", 1)
+    ]
+    assert education.heading_line is not None
+    assert education.heading_line.text == "FORMATION"
+    assert education.heading_page == 1
+    assert [(line.text, line.page_number) for line in education.body] == [
+        ("Master fictif", 1),
+        ("Licence fictive", 2),
+    ]
+
+
+def test_the_flattened_sections_are_exactly_what_the_segments_say() -> None:
+    """`detect_sections` is a view over `segment_document`, not a second parse."""
+    pages = _pages(
+        "Jeanne Exemple\nFORMATION\nMaster fictif",
+        "EXPERIENCE\nStage fictif",
+    )
+
+    segments, segment_warnings = segment_document(pages)
+    sections, section_warnings = detect_sections(pages)
+
+    assert sections == tuple(segment.as_section() for segment in segments)
+    assert section_warnings == segment_warnings

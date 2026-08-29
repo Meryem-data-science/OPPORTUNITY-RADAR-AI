@@ -184,9 +184,55 @@ def _pages_of(
     return tuple(sorted(numbers))
 
 
+@dataclass(frozen=True)
+class SectionSegment:
+    """One detected section, with the page of every line it holds.
+
+    This is the segmentation as `segment_document` computes it. A
+    `DetectedSection` is this same run of lines joined into one string, which
+    loses which page each line came from; a caller that needs that provenance —
+    the Phase 3.2B candidate extractor does — reads it here instead of
+    re-deriving the boundaries with a second, competing implementation.
+    """
+
+    section_type: SectionType
+    #: The heading line that opened the section; `None` for the leading
+    #: `UNCLASSIFIED` block, which no heading introduced.
+    heading_line: SourceLine | None
+    body: tuple[SourceLine, ...]
+
+    @property
+    def heading_page(self) -> int | None:
+        return None if self.heading_line is None else self.heading_line.page_number
+
+    def as_section(self) -> DetectedSection:
+        """Return the flattened view this segment stands for."""
+        return DetectedSection(
+            section_type=self.section_type,
+            heading_text=(
+                None if self.heading_line is None else self.heading_line.text
+            ),
+            heading_page=self.heading_page,
+            content=_content(self.body),
+            page_numbers=_pages_of(self.body, heading_page=self.heading_page),
+        )
+
+
 def detect_sections(
     pages: Sequence[ExtractedPage],
 ) -> tuple[tuple[DetectedSection, ...], tuple[ParserWarning, ...]]:
+    """Return the sections of `pages`, flattened, and the parse warnings.
+
+    The segmentation itself lives in `segment_document`; this is the view the
+    `ParsedCv` carries.
+    """
+    segments, warnings = segment_document(pages)
+    return tuple(segment.as_section() for segment in segments), warnings
+
+
+def segment_document(
+    pages: Sequence[ExtractedPage],
+) -> tuple[tuple[SectionSegment, ...], tuple[ParserWarning, ...]]:
     """Split the document on recognised headings, in document order.
 
     Text appearing before the first recognised heading — a CV's name and
@@ -215,17 +261,15 @@ def detect_sections(
             )
         )
 
-    sections: list[DetectedSection] = []
+    segments: list[SectionSegment] = []
     leading_end = boundaries[0][0] if boundaries else len(lines)
     leading = _trim(lines[:leading_end])
     if leading:
-        sections.append(
-            DetectedSection(
+        segments.append(
+            SectionSegment(
                 section_type=SectionType.UNCLASSIFIED,
-                heading_text=None,
-                heading_page=None,
-                content=_content(leading),
-                page_numbers=_pages_of(leading, heading_page=None),
+                heading_line=None,
+                body=leading,
             )
         )
         if boundaries:
@@ -247,13 +291,11 @@ def detect_sections(
         end = boundaries[following][0] if following < len(boundaries) else len(lines)
         heading_line = lines[index]
         body = _trim(lines[index + 1 : end])
-        sections.append(
-            DetectedSection(
+        segments.append(
+            SectionSegment(
                 section_type=section_type,
-                heading_text=heading_line.text,
-                heading_page=heading_line.page_number,
-                content=_content(body),
-                page_numbers=_pages_of(body, heading_page=heading_line.page_number),
+                heading_line=heading_line,
+                body=body,
             )
         )
         if section_type in seen:
@@ -279,4 +321,4 @@ def detect_sections(
                 )
             )
 
-    return tuple(sections), tuple(warnings)
+    return tuple(segments), tuple(warnings)

@@ -170,9 +170,104 @@ not resolve.
 
 Phase 3.2A stops there. It creates **no** `profile_facts` row, persists nothing
 in the Digital Twin, adds no migration and no table, and no value it extracts is
-a verified fact about the person. The validated Master CV and the
-accept/correct/reject workflow, skills and skill levels, matching, eligibility,
-ranking and scores are all still to come; Phase 3.2 as a whole is not finished.
+a verified fact about the person.
+
+`sections.py` exposes its segmentation twice, from one implementation:
+`segment_document` returns each section with the page of every line it holds,
+and `detect_sections` is the flattened view the `ParsedCv` carries. Phase 3.2B
+reads the first, so there is exactly one answer in the codebase to "where does a
+section start". `export.py` holds the one writer both CV commands use for a
+detailed local export.
+
+## Structured CV candidates (Phase 3.2B)
+
+`services/digital_twin/cv/candidates/` takes the `ParsedCv` above and returns a
+`StructuredCvExtraction`: a list of **unverified candidates**. It never re-reads
+the PDF.
+
+```text
+ParsedCv ─ segment_document ─ identity ─ contact ─ entries ─ skills ─ extractor
+ (3.2A)     (3.2A, lines +    header     email,    section    SKILLS   assemble
+             their pages)     rules      phone,    blocks     lines    + dedup
+                                         URLs                          (frozen)
+```
+
+An `ExtractedCandidate` says exactly one thing: *a named deterministic rule
+found this text at this place in this document*. It carries the text as written
+(`raw_text`), a technical normal form only where one is unambiguous
+(`normalized_value`: a lowercased email, a phone compacted to its digits — and
+`None` everywhere else), the pages it covers, the canonical section and its
+index, the `rule_id` that produced it, a stable `fingerprint`, and the
+`cv_sha256`, `parser_version` and `extractor_version` it was produced under.
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v1` and moves independently of
+`PARSER_VERSION`.
+
+The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
+`GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,
+`EDUCATION_ENTRY`, `EXPERIENCE_ENTRY`, `PROJECT_ENTRY`, `CERTIFICATION_ENTRY`,
+`LANGUAGE_ENTRY` and `SKILL`. Every rule is local, free and readable: regular
+expressions, closed dictionaries and fixed segmentation rules. No LLM, no
+external API, no CV-parsing service and no network call takes part, and
+`extract_candidates` is a pure function — no clock, no environment variable, no
+file and no database connection — so the same `ParsedCv` always yields the same
+result, field for field, with no timestamp in it.
+
+What the rules refuse to do is the design:
+
+- **Identity.** Only the first non-blank line of the header block is ever
+  considered, and only when its shape is that of a plain name — letters, two to
+  four words, no digit, no "@", not a document label such as "Curriculum
+  Vitae", and no role keyword. "Jeanne Exemple — Data Scientist" therefore
+  proposes no name at all. A name is never built from an email address, never
+  completed and never reordered; when no line qualifies the extractor reports
+  `NO_IDENTITY_CANDIDATE` and proposes nothing.
+- **Phone.** A digit run is a phone number only where an explicit `+` prefix, a
+  phone label on the line, or a trunk zero *inside the header block* justifies
+  it, with 9 to 15 digits and no `/` as a separator — and, before any of those,
+  only where no digit group of the run reads as a calendar year. "01 2020 -
+  12 2024" is a period wherever it appears, including in the header and next to
+  the word "portable"; "06 11 22 33 44" and "0470 12 34 56" are untouched,
+  because the test is on the grouping, not on four-digit groups being
+  suspicious. A real number carrying a year-shaped group is missed rather than
+  a period being announced, which is the trade-off this slice always takes. No
+  country code or area code is ever added to a number the CV wrote without one.
+- **URLs.** GitHub and LinkedIn are decided by hostname, which is a fact about
+  the URL. A host written without a scheme is recognised only from a closed
+  list and only where the hostname really ends, so `github.com.evil.invalid`
+  and `github.community` are never truncated into a GitHub link; written in
+  full, such a host is kept whole and classified on what it actually is.
+  Anything else is `PORTFOLIO_URL` only where a label of the closed dictionary
+  ("portfolio", "site", "website"…) introduces it earlier on the same line, and
+  `PROFESSIONAL_URL` otherwise — a personal-looking domain is never promoted to
+  a portfolio on a guess.
+- **Entries.** Education, experience, project, certification and language
+  sections are cut into blocks on the separator the section actually uses —
+  blank lines, else list markers, else one entry per line — and the block is
+  kept as written. No institution, employer, role, date, duration or diploma
+  level is derived: that reading is Phase 3.4.
+- **Skills.** Mentions come only from a recognised `SKILLS` section, split on
+  the separators the CV used. There is no level of any kind in the model — no
+  proficiency, no confidence, no score — so "Azure Data Platform (avancé)" is
+  one mention whose text is `Azure Data Platform (avancé)`, and an umbrella
+  mention is never expanded into the technologies that usually go with it.
+
+Candidates are deduplicated by type and by their comparison value — the
+`normalized_value` where one exists, the compared form of the text otherwise —
+keeping the first occurrence in document order with its own text and
+provenance. A CV repeating its email in a header and a footer proposes it once,
+and so does one writing its number as `+33 6 00 00 00 00` and `+33600000000`.
+The `fingerprint` is that comparison value hashed with the type and the
+extractor version: it identifies a value, not a document, so the same address
+in two CVs fingerprints the same and `cv_sha256` is what ties a candidate to
+its file.
+
+Phase 3.2B stops there. It creates **no** `profile_facts` row, persists nothing,
+adds no migration and no table, and not one candidate is a verified fact. The
+validated Master CV and the proposed/accepted/corrected/rejected workflow are
+Phase 3.3; institutions, employers, canonical roles, normalized dates and skill
+aliases and levels are Phase 3.4. Matching, eligibility, ranking and scores are
+further out still. Phase 3.2 as a whole is finished as a *reading* of a
+document, and is not a validated Master CV.
 
 ## Data-processing boundaries
 
@@ -196,7 +291,14 @@ ranking and scores are all still to come; Phase 3.2 as a whole is not finished.
 - The CV parser describes a document, not a person. A `DetectedSection` states
   that a recognised heading introduced these lines on these pages; it does not
   state that the person holds a diploma, a skill or a job. No parsed value is
-  validated, and none of it is stored. Reading an unknown address returns an explicit
+  validated, and none of it is stored.
+- A CV candidate is a reading, not a fact. An `ExtractedCandidate` states that
+  one named rule found this text on this page of this section; it does not
+  state that the person is called that, works there or knows that. Nothing is
+  accepted, corrected or rejected, nothing carries a level or a score, and
+  nothing is written anywhere. Where a rule cannot justify a reading, the
+  extractor produces no candidate and says so in a warning rather than
+  guessing. Reading an unknown address returns an explicit
   absence and never invents a profile; a user and its profile are created only
   by the explicit `ensure_user_profile` operation behind `init-profile`.
 - Source health reads that evidence back without adding to it. It derives one
@@ -209,9 +311,10 @@ ranking and scores are all still to come; Phase 3.2 as a whole is not finished.
 There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, or ML recommendation model. The Digital
-Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A and
-the read-only CV parser added by Phase 3.2A, both described above; no profile
-content, matching, or scoring is derived from either.
+Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
+read-only CV parser added by Phase 3.2A, and the unverified candidates added by
+Phase 3.2B, all described above; no profile content, matching, or scoring is
+derived from any of them.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,
 no web push, no notification path, no scheduler and no GitHub Actions schedule,
