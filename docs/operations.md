@@ -577,10 +577,98 @@ The failures it can report are a refused backend and a missing profile, each
 with exit code 1.
 
 What this slice does **not** do: no administrable alias table, no structured
-project, experience, education, certification, language, preference,
-availability, mobility or career objective; no opportunity constraint, no
-eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
-similarity, no matching, no match score, no ranking, no recommendation, no
-notification, no CV adaptation and no auto-apply. It opens no network connection
-and calls no model, and there is no web interface or HTTP endpoint for any of
-it.
+education, certification, language, preference, availability, mobility or
+career objective; no opportunity constraint, no eligibility rule, no skill
+extraction from an offer, no TF-IDF, no cosine similarity, no matching, no
+match score, no ranking, no recommendation, no notification, no CV adaptation
+and no auto-apply. Structured experiences and projects are the separate
+Phase 3.4B1 projection below, which this command never runs and never reads.
+It opens no network connection and calls no model, and there is no web
+interface or HTTP endpoint for any of it.
+
+## Structured profile entries (Phase 3.4B1)
+
+Migration `0009` is applied by the ordinary explicit command, like every other
+one:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `profile_experiences` and `profile_projects` and inserts no row.
+
+Project the accepted experience and project facts of one existing profile onto
+structured rows:
+
+```bash
+python -m services.digital_twin.structured_profile.cli sync
+```
+
+The command asks for the address without echo, so it never enters the shell
+history; `--email` stays available for tests and automation. The profile must
+already exist — create it with `python -m services.digital_twin.cli init-profile`
+first. This command creates no user and no profile, it runs no migration, and
+it refuses a non-SQLite backend before it connects and before it asks for
+anything.
+
+**It decides nothing.** Every fact it reads was already accepted by a person in
+the [CV review](#cv-review-phase-33b); a fact nobody accepted is invisible to
+it. It reads `fact_type IN ('EXPERIENCE', 'PROJECT') AND status = 'ACCEPTED'`
+and nothing else, so a `PROPOSED`, `REJECTED` or `CORRECTED` fact and an
+`ACCEPTED` fact of any other type never reach a row, and it never writes to
+`profile_facts` or `profile_fact_provenance`.
+
+**Nothing is invented, and a `NULL` is worth more than a guess.** A fragment is
+written only where the document itself delimited it: a pipe header for an
+experience, a colon after an optional list marker for a project, a period only
+in a closed set of explicit temporal forms. Where the wording is not
+unambiguous the fragment stays `NULL` and the row records `UNPARSED_V1` — the
+accepted fact is still projected, never dropped. No employer is deduced from a
+sentence, no role from a technology, no seniority from the word "stage", no
+duration, no calendar date from a school year, no skill from a project
+description, and no level of any kind.
+
+**It never touches the skills.** `profile_skills` and `profile_skill_evidence`
+are left exactly where the [skill projection](#profile-skills-phase-34a) put
+them; this command imports no skill module and infers no skill from an
+experience or a project.
+
+Re-running is expected and is the normal way to apply a decision. The run is a
+reconciliation, not an append: rows the current rules would write identically
+keep their ids and timestamps, missing ones are created, a row whose fact was
+corrected or rejected is dropped, and a row the rules now read differently is
+replaced whole. A second run on unchanged facts writes nothing and reports
+`changed=false`.
+
+The output is counters, rule tallies and a version, and it names **no value**:
+
+| key | meaning |
+| --- | --- |
+| `accepted_experience_facts` / `accepted_project_facts` | how many `ACCEPTED` facts of each type the run read |
+| `experience_rows` / `project_rows` | how many rows each table holds afterwards; always equal to the counts above |
+| `structured_experiences` / `unparsed_experiences` | how many experience rows a closed rule named, and how many stayed `UNPARSED_V1` |
+| `structured_projects` / `unparsed_projects` | the same tally for projects |
+| `created` / `removed` | rows added / dropped, a replacement counting as one of each |
+| `structurer_version` | `structured-profile-v1` |
+| `changed` | `false` when the run found the projection already correct |
+
+An `unparsed` count is a property of how the document was written, never a
+judgement about the person and never a score.
+
+Like the skill command, this one prints no role, organization, period, title or
+description at all — not on stdout, not in the structured log, not in an error
+message — and it has no flag that would print one. Reading the projection back
+is a Python call against a database you name explicitly.
+
+The failures it can report are a refused backend, a missing profile and an
+unmigrated database, each with exit code 1.
+
+What this slice does **not** do: no structured education, certification or
+language; no availability, mobility, preference or career objective; no
+eligibility rule, no opportunity constraint, no skill inference, no skill
+level, no matching, no match score, no TF-IDF, no cosine similarity, no
+ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. It opens no network connection and calls no model, and there is no
+web interface or HTTP endpoint for any of it.

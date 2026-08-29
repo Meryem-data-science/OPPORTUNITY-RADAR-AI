@@ -582,8 +582,9 @@ so the audit chain stays a chain rather than a copy that can drift. A canonical
 nothing about any profile.
 
 Phase 3.4A stops there. It adds no administrable alias table, no structured
-project, experience, education, certification, language, preference,
-availability, mobility or career objective, no opportunity constraint, no
+education, certification, language, preference, availability, mobility or
+career objective — structured experiences and projects are the separate
+Phase 3.4B1 projection below — no opportunity constraint, no
 eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
 similarity, no matching, no match score, no ranking, no recommendation, no
 notification, no CV adaptation and no auto-apply. There is no HTTP endpoint, no
@@ -591,6 +592,88 @@ web interface and no remote write path, and no network call or model takes
 part. The exact schema is in
 [database.md](database.md#normalized-profile-skills), and the local command is
 in [operations.md](operations.md#profile-skills-phase-34a).
+
+## Structured profile experiences and projects (Phase 3.4B1)
+
+`services/digital_twin/structured_profile/` derives a second reading from facts
+a person already accepted, and adds no new truth:
+
+```text
+profile_facts  (the source of truth, Phase 3.3A)
+    |
+    +-> profile_experiences   ── structure_experience ──┐
+    |                                                   ├─ profile_fact
+    +-> profile_projects      ── structure_project   ───┘        │
+                                                      profile_fact_provenance
+```
+
+`profile_facts` stays the source of truth. The projection reads
+`fact_type IN ('EXPERIENCE', 'PROJECT') AND status = 'ACCEPTED'`, written into
+the SQL rather than passed in, so a `PROPOSED`, `REJECTED` or `CORRECTED` fact
+and an `ACCEPTED` fact of any other type are invisible to it and no caller can
+widen the filter. This package imports no CV module: nothing from the Phase
+3.2B extractor reaches a row without passing through a fact a human accepted.
+
+It is built out of four refusals.
+
+**It refuses to invent.** Every projected fragment is text the document itself
+delimited with punctuation it wrote. `EXPERIENCE_PIPE_HEADER_V1` reads a first
+line written `segment | segment | segment` — at least three segments that all
+carry text, not opened by a list marker, with exactly one explicit period among
+the segments after the first two — and stores the first as the role, the second
+as the organization and the temporal one as the period, each trimmed and
+otherwise untouched. `PROJECT_BULLET_COLON_V1` removes at most one list marker,
+splits on the first `:` that is not a URL scheme, and stores the two sides;
+a period leaves the title only as a final parenthesis holding a closed range of
+two four-digit years. An explicit period is a **whole** fragment matching one
+closed form — a year, `MM/YYYY`, a month from a closed French/English registry
+with a year, a dash range of two of those, a range closed by one of the
+open-end markers, or a school year `YYYY/YYYY` kept verbatim. No employer is
+deduced from a sentence, no role from a technology, no seniority from the word
+"stage", no duration, no calendar date from a school year, no skill from a
+description, no certification and no language.
+
+**It refuses to guess rather than decline.** A rule applies or it does not:
+there is no partial credit and no score. Zero periods in a header, two of them,
+a date written where the role belongs, an empty side of a colon — each falls
+back to `UNPARSED_V1`, and an `UNPARSED_V1` row carries `NULL` in every
+fragment. **A `NULL` is worth more than an invented value.** The fact keeps the
+full wording either way, so declining loses nothing. What is never allowed is
+dropping the fact: every accepted fact is projected, exactly once, which is why
+`experience_rows` always equals `accepted_experience_facts`.
+
+**It refuses to append blindly.** `synchronize_structured_profile_entries` is a
+reconciliation inside one `BEGIN IMMEDIATE` transaction: the profile must
+exist, the accepted facts are read inside the transaction, a row the current
+rules would write identically is left exactly as it is — id and timestamp
+included — what is missing is created, a row pointing at a fact that stopped
+being verified is deleted, and a row the rules now read differently is replaced
+whole rather than patched. Running it twice on unchanged facts writes nothing
+and reports `changed=false`. A fact corrected or rejected after a run therefore
+stops being projected at the next run, and its `ACCEPTED` replacement takes its
+place, without anything else being asked of the operator.
+
+**It refuses to write back, or sideways.** No statement in the package inserts,
+updates or deletes a `profile_facts` or `profile_fact_provenance` row, and none
+names `profile_skills` or `profile_skill_evidence` at all — the Phase 3.4A
+projection is a neighbour, not a dependency, and no skill is ever inferred from
+an experience or a project. A test reads the SQL to keep it that way. The two
+tables duplicate no provenance column either: they record what the projection
+itself decided — which structurer version, which structuring rule — and point
+at the fact for everything else, so the audit chain stays a chain rather than a
+copy that can drift. `0009` makes the profile scope a database rule too, with a
+composite foreign key on `(fact_id, profile_id)`.
+
+Phase 3.4B1 stops there. It adds no structured education, certification or
+language, no availability, mobility, preference or career objective, no
+eligibility rule, no opportunity constraint, no skill inference, no skill
+level, no matching, no match score, no TF-IDF, no cosine similarity, no
+ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. There is no HTTP endpoint, no web interface and no remote write
+path, and no network call or model takes part. The exact schema is in
+[database.md](database.md#structured-profile-experiences-and-projects), and the
+local command is in
+[operations.md](operations.md#structured-profile-entries-phase-34b1).
 
 ## Data-processing boundaries
 
@@ -662,9 +745,12 @@ Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
 read-only CV parser added by Phase 3.2A, the unverified candidates added by
 Phase 3.2B, the validated fact store added by Phase 3.3A, the bridge and
 local review command added by Phase 3.3B, the re-read reconciliation added by
-Phase 3.3C, and the skill projection added by Phase 3.4A, all described above; no matching, ranking or scoring is derived
+Phase 3.3C, the skill projection added by Phase 3.4A, and the structured
+experiences and projects added by Phase 3.4B1, all described above; no
+matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
-no skill level is inferred from anything, and the only review that exists is a
+no skill level is inferred from anything, no role, employer, duration or
+seniority is inferred from a description, and the only review that exists is a
 terminal command — there is no web profile interface and no Master CV PDF.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,

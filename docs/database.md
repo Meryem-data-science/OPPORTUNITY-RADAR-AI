@@ -157,7 +157,8 @@ never logs it. A non-SQLite backend is refused locally, before any connection.
 
 Not implemented by that slice: `cv_versions`, preferences, eligibility,
 matching, scoring, and any profile HTTP API. `profile_facts` arrives with
-`0007` below, and the skills projected from it with `0008`.
+`0007` below, the skills projected from it with `0008`, and the structured
+experiences and projects projected from it with `0009`.
 
 The Phase 3.2A CV parser adds no table and no migration. It reads a local PDF
 and returns a result in memory; nothing it extracts is written to the database,
@@ -177,9 +178,11 @@ its own: there is no import log, no second registry and no `cv_versions`. See
 [operations.md](operations.md#cv-review-phase-33b).
 
 `0008` adds the Phase 3.4A skill projection described in
-[Normalized profile skills](#normalized-profile-skills) below. It adds no
-column to `profiles`, `profile_facts` or `profile_fact_provenance`, and the
-migrations stop there.
+[Normalized profile skills](#normalized-profile-skills) below, and `0009` the
+Phase 3.4B1 structured projection described in
+[Structured profile experiences and projects](#structured-profile-experiences-and-projects).
+Neither adds a column to `profiles`, `profile_facts` or
+`profile_fact_provenance`, and the migrations stop there.
 
 ## Profile facts and their provenance
 
@@ -522,6 +525,163 @@ from an offer, no TF-IDF, no cosine similarity, no matching, no `match_score`,
 no ranking, no recommendation, no notification, no CV adaptation and no
 auto-apply. There is no HTTP endpoint and no remote write path over these
 tables.
+
+## Structured profile experiences and projects
+
+Migration `0009` adds the Phase 3.4B1 projection of **verified** experience and
+project facts, and nothing else: two tables, one composite index on
+`profile_facts`, no column on any existing table, no seeded row.
+
+`profile_facts` stays the source of truth:
+
+```text
+profile_facts  (the only place a claim is decided)
+    |
+    +-> profile_experiences
+    |
+    +-> profile_projects
+```
+
+Every row below is derived from a fact whose status is already `ACCEPTED`, and
+the projection reads
+`fact_type IN ('EXPERIENCE', 'PROJECT') AND status = 'ACCEPTED'` and nothing
+else.
+
+**A `NULL` is worth more than an invented value.** Every fragment column is
+nullable, and a fragment is written only when the document itself delimited it
+with punctuation it wrote. No employer is deduced from a sentence, no role from
+a technology, no seniority from the word "stage", no duration, and no calendar
+date from a school year. There is no `verified`, `confidence`, `score`,
+`proficiency`, `seniority` or `match_score` column, for the same reason there
+is none in `0007` or `0008`.
+
+No row of these tables is ever updated by the projection, so neither carries
+`updated_at`: reconciliation inserts what is missing, deletes what has stopped
+being justified, and replaces — delete then insert — a row the current rules
+would write differently.
+
+### `profile_experiences`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, part of the composite key below |
+| `role_text` | nullable; non-blank and already trimmed when present |
+| `organization_text` | nullable; same rule |
+| `period_text` | nullable; same rule. The fragment the document wrote, never a computed date |
+| `description_text` | nullable; same rule. The remaining lines of the fact, as written |
+| `structurer_version` | `NOT NULL`, non-empty and already trimmed |
+| `structuring_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+### `profile_projects`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, part of the composite key below |
+| `title_text` | nullable; non-blank and already trimmed when present |
+| `period_text` | nullable; same rule |
+| `description_text` | nullable; same rule |
+| `structurer_version` | `NOT NULL`, non-empty and already trimmed |
+| `structuring_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`UNIQUE(fact_id)` — global, not per profile — says that one verified fact is
+projected exactly once: a fact appearing twice would mean the projection read
+one claim two ways, which is a defect rather than corroboration.
+
+Both tables carry a **composite** foreign key,
+`FOREIGN KEY (fact_id, profile_id) REFERENCES profile_facts(id, profile_id)`,
+supported by the unique index `idx_profile_facts_id_profile` that `0009`
+creates. It makes "a projection may not point at another profile's fact" a
+database rule rather than an application convention. Indexes:
+`idx_profile_experiences_profile`, `idx_profile_projects_profile`.
+
+Neither table duplicates `profile_fact_provenance`. It records only what the
+projection itself decided — which structurer version, which structuring rule —
+and points at the fact for everything else, so the audit chain stays a chain:
+
+```text
+profile_experience → profile_fact → profile_fact_provenance
+profile_project    → profile_fact → profile_fact_provenance
+```
+
+There is no `source_type`, `cv_sha256`, `parser_version`, `extractor_version`
+or `provenance_key` column here.
+
+### The structuring rules
+
+`STRUCTURED_PROFILE_VERSION` is `structured-profile-v1`. Three rules exist, and
+they are exhaustive.
+
+`EXPERIENCE_PIPE_HEADER_V1` applies when the fact's first line is written as an
+explicit pipe header: it does not open with a list marker, it holds at least
+three `|`-separated segments that all carry text once trimmed, and **exactly
+one** segment after the first two is an explicit period. `role_text` is then
+the first segment, `organization_text` the second, `period_text` the temporal
+one, and `description_text` the remaining lines of the fact. A segment the rule
+does not name — a city, a contract type — is not projected; the fact keeps it,
+and this slice adds no column for it.
+
+`PROJECT_BULLET_COLON_V1` applies when the first line — after at most one list
+marker has been removed — carries an explicit `:` with text on both sides. A
+colon immediately followed by `/` is a scheme, not a separator. `title_text` is
+the left side, `description_text` the right side followed by the remaining
+lines. A period is split out of the title in one shape only: a final
+parenthesis holding a closed range of two four-digit years, and only if a
+non-empty title survives its removal. `(2024)`, `(promotion 2024)` and
+`(septembre 2024 - juin 2025)` all stay part of the title.
+
+An explicit period, for the experience rule, is a **whole** fragment matching
+one closed form: a four-digit year, `MM/YYYY`, a month named in the closed
+French/English registry followed by a year, a dash-separated range of two of
+those, a range closed by one of the open-end markers (`présent`, `aujourd'hui`,
+`today`, `now`, `en cours`, …), or a school year written `YYYY/YYYY` — kept
+verbatim, never converted into calendar dates. `depuis 2023`, `6 mois`,
+`printemps 2024` and `2022 - 2024 (6 mois)` are not periods.
+
+`UNPARSED_V1` is everything else. The fact is still projected, with every
+fragment `NULL`: no accepted fact is ever dropped silently, and no fragment is
+guessed to fill the row. Zero explicit periods in a header, two of them, a date
+written where the role belongs, an empty side of a colon — each is a reason to
+decline, because choosing would be inventing.
+
+There is no stemming, no fuzzy matching, no edit distance, no similarity, no
+embedding, no LLM and no API call anywhere in the rules, and no clock: the same
+fact value always produces the same reading.
+
+### Synchronizing
+
+`synchronize_structured_profile_entries(connection, profile_id)` is a
+reconciliation, not an append, and the whole of it is one `BEGIN IMMEDIATE`
+transaction:
+
+1. the profile must exist — synchronizing creates no user and no profile;
+2. the `ACCEPTED` `EXPERIENCE` and `PROJECT` facts are read **inside** the
+   transaction;
+3. each of them is structured deterministically, and every one of them is
+   projected — `experience_rows` always equals `accepted_experience_facts`;
+4. a row pointing at a fact that is no longer verified is deleted;
+5. a row the current rules would write differently is replaced whole;
+6. `profile_facts`, `profile_fact_provenance`, `skills`, `profile_skills` and
+   `profile_skill_evidence` are never written.
+
+A second run on unchanged facts writes nothing, keeps every id and timestamp,
+and reports `changed=false`. A fact corrected or rejected after a run stops
+being projected at the next run, and its `ACCEPTED` replacement takes its
+place. See [operations.md](operations.md#structured-profile-entries-phase-34b1).
+
+### Not implemented by `0009`
+
+No structured education, certification or language; no availability, mobility,
+preference or career objective; no eligibility rule, no opportunity constraint,
+no skill inferred from an experience or a project, no skill level, no matching,
+no `match_score`, no TF-IDF, no cosine similarity, no ranking, no
+recommendation, no notification, no CV adaptation and no auto-apply. There is
+no HTTP endpoint and no remote write path over these tables.
 
 ## Source run history
 

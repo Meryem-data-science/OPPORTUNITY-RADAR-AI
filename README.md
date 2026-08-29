@@ -73,6 +73,18 @@ Phase 3 has started, and only these six slices of it exist:
   **No level is inferred**: no proficiency, no score, no confidence, no
   seniority, and several facts naming one skill are several proofs of one
   association, never "more" of it.
+- **Phase 3.4B1** — a deterministic projection of the **verified** experience
+  and project facts onto structured rows. It reads
+  `fact_type IN ('EXPERIENCE', 'PROJECT') AND status = 'ACCEPTED'` and nothing
+  else, and it names a fragment only where the document itself delimited it: a
+  pipe-delimited header (`role | organization | period`) for an experience, a
+  colon after an optional list marker for a project, and a period only in a
+  closed set of explicit temporal forms. **A `NULL` is worth more than an
+  invented value**: where the wording is not unambiguous the fragment stays
+  `NULL` and the row records `UNPARSED_V1` — the accepted fact is still
+  projected, never dropped. No employer is deduced from a sentence, no role
+  from a technology, no seniority from the word "stage", no duration, no
+  calendar date from a school year and no skill from a project description.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is
@@ -85,21 +97,24 @@ neither is Phase 3.3. What 3.3A adds is the reliable place a validated fact
 lives and the reading — `list_verified_profile_facts` — that returns only
 `ACCEPTED` facts; what 3.3B adds is the honest way a CV reaches it; what 3.4A
 adds is one derived reading of those accepted facts and no new truth. No Master
-CV PDF is generated. Of Phase 3.4, only the skill projection above exists: no
-structured project, experience, education, certification or language, no
-employer, institution, date or canonical role, no administrable alias table and
-no skill level. There is no eligibility, matching, ranking or score, and no web
-profile interface of any kind.
+CV PDF is generated. Of Phase 3.4, only the two projections above exist — the
+normalized skills and the structured experiences and projects: no structured
+education, certification or language, no employer, institution, canonical role
+or computed date deduced from prose, no administrable alias table and no skill
+level. There is no eligibility, matching, ranking or score, and no web profile
+interface of any kind.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, match a CV against an offer, or provide
-ML recommendations. The Digital Twin exists only as the six slices listed
+ML recommendations. The Digital Twin exists only as the seven slices listed
 above: there is no validated Master CV, no generated Master CV PDF, no skill
-level, no eligibility rule, and no match score. Reconciling a re-read CV
+level, no inferred seniority or duration, no eligibility rule, and no match
+score. Reconciling a re-read CV
 proposes and retires readings; it confirms none of them by itself. Skills exist only as the
 projection of facts a person already accepted, and holding a skill says nothing
-about how well. CV candidates do
+about how well. Experiences and projects exist only as the same kind of
+projection, and a fragment nobody wrote explicitly stays `NULL`. CV candidates do
 reach `profile_facts` now, but only as proposals a person reviews by hand — no
 import accepts anything, and the review is a local terminal command, not a web
 interface. Phase 3.2B itself still produces candidates in memory only: it adds
