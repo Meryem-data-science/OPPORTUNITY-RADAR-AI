@@ -123,7 +123,7 @@ def test_the_same_parsed_cv_always_yields_the_same_candidates(synthetic_pdf) -> 
 def test_the_result_and_every_candidate_carry_the_extractor_version(extract) -> None:
     result = extract(HEADER, BODY)
 
-    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v1"
+    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v2"
     assert result.extractor_version != result.parser_version
     assert result.candidates
     assert all(
@@ -513,6 +513,250 @@ def test_an_entry_running_over_a_page_break_carries_both_pages() -> None:
     assert first.raw_text == "Analyste fictif - Societe Exemple\n2023 - 2024"
     assert first.page_numbers == (1, 2)
     assert second.page_numbers == (2,)
+
+
+# --------------------------------------------------------------------------
+# 16b. Explicit pipe-delimited boundaries inside an EXPERIENCE section
+#
+# TEST ONLY content, invented like everything else in this file. The rule under
+# test reads the punctuation of a line, never what its parts mean: no employer,
+# role, date, place or seniority is asserted anywhere below.
+# --------------------------------------------------------------------------
+
+
+def _experience_rules(parsed: ParsedCv) -> set[ExtractionRule]:
+    return {
+        candidate.rule_id
+        for candidate in extract_candidates(parsed).of_type(
+            CandidateType.EXPERIENCE_ENTRY
+        )
+    }
+
+
+def test_a_pipe_delimited_line_opens_a_new_experience_block() -> None:
+    """A second entry opening on a non-bullet line no longer joins the first."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "- Tache fictive deux\n"
+        "Precision fictive sans puce\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023\n"
+        "- Tache fictive trois"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert len(experiences) == 2
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "- Tache fictive deux\n"
+        "Precision fictive sans puce",
+        "Poste fictif deux | Autre Societe Exemple | 2023\n- Tache fictive trois",
+    ]
+    assert all(
+        candidate.rule_id is ExtractionRule.EXPERIENCE_PIPE_DELIMITED_BLOCK
+        for candidate in experiences
+    )
+    assert all(
+        candidate.section_type is SectionType.EXPERIENCE
+        for candidate in experiences
+    )
+
+
+def test_pipe_delimited_blocks_keep_the_pages_of_every_line_they_hold() -> None:
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une",
+        "Precision fictive sans puce\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023\n"
+        "- Tache fictive trois",
+    )
+
+    first, second = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert first.page_numbers == (1, 2)
+    assert second.page_numbers == (2,)
+    assert first.raw_text.endswith("Precision fictive sans puce")
+    assert second.raw_text.startswith("Poste fictif deux")
+
+
+def test_a_bullet_line_holding_pipes_is_never_a_boundary() -> None:
+    """The marker is read first: a list item stays a detail of its entry."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Outils fictifs | Outil A | Outil B\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Outils fictifs | Outil A | Outil B",
+        "Poste fictif deux | Autre Societe Exemple | 2023",
+    ]
+
+
+def test_a_line_holding_a_single_pipe_does_not_trigger_the_rule() -> None:
+    """Two parts are ordinary punctuation, not a structure written on purpose."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple\n"
+        "Poste fictif deux | Autre Societe Exemple"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple",
+        "Poste fictif deux | Autre Societe Exemple",
+    ]
+    assert _experience_rules(parsed) == {ExtractionRule.SECTION_LINE_BLOCK}
+
+
+def test_a_pipe_line_with_an_empty_part_does_not_trigger_the_rule() -> None:
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | | 2024\n"
+        "Poste fictif deux | | 2023"
+    )
+
+    assert _experience_rules(parsed) == {ExtractionRule.SECTION_LINE_BLOCK}
+
+
+def test_a_single_pipe_delimited_line_keeps_the_historical_fallback() -> None:
+    """One boundary separates nothing, so the bullet rule still cuts the body."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "- Tache fictive deux"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple | 2024",
+        "- Tache fictive une",
+        "- Tache fictive deux",
+    ]
+    assert _experience_rules(parsed) == {ExtractionRule.SECTION_BULLET_BLOCK}
+
+
+def test_a_body_not_opening_on_a_boundary_keeps_the_historical_fallback() -> None:
+    """A pipe line appearing inside an entry never re-cuts the section."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "- Poste fictif un\n"
+        "Detail fictif | Partie A | Partie B\n"
+        "- Poste fictif deux\n"
+        "Detail fictif | Partie C | Partie D"
+    )
+
+    assert _experience_rules(parsed) == {ExtractionRule.SECTION_BULLET_BLOCK}
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+    assert len(experiences) == 2
+
+
+def test_a_pipe_delimited_body_outside_experience_keeps_its_own_rule() -> None:
+    """The rule is scoped to EXPERIENCE; no other section changes behaviour."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "FORMATION\n"
+        "Diplome fictif un | Ecole Exemple | 2024\n"
+        "Diplome fictif deux | Autre Ecole Exemple | 2022"
+    )
+
+    educations = extract_candidates(parsed).of_type(CandidateType.EDUCATION_ENTRY)
+
+    assert [candidate.rule_id for candidate in educations] == [
+        ExtractionRule.SECTION_LINE_BLOCK,
+        ExtractionRule.SECTION_LINE_BLOCK,
+    ]
+
+
+def test_entries_under_a_french_projects_heading_are_never_experiences() -> None:
+    """`PROJETS SÉLECTIONNÉS` closes EXPERIENCE, so what follows is a project."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023\n"
+        "PROJETS SÉLECTIONNÉS\n"
+        "Projet fictif un | Contexte invente | 2024\n"
+        "Projet fictif deux | Autre contexte invente | 2023"
+    )
+
+    result = extract_candidates(parsed)
+
+    assert [
+        candidate.raw_text
+        for candidate in result.of_type(CandidateType.EXPERIENCE_ENTRY)
+    ] == [
+        "Poste fictif un | Societe Exemple | 2024\n- Tache fictive une",
+        "Poste fictif deux | Autre Societe Exemple | 2023",
+    ]
+    projects = result.of_type(CandidateType.PROJECT_ENTRY)
+    assert [candidate.raw_text for candidate in projects] == [
+        "Projet fictif un | Contexte invente | 2024",
+        "Projet fictif deux | Autre contexte invente | 2023",
+    ]
+    assert all(
+        candidate.section_type is SectionType.PROJECTS for candidate in projects
+    )
+    assert all(
+        candidate.rule_id is not ExtractionRule.EXPERIENCE_PIPE_DELIMITED_BLOCK
+        for candidate in projects
+    )
+
+
+def test_the_pipe_delimited_rule_is_repeatable_and_asserts_no_level() -> None:
+    pages = (
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023"
+    )
+
+    first = extract_candidates(parsed_from_pages(pages))
+    second = extract_candidates(parsed_from_pages(pages))
+
+    assert first == second
+    experiences = first.of_type(CandidateType.EXPERIENCE_ENTRY)
+    assert [candidate.as_dict() for candidate in experiences] == [
+        candidate.as_dict()
+        for candidate in second.of_type(CandidateType.EXPERIENCE_ENTRY)
+    ]
+    # The block is text and provenance only: no part of a boundary line is read
+    # as an employer, a role or a date, and no level of any kind is derived.
+    for candidate in experiences:
+        assert candidate.normalized_value is None
+        assert set(candidate.as_dict()) == {
+            "candidate_type",
+            "raw_text",
+            "normalized_value",
+            "page_numbers",
+            "section_type",
+            "section_index",
+            "rule_id",
+            "fingerprint",
+            "cv_sha256",
+            "parser_version",
+            "extractor_version",
+        }
 
 
 def test_project_entries_are_extracted(extract) -> None:

@@ -29,7 +29,7 @@ from services.digital_twin.cv.models import SectionType
 #: candidate can always be compared against the rules that produced it. It is
 #: independent of `PARSER_VERSION`: the two versions move for different
 #: reasons, and a candidate carries both.
-CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v1"
+CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v2"
 
 
 class CandidateType(StrEnum):
@@ -97,6 +97,11 @@ class ExtractionRule(StrEnum):
     SECTION_BULLET_BLOCK = "SECTION_BULLET_BLOCK"
     #: The section body has neither, so each line is one entry.
     SECTION_LINE_BLOCK = "SECTION_LINE_BLOCK"
+    #: An EXPERIENCE body written as pipe-delimited header lines was cut on
+    #: those lines. The name describes the punctuation the document used and
+    #: nothing else: no employer, role, date, place or duration is read from
+    #: the parts, here or anywhere downstream of this rule.
+    EXPERIENCE_PIPE_DELIMITED_BLOCK = "EXPERIENCE_PIPE_DELIMITED_BLOCK"
 
     #: A "label: a, b, c" line; the label is dropped, the list is split.
     SKILLS_LABELLED_LIST_LINE = "SKILLS_LABELLED_LIST_LINE"

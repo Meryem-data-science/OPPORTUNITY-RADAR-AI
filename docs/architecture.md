@@ -132,10 +132,10 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
   `DetectedSection`, `ParserWarning`, `ParsedCv`, and the `PARSER_VERSION`
-  (`cv-parser-v1`) every result carries. `pypdf` is pinned to an exact
+  (`cv-parser-v2`) every result carries. `pypdf` is pinned to an exact
   version in `pyproject.toml` because the extracted text depends on it:
   changing that pin, or any extraction, normalization or segmentation rule, is
-  a change of the rules `cv-parser-v1` names, so it requires deciding whether
+  a change of the rules `cv-parser-v2` names, so it requires deciding whether
   `PARSER_VERSION` must move with it. Without that, two different outputs could
   claim the same provenance.
 - `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
@@ -152,7 +152,10 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
   survives because it is all the parser has to segment on.
 - `sections.py` splits the document on headings whose folded form is listed
   verbatim in one French/English lexicon. There is no model, no scoring and no
-  fuzzy match, so any classification can be checked against that table.
+  fuzzy match, so any classification can be checked against that table. A label
+  a real CV uses and the lexicon lacks is added to that table as an exact
+  folded entry and moves `PARSER_VERSION` with it, which is how
+  `projets selectionnes` (`PROJETS SÉLECTIONNÉS`) became a `PROJECTS` heading.
 - `parser.py` composes the pipeline; `cli.py` exposes it locally.
 
 The result is deterministic: nothing reads the clock, the environment or the
@@ -199,7 +202,7 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v1` and moves independently of
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v2` and moves independently of
 `PARSER_VERSION`.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
@@ -243,8 +246,18 @@ What the rules refuse to do is the design:
 - **Entries.** Education, experience, project, certification and language
   sections are cut into blocks on the separator the section actually uses —
   blank lines, else list markers, else one entry per line — and the block is
-  kept as written. No institution, employer, role, date, duration or diploma
-  level is derived: that reading is Phase 3.4.
+  kept as written. One narrower separator comes first, in an `EXPERIENCE`
+  section only: where the body opens on a line written as three or more
+  non-empty parts separated by `|`, and holds at least two such lines, those
+  lines are the separator (`EXPERIENCE_PIPE_DELIMITED_BLOCK`) and everything
+  under one — bullets and continuation lines included — belongs to it. That
+  case is exactly the one the fallbacks cannot see: an entry opening on a
+  non-bullet line inside a bulleted section would otherwise be swallowed by the
+  bullet above it. The rule reads the punctuation of a line and nothing else:
+  the parts are never split into an employer, a role or a date, and a body that
+  fails either precondition is cut exactly as before. No institution, employer,
+  role, date, duration or diploma level is derived anywhere: that reading is
+  Phase 3.4.
 - **Skills.** Mentions come only from a recognised `SKILLS` section, split on
   the separators the CV used. There is no level of any kind in the model — no
   proficiency, no confidence, no score — so "Azure Data Platform (avancé)" is

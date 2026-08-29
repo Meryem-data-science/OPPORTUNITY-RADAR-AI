@@ -255,7 +255,7 @@ Expected failures, each reported explicitly with exit code 1:
 | The PDF is encrypted | `EncryptedPdfError` |
 | The PDF has no text layer (a scan) | `EmptyPdfTextError` |
 
-A scanned CV is refused rather than guessed at: `cv-parser-v1` performs no OCR.
+A scanned CV is refused rather than guessed at: `cv-parser-v2` performs no OCR.
 
 What this command does **not** do: it stores no `profile_facts`, writes no row
 in the Digital Twin, creates no validated Master CV, offers no accept, correct

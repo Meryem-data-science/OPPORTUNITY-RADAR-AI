@@ -16,7 +16,7 @@ from enum import StrEnum
 #: The text layer is read by `pypdf`, so its pinned version in `pyproject.toml`
 #: is part of those rules: changing that pin requires deciding whether the
 #: extracted text can differ and therefore whether this version must move too.
-PARSER_VERSION = "cv-parser-v1"
+PARSER_VERSION = "cv-parser-v2"
 
 
 class SectionType(StrEnum):
