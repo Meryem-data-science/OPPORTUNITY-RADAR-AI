@@ -36,26 +36,78 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
+    assert applied == [
+            "0001",
+            "0002",
+            "0003",
+            "0004",
+            "0005",
+            "0006",
+            "0007",
+            "0008",
+            "0009",
+        ]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",), ("0006",), ("0007",), ("0008",)]
+    assert recorded == [
+        ("0001",),
+        ("0002",),
+        ("0003",),
+        ("0004",),
+        ("0005",),
+        ("0006",),
+        ("0007",),
+        ("0008",),
+        ("0009",),
+    ]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008"]
+        assert apply_migrations(connection) == [
+            "0001",
+            "0002",
+            "0003",
+            "0004",
+            "0005",
+            "0006",
+            "0007",
+            "0008",
+            "0009",
+        ]
         assert apply_migrations(connection) == []
 
         counts = {
             table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("sources", "opportunities", "opportunity_sources", "deduplication_decisions", "users", "profiles", "skills", "profile_skills")
+            for table in (
+                "sources",
+                "opportunities",
+                "opportunity_sources",
+                "deduplication_decisions",
+                "users",
+                "profiles",
+                "skills",
+                "profile_skills",
+                "profile_experiences",
+                "profile_projects",
+            )
         }
         migration_count = connection.execute(
             "SELECT COUNT(*) FROM schema_migrations"
         ).fetchone()[0]
 
-    assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0, "users": 0, "profiles": 0, "skills": 0, "profile_skills": 0}
-    assert migration_count == 8
+    assert counts == {
+        "sources": 0,
+        "opportunities": 0,
+        "opportunity_sources": 0,
+        "deduplication_decisions": 0,
+        "users": 0,
+        "profiles": 0,
+        "skills": 0,
+        "profile_skills": 0,
+        "profile_experiences": 0,
+        "profile_projects": 0,
+    }
+    assert migration_count == 9
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:

@@ -291,9 +291,10 @@ def test_the_candidate_package_still_ignores_the_fact_store() -> None:
 def test_this_slice_still_adds_no_migration_of_its_own() -> None:
     """Phase 3.3B reuses the 0007 schema and adds no table of its own.
 
-    `0008` belongs to the Phase 3.4A skill projection, which reads accepted
-    facts and is not part of this bridge; the list is written out so a
-    migration added without a decided owner shows up here.
+    `0008` belongs to the Phase 3.4A skill projection and `0009` to the Phase
+    3.4B1 structured projection; both read accepted facts and neither is part
+    of this bridge. The list is written out so a migration added without a
+    decided owner shows up here.
     """
     migrations = sorted(Path("migrations").glob("*.sql"))
 
@@ -306,6 +307,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0006_user_profile_foundation.sql",
         "0007_profile_facts.sql",
         "0008_normalized_profile_skills.sql",
+        "0009_structured_profile_experiences_projects.sql",
     ]
 
 

@@ -263,7 +263,11 @@ def test_the_fact_package_never_overwrites_a_value_in_place() -> None:
 
 
 def test_0007_adds_only_the_two_fact_tables() -> None:
-    """The fact store is `0007` alone; `0008` projects it and adds no column."""
+    """The fact store is `0007` alone.
+
+    `0008` and `0009` project it — onto skills, then onto structured
+    experiences and projects — and neither adds a column to it.
+    """
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
     assert names == [
@@ -275,10 +279,13 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0006_user_profile_foundation.sql",
         "0007_profile_facts.sql",
         "0008_normalized_profile_skills.sql",
+        "0009_structured_profile_experiences_projects.sql",
     ]
-    assert "ALTER TABLE" not in Path(
-        "migrations/0008_normalized_profile_skills.sql"
-    ).read_text(encoding="utf-8")
+    for projection in (
+        "migrations/0008_normalized_profile_skills.sql",
+        "migrations/0009_structured_profile_experiences_projects.sql",
+    ):
+        assert "ALTER TABLE" not in Path(projection).read_text(encoding="utf-8")
     statements = Path("migrations/0007_profile_facts.sql").read_text(encoding="utf-8")
     created = [
         line for line in statements.splitlines() if line.startswith("CREATE TABLE")
