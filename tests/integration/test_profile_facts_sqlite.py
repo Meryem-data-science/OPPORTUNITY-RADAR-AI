@@ -182,20 +182,75 @@ def test_no_table_carries_a_persistent_verified_flag(migrated):
             assert "verified" not in column.casefold(), (table, column)
 
 
+#: The three tables migration `0008` adds. They are the *only* exemption, named
+#: one by one rather than matched on a prefix: `skill` stays a forbidden word
+#: below, so a fourth table about a skill — `skill_levels`, `skill_scores`,
+#: `user_skills_extra` — is caught rather than waved through.
+PHASE_34A_TABLES = frozenset({"skills", "profile_skills", "profile_skill_evidence"})
+
+#: Concepts this database must not contain. The list is the docstring of the
+#: guard below, written as code so the two cannot drift apart.
+OUT_OF_SCOPE_TABLE_WORDS = (
+    "skill",
+    "alias",
+    "project",
+    "experience",
+    "education",
+    "certification",
+    "language",
+    "preference",
+    "availability",
+    "mobility",
+    "career",
+    "eligib",
+    "match",
+    "score",
+    "ranking",
+)
+
+
+def is_out_of_scope_table(name: str) -> bool:
+    """True when a table with this name has no business existing here."""
+    if name in PHASE_34A_TABLES:
+        return False
+    folded = name.casefold()
+    return any(word in folded for word in OUT_OF_SCOPE_TABLE_WORDS)
+
+
 def test_no_table_beyond_the_skill_projection_exists_yet(migrated):
     """Phase 3.4A projects skills and stops there.
 
-    The three tables `0008` adds are named here explicitly, so this assertion
-    keeps saying what it has always said: nothing else of Phase 3.4 and beyond
-    exists — no administrable alias table, no preference, no availability, no
-    mobility, no eligibility and no matching table.
+    The three tables `0008` adds are exempted by name; every other table is
+    held to the whole out-of-scope list — no fourth skill table, no
+    administrable alias table, no structured project, experience, education,
+    certification or language, no preference, availability, mobility or career
+    objective, and no eligibility, matching, score or ranking table.
     """
-    projected = {"skills", "profile_skills", "profile_skill_evidence"}
-    forbidden = ("alias", "preference", "eligib", "match", "score", "ranking")
+    for table in _tables(migrated):
+        assert not is_out_of_scope_table(table), table
 
-    for table in _tables(migrated) - projected:
-        folded = table.casefold()
-        assert not any(word in folded for word in forbidden), table
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "skill_levels",
+        "skill_scores",
+        "user_skills_extra",
+        "profile_skill_levels",
+        "skill_aliases",
+        "profile_preferences",
+        "opportunity_matches",
+        "eligibility_rules",
+    ],
+)
+def test_the_guard_refuses_an_extra_out_of_scope_table(name: str) -> None:
+    """The exemption is three names, not the word `skill`."""
+    assert is_out_of_scope_table(name)
+
+
+@pytest.mark.parametrize("name", sorted(PHASE_34A_TABLES))
+def test_the_guard_still_allows_the_three_projected_tables(name: str) -> None:
+    assert not is_out_of_scope_table(name)
 
 
 def test_the_fact_columns_are_exactly_the_cycle_and_its_history(migrated):
