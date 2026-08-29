@@ -59,8 +59,8 @@ _HEADINGS_BY_TYPE: Mapping[SectionType, tuple[str, ...]] = {
     SectionType.PROJECTS: (
         "project", "projects", "personal projects", "academic projects",
         "selected projects", "side projects", "projet", "projets",
-        "projets personnels", "projets academiques", "portfolio",
-        "realisations",
+        "projets personnels", "projets academiques", "projets selectionnes",
+        "portfolio", "realisations",
     ),
     SectionType.SKILLS: (
         "skills", "key skills", "core skills", "technical skills",

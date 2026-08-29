@@ -35,6 +35,8 @@ def _pages(*page_texts: str) -> tuple[ExtractedPage, ...]:
         ("Expériences professionnelles :", SectionType.EXPERIENCE),
         ("Stages", SectionType.EXPERIENCE),
         ("PROJETS", SectionType.PROJECTS),
+        ("PROJETS SÉLECTIONNÉS", SectionType.PROJECTS),
+        ("Projets sélectionnés :", SectionType.PROJECTS),
         ("Compétences techniques", SectionType.SKILLS),
         ("• COMPETENCES", SectionType.SKILLS),
         ("Certifications", SectionType.CERTIFICATIONS),
@@ -79,6 +81,32 @@ def test_english_headings_are_recognised(line: str, expected: SectionType) -> No
 )
 def test_a_line_that_is_not_a_known_label_is_never_a_heading(line: str) -> None:
     assert classify_heading(line) is None
+
+
+def test_the_accented_french_projects_label_folds_to_its_lexicon_entry() -> None:
+    """The lookup stays an exact one: folding is all that bridges the accents."""
+    assert fold_heading("PROJETS SÉLECTIONNÉS") == "projets selectionnes"
+    assert SECTION_HEADINGS["projets selectionnes"] is SectionType.PROJECTS
+
+
+def test_a_projects_heading_closes_the_experience_section_before_it() -> None:
+    pages = _pages(
+        "EXPERIENCE\n"
+        "Poste fictif | Societe Exemple | 2024\n"
+        "PROJETS SÉLECTIONNÉS\n"
+        "Projet fictif : description inventee"
+    )
+
+    sections, warnings = detect_sections(pages)
+
+    assert [section.section_type for section in sections] == [
+        SectionType.EXPERIENCE,
+        SectionType.PROJECTS,
+    ]
+    assert sections[0].content == "Poste fictif | Societe Exemple | 2024"
+    assert sections[1].heading_text == "PROJETS SÉLECTIONNÉS"
+    assert sections[1].content == "Projet fictif : description inventee"
+    assert warnings == ()
 
 
 def test_folding_only_removes_case_accents_and_decoration() -> None:

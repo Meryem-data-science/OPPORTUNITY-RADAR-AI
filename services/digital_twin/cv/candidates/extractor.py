@@ -227,7 +227,9 @@ def _add_entries(builder: _Builder, segments: Sequence[SectionSegment]) -> None:
         candidate_type = entry_rules.ENTRY_CANDIDATE_TYPES.get(segment.section_type)
         if candidate_type is None or not segment.body:
             continue
-        rule_id, blocks = entry_rules.segment_entries(segment.body)
+        rule_id, blocks = entry_rules.segment_entries(
+            segment.body, section_type=segment.section_type
+        )
         for block in blocks:
             builder.add(
                 candidate_type=candidate_type,
@@ -290,7 +292,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
         warnings.append(
             CandidateWarning(
                 code=CandidateWarningCode.NO_CANDIDATE_EXTRACTED,
-                message="no rule of cv-candidates-v1 produced a candidate",
+                message="no rule of cv-candidates-v2 produced a candidate",
             )
         )
 
