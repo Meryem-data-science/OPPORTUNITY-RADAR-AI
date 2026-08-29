@@ -1,6 +1,12 @@
-"""Local CLI that projects verified EXPERIENCE and PROJECT facts onto rows.
+"""Local CLI that projects the verified facts of Phase 3.4B onto rows.
 
     python -m services.digital_twin.structured_profile.cli sync
+
+One command, one reconciliation, five fact types: `EXPERIENCE` and `PROJECT`
+since Phase 3.4B1, and `EDUCATION`, `CERTIFICATION` and `LANGUAGE` since Phase
+3.4B2. There is deliberately no second command and no per-type flag — the
+structured profile is one thing, synchronized in one transaction, so a run can
+never leave a profile half-projected.
 
 It runs one reconciliation against the configured local SQLite database and
 prints what it did as counters. It is not a review command and it decides
@@ -8,14 +14,19 @@ nothing: every fact it reads was already accepted by a human in the Phase 3.3B
 review, and a fact nobody accepted is invisible to it.
 
 Like the Phase 3.4A skill command, it prints **no** value at all — no role, no
-organization, no period, no title, no description — not on stdout, not in the
+organization, no period, no title, no description, no institution, no diploma,
+no certification, no language and no level — not on stdout, not in the
 structured log, not in an error message, and it has no flag that would print
 one. The counters, the rule tallies and the structurer version are the whole
-output. A CV's experience and project sections are personal content, and a
-command that needs nobody to read a value has no reason to display one.
+output. A CV's history is personal content, and a command that needs nobody to
+read a value has no reason to display one.
 
-It runs no migration: `0009` is applied by the ordinary explicit migration
-command, exactly like every other one.
+An `unparsed` counter is a property of how a document was written, never a
+judgement about the person: a diploma nobody typed with pipes is exactly as
+real as one that was.
+
+It runs no migration: `0009` and `0010` are applied by the ordinary explicit
+migration command, exactly like every other one.
 """
 
 from __future__ import annotations
@@ -57,8 +68,9 @@ __all__ = [
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Project the ACCEPTED experience and project facts of one existing "
-            "profile onto structured rows. Reads facts; never decides one."
+            "Project the ACCEPTED experience, project, education, "
+            "certification and language facts of one existing profile onto "
+            "structured rows. Reads facts; never decides one."
         )
     )
     parser.add_argument("command", choices=(SYNC_COMMAND,))

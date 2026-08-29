@@ -140,7 +140,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
         assert _apply_up_to_0006(connection, tmp_path) == list(BEFORE_THIS_SLICE)
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
 
-        assert apply_migrations(connection) == ["0007", "0008", "0009"]
+        assert apply_migrations(connection) == ["0007", "0008", "0009", "0010"]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
         assert (
@@ -160,7 +160,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0009",)
+    assert recorded[-1] == ("0010",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -193,8 +193,16 @@ PHASE_34A_TABLES = frozenset({"skills", "profile_skills", "profile_skill_evidenc
 #: `experience_scores`, `project_matches` — is still caught.
 PHASE_34B1_TABLES = frozenset({"profile_experiences", "profile_projects"})
 
+#: The three tables migration `0010` adds. Same rule, same reason: `education`,
+#: `certification` and `language` stay forbidden words, so a fourth table about
+#: any of them — `education_levels`, `certification_scores`,
+#: `language_proficiency_levels` — is still caught.
+PHASE_34B2_TABLES = frozenset(
+    {"profile_educations", "profile_certifications", "profile_languages"}
+)
+
 #: Every table a projection slice is allowed to have added so far.
-PROJECTED_TABLES = PHASE_34A_TABLES | PHASE_34B1_TABLES
+PROJECTED_TABLES = PHASE_34A_TABLES | PHASE_34B1_TABLES | PHASE_34B2_TABLES
 
 #: Concepts this database must not contain. The list is the docstring of the
 #: guard below, written as code so the two cannot drift apart.
@@ -225,14 +233,14 @@ def is_out_of_scope_table(name: str) -> bool:
     return any(word in folded for word in OUT_OF_SCOPE_TABLE_WORDS)
 
 
-def test_no_table_beyond_the_two_projections_exists_yet(migrated):
-    """Phase 3.4A projects skills, Phase 3.4B1 experiences and projects.
+def test_no_table_beyond_the_projections_exists_yet(migrated):
+    """3.4A projects skills, 3.4B1 experiences and projects, 3.4B2 the rest.
 
-    The five tables `0008` and `0009` add are exempted by name; every other
-    table is held to the whole out-of-scope list — no fourth skill table, no
-    administrable alias table, no structured education, certification or
-    language, no preference, availability, mobility or career objective, and
-    no eligibility, matching, score or ranking table.
+    The eight tables `0008`, `0009` and `0010` add are exempted one by one;
+    every other table is held to the whole out-of-scope list — no fourth skill
+    table, no administrable alias table, no second education, certification or
+    language table, no preference, availability, mobility or career objective,
+    and no eligibility, matching, score or ranking table.
     """
     for table in _tables(migrated):
         assert not is_out_of_scope_table(table), table
@@ -252,11 +260,16 @@ def test_no_table_beyond_the_two_projections_exists_yet(migrated):
         "experience_scores",
         "project_matches",
         "profile_experience_levels",
+        "education_levels",
+        "profile_education_levels",
+        "certification_scores",
+        "language_proficiency_levels",
+        "profile_language_levels",
     ],
 )
 def test_the_guard_refuses_an_extra_out_of_scope_table(name: str) -> None:
-    """The exemption is five names, not the words `skill`, `project` or
-    `experience`."""
+    """The exemption is eight names, not the words `skill`, `project`,
+    `experience`, `education`, `certification` or `language`."""
     assert is_out_of_scope_table(name)
 
 

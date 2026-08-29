@@ -59,6 +59,7 @@ def test_real_sqlite_listing_is_filtered_ordered_counted_and_read_only(
             "0007",
             "0008",
             "0009",
+            "0010",
         ]
         assert persist_opportunities(
             connection, source, candidates, clock=lambda: next(timestamps)

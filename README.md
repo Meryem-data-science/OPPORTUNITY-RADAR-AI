@@ -85,6 +85,24 @@ Phase 3 has started, and only these six slices of it exist:
   projected, never dropped. No employer is deduced from a sentence, no role
   from a technology, no seniority from the word "stage", no duration, no
   calendar date from a school year and no skill from a project description.
+- **Phase 3.4B2** — the same projection, extended to the **verified**
+  education, certification and language facts. It reads
+  `fact_type IN ('EDUCATION', 'CERTIFICATION', 'LANGUAGE') AND status =
+  'ACCEPTED'` and adds `profile_educations`, `profile_certifications` and
+  `profile_languages`. **Punctuation proves that segments exist; it never
+  proves what they are about**, so a pipe-delimited diploma line is read as a
+  school and a programme only when a closed, tiny marker registry
+  (`université`, `école`, `institut`, `faculté`, `college`, …) can tell the two
+  apart — and when it cannot, only the explicit period is kept and both stay
+  `NULL`. A certification is read only from explicit labels
+  (`Certification : … | Délivré par : …`), never from a sentence, and a stated
+  intention ("préparation à", "objectif") is never turned into a credential. A
+  language level is read only when it is a whole form of a closed registry
+  (`A1`…`C2`, `débutant`, `courant`, `fluent`, `bilingue`, …) and is stored
+  **verbatim**: "courant" never becomes `C1`, "fluent" never becomes `C2`, and
+  no CEFR level is computed from anything. No `Bac+N` is derived from the word
+  "Master", no issuer, obtention date or expiry date is invented, and no
+  language is deduced from a project written in English.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is

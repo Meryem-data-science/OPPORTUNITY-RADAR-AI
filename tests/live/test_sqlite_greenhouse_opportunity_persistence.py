@@ -33,6 +33,7 @@ def test_real_greenhouse_candidate_is_idempotently_persisted_to_sqlite(
             "0007",
             "0008",
             "0009",
+            "0010",
         ]
         first = persist_opportunities(connection, source, [candidate])
         stored = connection.execute("""

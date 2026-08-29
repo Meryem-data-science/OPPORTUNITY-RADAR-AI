@@ -41,6 +41,7 @@ def connection(tmp_path):
             "0007",
             "0008",
             "0009",
+            "0010",
         ]
         yield handle
     finally:

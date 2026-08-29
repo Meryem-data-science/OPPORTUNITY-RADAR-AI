@@ -581,10 +581,11 @@ so the audit chain stays a chain rather than a copy that can drift. A canonical
 `skills` row is never deleted: it is shared vocabulary, and on its own it says
 nothing about any profile.
 
-Phase 3.4A stops there. It adds no administrable alias table, no structured
-education, certification, language, preference, availability, mobility or
-career objective — structured experiences and projects are the separate
-Phase 3.4B1 projection below — no opportunity constraint, no
+Phase 3.4A stops there. It adds no administrable alias table, no preference,
+availability, mobility or career objective — structured experiences and
+projects are the separate Phase 3.4B1 projection below, and structured
+education, certifications and languages the Phase 3.4B2 one — no opportunity
+constraint, no
 eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
 similarity, no matching, no match score, no ranking, no recommendation, no
 notification, no CV adaptation and no auto-apply. There is no HTTP endpoint, no
@@ -601,10 +602,14 @@ a person already accepted, and adds no new truth:
 ```text
 profile_facts  (the source of truth, Phase 3.3A)
     |
-    +-> profile_experiences   ── structure_experience ──┐
-    |                                                   ├─ profile_fact
-    +-> profile_projects      ── structure_project   ───┘        │
-                                                      profile_fact_provenance
+    +-> profile_skills          (Phase 3.4A, above)
+    +-> profile_experiences     ── structure_experience
+    +-> profile_projects        ── structure_project
+    +-> profile_educations      ── structure_education       (Phase 3.4B2)
+    +-> profile_certifications  ── structure_certification   (Phase 3.4B2)
+    +-> profile_languages       ── structure_language        (Phase 3.4B2)
+
+    every row → its fact_id → profile_facts → profile_fact_provenance
 ```
 
 `profile_facts` stays the source of truth. The projection reads
@@ -634,8 +639,9 @@ qualified by a parenthesis holding exactly one of those same open-end markers
 date, no duration and no employment status. A parenthesis holding free text —
 `(6 mois)`, `(stage)`, `(Paris)` — is not one. No employer is
 deduced from a sentence, no role from a technology, no seniority from the word
-"stage", no duration, no calendar date from a school year, no skill from a
-description, no certification and no language.
+"stage", no duration, no calendar date from a school year and no skill from a
+description. Structured education, certifications and languages are the
+Phase 3.4B2 extension below, read by their own rules and never by these two.
 
 **It refuses to guess rather than decline.** A rule applies or it does not:
 there is no partial credit and no score. Zero periods in a header, two of them,
@@ -668,16 +674,105 @@ at the fact for everything else, so the audit chain stays a chain rather than a
 copy that can drift. `0009` makes the profile scope a database rule too, with a
 composite foreign key on `(fact_id, profile_id)`.
 
-Phase 3.4B1 stops there. It adds no structured education, certification or
-language, no availability, mobility, preference or career objective, no
-eligibility rule, no opportunity constraint, no skill inference, no skill
-level, no matching, no match score, no TF-IDF, no cosine similarity, no
-ranking, no recommendation, no notification, no CV adaptation and no
-auto-apply. There is no HTTP endpoint, no web interface and no remote write
-path, and no network call or model takes part. The exact schema is in
+Phase 3.4B1 stops there. Structured education, certifications and languages are
+the Phase 3.4B2 extension below. It adds no availability, mobility, preference
+or career objective, no eligibility rule, no opportunity constraint, no skill
+inference, no skill level, no matching, no match score, no TF-IDF, no cosine
+similarity, no ranking, no recommendation, no notification, no CV adaptation
+and no auto-apply. There is no HTTP endpoint, no web interface and no remote
+write path, and no network call or model takes part. The exact schema is in
 [database.md](database.md#structured-profile-experiences-and-projects), and the
 local command is in
-[operations.md](operations.md#structured-profile-entries-phase-34b1).
+[operations.md](operations.md#structured-profile-entries-phase-34b1-and-34b2).
+
+## Structured education, certifications and languages (Phase 3.4B2)
+
+Phase 3.4B2 is the **same** package, the same command and the same transaction,
+reading three more fact types:
+
+    fact_type IN ('EDUCATION', 'CERTIFICATION', 'LANGUAGE')
+    AND status = 'ACCEPTED'
+
+Migration `0010` adds `profile_educations`, `profile_certifications` and
+`profile_languages` alongside the two tables `0009` created, with the same
+composite foreign key on `(fact_id, profile_id)`, the same `UNIQUE(fact_id)`,
+the same absence of any provenance column, and the same absence of any
+`verified`, `confidence`, `score`, `seniority`, `match_score` or
+`inferred_level` column.
+
+`STRUCTURED_PROFILE_VERSION` stays `structured-profile-v1`, and that is a
+decision rather than an omission. A version is a statement about *how a row was
+produced*; `EXPERIENCE_PIPE_HEADER_V1`, `PROJECT_BULLET_COLON_V1` and
+`UNPARSED_V1` read exactly what they read before, over exactly the same
+temporal grammar, so the rows they produced were produced exactly as
+`structured-profile-v1` says. **Adding a fact type is backward-compatible by
+construction**: it introduces new rules for new types and changes none of the
+existing readings, so no existing row is rewritten and a synchronization run
+after this slice leaves every experience and project row where it was, id and
+timestamp included. The day one of the older readings changes, the version
+moves and every row is rewritten — that mechanism is untouched.
+
+**Punctuation proves that segments exist; it never proves what they are
+about.** That is the one idea this slice adds, and it is why education has its
+own rules rather than reusing the experience one. A CV writes
+`role | employer | dates` in that order and only that order; it writes a
+diploma and a school in either. So `EDUCATION_PIPE_EXPLICIT_V1` never reads a
+segment by its position: it finds the **one** explicit period, and then asks a
+closed registry of institution markers — `université`, `university`, `école`,
+`school`, `institut`, `institute`, `faculté`, `faculty`, `college` — which of
+the two remaining segments is the school, by whole word, with no stemming, no
+plural folding and no fuzzy comparison. Exactly one marked segment and exactly
+one unmarked one is the only case it reads; the marked one is the institution
+and the other the programme, whichever order they were written in.
+
+When the period is certain and that distinction is not — neither segment
+carries a marker, both do, or a third segment remains — the reading stops
+halfway on purpose: `EDUCATION_PIPE_PERIOD_ONLY_V1` keeps the period verbatim
+and the following lines as the description, and leaves `institution_text` and
+`program_text` `NULL`. That is not partial credit: the period is *certain*, and
+what is uncertain is absent rather than approximated. Everything else is
+`EDUCATION_UNPARSED_V1`, with every fragment `NULL`.
+
+`CERTIFICATION_EXPLICIT_V1` reads labels the document wrote, never a position
+and never a phrase. Every segment of the first line must be readable — a whole
+explicit period, or a `label: value` whose label is a closed registry entry
+(`certification`, `certificat`, `certificate`; `délivré par`, `issued by`,
+`issuer`, `organisme`, …) — the certification label must appear exactly once,
+and no label may repeat. A fact stating an intention — a whole word of a closed
+registry: `préparation`, `objectif`, `prévu`, `planned`, … — is never read as a
+certification at all, anywhere in the fact. There is no `obtained`,
+`obtained_at` or `expires_at` column, so naming a certification never records
+holding one, no issuer is invented and no date is invented.
+
+`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when a single-line fact carries one
+explicit separator — a trailing parenthesis, a colon, a pipe, or a dash the
+document spaced on both sides — and everything on its right is a **whole** form
+of the closed proficiency registry (`A1`…`C2`, `débutant`, `intermédiaire`,
+`avancé`, `courant`, `fluent`, `native`, `natif`, `bilingue`, `bilingual`).
+The registry decides *whether* the fragment is a level; it never translates
+one. `proficiency_text` is stored verbatim, so **"courant" stays "courant"**:
+there is no CEFR column, no mapping onto one, and no level derived from a
+diploma, from a country or from a project written in English. Anything else is
+`LANGUAGE_UNPARSED_V1`, with both fragments `NULL`.
+
+The rest is unchanged: one `BEGIN IMMEDIATE` transaction for all five types,
+the same reconciliation — create what is missing, delete what stopped being
+justified, replace whole what the rules now read differently — the same
+idempotence, the same profile scope, and the same refusal to write to
+`profile_facts`, `profile_fact_provenance`, `skills`, `profile_skills` or
+`profile_skill_evidence`. No skill is inferred from a diploma, a certification
+or a language.
+
+Phase 3.4B2 stops there. It adds no availability, mobility, preference or
+career objective, no eligibility rule, no opportunity constraint, no skill
+inference, no level of any kind, no matching, no match score, no TF-IDF, no
+cosine similarity, no ranking, no recommendation, no notification, no CV
+adaptation and no auto-apply. There is no HTTP endpoint, no web interface and
+no remote write path, and no network call or model takes part. The exact schema
+is in
+[database.md](database.md#structured-profile-education-certifications-and-languages),
+and the command is the same one, in
+[operations.md](operations.md#structured-profile-entries-phase-34b1-and-34b2).
 
 ## Data-processing boundaries
 
@@ -749,8 +844,9 @@ Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
 read-only CV parser added by Phase 3.2A, the unverified candidates added by
 Phase 3.2B, the validated fact store added by Phase 3.3A, the bridge and
 local review command added by Phase 3.3B, the re-read reconciliation added by
-Phase 3.3C, the skill projection added by Phase 3.4A, and the structured
-experiences and projects added by Phase 3.4B1, all described above; no
+Phase 3.3C, the skill projection added by Phase 3.4A, the structured
+experiences and projects added by Phase 3.4B1, and the structured education,
+certifications and languages added by Phase 3.4B2, all described above; no
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or

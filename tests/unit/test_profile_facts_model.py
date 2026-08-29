@@ -265,8 +265,9 @@ def test_the_fact_package_never_overwrites_a_value_in_place() -> None:
 def test_0007_adds_only_the_two_fact_tables() -> None:
     """The fact store is `0007` alone.
 
-    `0008` and `0009` project it — onto skills, then onto structured
-    experiences and projects — and neither adds a column to it.
+    `0008`, `0009` and `0010` project it — onto skills, then onto structured
+    experiences and projects, then onto structured education, certifications
+    and languages — and none of them adds a column to it.
     """
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
@@ -280,6 +281,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0007_profile_facts.sql",
         "0008_normalized_profile_skills.sql",
         "0009_structured_profile_experiences_projects.sql",
+        "0010_structured_profile_education_certifications_languages.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",
