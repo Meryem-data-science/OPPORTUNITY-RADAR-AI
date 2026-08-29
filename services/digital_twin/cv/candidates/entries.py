@@ -113,13 +113,17 @@ def _pipe_delimited_blocks(
     """Cut the body on its boundary lines, everything else following its own.
 
     A line that is not a boundary — a bullet, a continuation line, an indented
-    detail — belongs to the block opened by the last boundary above it, in
-    order, with its text untouched.
+    detail, a blank line the CV left between two of them — belongs to the block
+    opened by the last boundary above it, in order, with its text untouched. A
+    blank line is not a boundary and is not a separator here, so it is kept
+    where the document wrote it instead of being dropped: only a boundary line
+    ever opens a block. Blank lines before the first boundary are the exception
+    and are skipped, since there is no block yet for them to belong to.
     """
     blocks: list[tuple[SourceLine, ...]] = []
     current: list[SourceLine] = []
     for line in body:
-        if not line.text:
+        if not current and not line.text:
             continue
         if is_pipe_boundary_line(line.text) and current:
             blocks.append(tuple(current))

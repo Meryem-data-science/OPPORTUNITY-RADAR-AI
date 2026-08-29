@@ -585,6 +585,55 @@ def test_pipe_delimited_blocks_keep_the_pages_of_every_line_they_hold() -> None:
     assert second.raw_text.startswith("Poste fictif deux")
 
 
+def test_a_blank_line_inside_a_pipe_delimited_block_is_kept() -> None:
+    """A blank line is not a boundary, so it stays where the document put it."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "\n"
+        "- Tache fictive deux\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023\n"
+        "- Tache fictive trois"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert len(experiences) == 2
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "\n"
+        "- Tache fictive deux",
+        "Poste fictif deux | Autre Societe Exemple | 2023\n- Tache fictive trois",
+    ]
+    assert all(
+        candidate.rule_id is ExtractionRule.EXPERIENCE_PIPE_DELIMITED_BLOCK
+        for candidate in experiences
+    )
+    assert [candidate.page_numbers for candidate in experiences] == [(1,), (1,)]
+
+
+def test_a_blank_line_never_opens_a_pipe_delimited_block() -> None:
+    """Only a boundary cuts: a blank line before one stays with the entry above."""
+    parsed = parsed_from_pages(
+        "Jeanne Exemple\n"
+        "EXPERIENCE\n"
+        "Poste fictif un | Societe Exemple | 2024\n"
+        "- Tache fictive une\n"
+        "\n"
+        "Poste fictif deux | Autre Societe Exemple | 2023"
+    )
+
+    experiences = extract_candidates(parsed).of_type(CandidateType.EXPERIENCE_ENTRY)
+
+    assert [candidate.raw_text for candidate in experiences] == [
+        "Poste fictif un | Societe Exemple | 2024\n- Tache fictive une\n",
+        "Poste fictif deux | Autre Societe Exemple | 2023",
+    ]
+
+
 def test_a_bullet_line_holding_pipes_is_never_a_boundary() -> None:
     """The marker is read first: a list item stays a detail of its entry."""
     parsed = parsed_from_pages(
