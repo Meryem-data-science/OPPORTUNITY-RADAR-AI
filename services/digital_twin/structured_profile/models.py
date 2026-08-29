@@ -62,6 +62,13 @@ class StructuringRule(StrEnum):
     #: segments, and exactly one of those two carrying a closed institution
     #: marker. The marked one is the institution, the other the programme.
     EDUCATION_PIPE_EXPLICIT_V1 = "EDUCATION_PIPE_EXPLICIT_V1"
+    #: A pipe header of exactly two segments, neither an explicit period, one
+    #: of them carrying a closed institution marker. The marked one is the
+    #: institution and the other the programme; `period_text` stays `None`,
+    #: because a header with no date is a header with no date.
+    EDUCATION_PIPE_INSTITUTION_PROGRAM_V1 = (
+        "EDUCATION_PIPE_INSTITUTION_PROGRAM_V1"
+    )
     #: A pipe header holding exactly one explicit period, whose other segments
     #: cannot be told apart honestly. The period is kept verbatim; the
     #: institution and the programme stay `None` rather than being guessed.

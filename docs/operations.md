@@ -635,8 +635,12 @@ is not unambiguous the fragment stays `NULL` and the row records the type's
 
 Punctuation proves that segments exist; it never proves what they are about. So
 a pipe-delimited diploma line becomes a school and a programme only when a
-closed marker registry can tell them apart, and otherwise only its period is
-kept, with `EDUCATION_PIPE_PERIOD_ONLY_V1` on the row. No employer is deduced
+closed marker registry can tell them apart — never by position, and whether the
+line carries two segments or three. When the marker can answer and no date was
+written, the row records `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and
+`period_text` stays `NULL`; when a date is certain but the marker cannot
+answer, only the period is kept, with `EDUCATION_PIPE_PERIOD_ONLY_V1` on the
+row. No employer is deduced
 from a sentence, no role from a technology, no seniority from the word "stage",
 no duration, no calendar date from a school year, no skill from a project
 description, no diploma from a school, no `Bac+N` from the word "Master", no
@@ -665,7 +669,7 @@ The output is counters, rule tallies and a version, and it names **no value**:
 | `experience_rows` / `project_rows` / `education_rows` / `certification_rows` / `language_rows` | how many rows each table holds afterwards; always equal to the counts above |
 | `structured_experiences` / `unparsed_experiences` | how many experience rows a closed rule named, and how many stayed `UNPARSED_V1` |
 | `structured_projects` / `unparsed_projects` | the same tally for projects |
-| `structured_educations` / `unparsed_educations` | the same tally for education. `EDUCATION_PIPE_PERIOD_ONLY_V1` counts as structured: it named the period |
+| `structured_educations` / `unparsed_educations` | the same tally for education. `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and `EDUCATION_PIPE_PERIOD_ONLY_V1` both count as structured: each named a fragment |
 | `structured_certifications` / `unparsed_certifications` | the same tally for certifications |
 | `structured_languages` / `unparsed_languages` | the same tally for languages |
 | `created` / `removed` | rows added / dropped, a replacement counting as one of each |

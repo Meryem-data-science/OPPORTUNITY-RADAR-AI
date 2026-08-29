@@ -716,16 +716,30 @@ moves and every row is rewritten — that mechanism is untouched.
 about.** That is the one idea this slice adds, and it is why education has its
 own rules rather than reusing the experience one. A CV writes
 `role | employer | dates` in that order and only that order; it writes a
-diploma and a school in either. So `EDUCATION_PIPE_EXPLICIT_V1` never reads a
-segment by its position: it finds the **one** explicit period, and then asks a
-closed registry of institution markers — `université`, `university`, `école`,
-`school`, `institut`, `institute`, `faculté`, `faculty`, `college` — which of
-the two remaining segments is the school, by whole word, with no stemming, no
-plural folding and no fuzzy comparison. Exactly one marked segment and exactly
-one unmarked one is the only case it reads; the marked one is the institution
-and the other the programme, whichever order they were written in.
+diploma and a school in either. So no education rule ever reads a segment by
+its position. Each of them asks the same closed registry of institution markers
+— `université`, `university`, `école`, `school`, `institut`, `institute`,
+`faculté`, `faculty`, `college` — which segment is the school, by whole word,
+with no stemming, no plural folding and no fuzzy comparison. Exactly one marked
+segment and exactly one unmarked one is the only case any of them reads; the
+marked one is the institution and the other the programme, whichever order they
+were written in.
 
-When the period is certain and that distinction is not — neither segment
+Because the marker does the work, the number of segments does not have to be
+three. `EDUCATION_PIPE_EXPLICIT_V1` reads a header holding **one** explicit
+period plus exactly those two answerable segments.
+`EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` reads the shorter shape a CV writes
+just as often — **exactly two** segments, **neither** of them an explicit
+period, one of them marked — and leaves `period_text` `NULL`, because a header
+with no date is a header with no date and no year is ever looked for inside the
+words. The experience rule still needs three segments, and for a reason that
+does not apply here: it reads by position, so two segments leave it nothing to
+anchor on. Requiring both segments to be free of a period is what keeps the
+short rule honest — in `Université Exemple | 2020 - 2022` the unmarked segment
+is a date, and calling it a programme would be exactly the invention this
+package refuses, so that fact stays unparsed.
+
+When a single period is certain and the distinction is not — neither segment
 carries a marker, both do, or a third segment remains — the reading stops
 halfway on purpose: `EDUCATION_PIPE_PERIOD_ONLY_V1` keeps the period verbatim
 and the following lines as the description, and leaves `institution_text` and

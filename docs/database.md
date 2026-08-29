@@ -815,28 +815,46 @@ about.** A CV writes `role | employer | dates` in that order; it writes a
 diploma and a school in either, so the education rules never read a segment by
 its position.
 
-`EDUCATION_PIPE_EXPLICIT_V1` applies when the first line is an explicit pipe
-header — no opening list marker, at least three `|`-separated segments that all
-carry text — holding **exactly one** explicit period, when exactly two segments
-remain besides it, and when exactly one of those two names an institution by a
-**whole word** of the closed registry: `université`, `universite`,
-`university`, `école`, `ecole`, `school`, `institut`, `institute`, `faculté`,
-`faculte`, `faculty`, `college`, `collège`, `collége`. The marked segment is
-`institution_text`, the other `program_text`, whichever order they appear in,
-and the remaining lines are `description_text`. There is no stemming, no plural
+All three education rules start from an explicit pipe header — no opening list
+marker, `|`-separated segments that all carry text once trimmed — and all three
+tell a school from a programme the same way: exactly one of the two answerable
+segments must name an institution by a **whole word** of the closed registry
+`université`, `universite`, `university`, `école`, `ecole`, `school`,
+`institut`, `institute`, `faculté`, `faculte`, `faculty`, `college`, `collège`,
+`collége`. The marked segment is `institution_text` and the other
+`program_text`, whichever order they appear in. There is no stemming, no plural
 folding, no prefix match and no fuzzy comparison: `Universitaire` and
 `Universités` name no institution.
 
-`EDUCATION_PIPE_PERIOD_ONLY_V1` applies when the period is certain and that
-distinction is not — neither remaining segment carries a marker, both do, or
-more than two remain. `period_text` is the fragment verbatim,
+The minimum number of segments is **two** here, unlike the three the experience
+rule requires. That rule needs three because it reads segments by position;
+these read none by position, so two written segments are answerable — or not —
+on exactly the same evidence as three.
+
+`EDUCATION_PIPE_EXPLICIT_V1` applies when the header holds **exactly one**
+explicit period, exactly two segments remain besides it, and those two are
+answerable. The remaining lines are `description_text`.
+
+`EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` applies when the header holds
+**exactly two** segments, **neither** of them an explicit period, and those two
+are answerable. `period_text` stays `NULL`: a header with no date is a header
+with no date, and no year is looked for inside the words. Both segments must be
+free of an explicit period — in `Université Exemple | 2020 - 2022` the unmarked
+segment is a date, and reading it as a programme would be an invention, so that
+fact stays unparsed.
+
+`EDUCATION_PIPE_PERIOD_ONLY_V1` applies when a single period is certain and
+that distinction is not — neither remaining segment carries a marker, both do,
+or more than two remain. `period_text` is the fragment verbatim,
 `description_text` the remaining lines, and `institution_text` and
 `program_text` stay `NULL`. The certain part is preserved without the uncertain
 part being invented.
 
 `EDUCATION_UNPARSED_V1` is everything else, with every fragment `NULL`: no pipe
-header, zero explicit periods, two of them, an empty segment, or a line opened
-by a list marker.
+header, an empty segment, a line opened by a list marker, several explicit
+periods, a two-segment header holding a date, a two-segment header the registry
+cannot answer, and any dateless header of three segments or more — where the
+third segment would have no honest home.
 
 `CERTIFICATION_EXPLICIT_V1` applies when the fact states no intention — no
 whole word of the closed registry `préparation`, `preparation`, `préparer`,

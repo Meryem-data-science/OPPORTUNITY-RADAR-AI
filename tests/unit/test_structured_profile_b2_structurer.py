@@ -137,6 +137,136 @@ def test_the_lines_after_the_header_are_kept_whole_and_in_order() -> None:
 
 
 # --------------------------------------------------------------------------
+# EDUCATION — two segments, no date, one marker
+# --------------------------------------------------------------------------
+
+
+def test_two_segments_and_one_marker_name_the_school_and_the_programme() -> None:
+    """A CV writes a diploma and a school on one line as often as with a date.
+
+    Two written segments are a structure the document put there. They still do
+    not say which is which — the closed registry does.
+    """
+    reading = structure_education("Programme fictif | Université Exemple")
+
+    assert reading.structuring_rule_id is (
+        StructuringRule.EDUCATION_PIPE_INSTITUTION_PROGRAM_V1
+    )
+    assert reading.institution_text == "Université Exemple"
+    assert reading.program_text == "Programme fictif"
+    assert reading.period_text is None
+    assert reading.description_text is None
+    assert reading.structurer_version == STRUCTURED_PROFILE_VERSION
+
+
+def test_the_two_segment_reading_follows_the_marker_and_not_the_position() -> None:
+    reading = structure_education("Institute Example | Programme fictif")
+
+    assert reading.structuring_rule_id is (
+        StructuringRule.EDUCATION_PIPE_INSTITUTION_PROGRAM_V1
+    )
+    assert reading.institution_text == "Institute Example"
+    assert reading.program_text == "Programme fictif"
+
+
+def test_the_two_segment_reading_is_the_same_in_either_order() -> None:
+    school_first = structure_education("Université Exemple | Programme fictif")
+    programme_first = structure_education("Programme fictif | Université Exemple")
+
+    assert (
+        school_first.institution_text
+        == programme_first.institution_text
+        == "Université Exemple"
+    )
+    assert (
+        school_first.program_text
+        == programme_first.program_text
+        == "Programme fictif"
+    )
+
+
+def test_the_two_segment_reading_keeps_the_following_lines() -> None:
+    reading = structure_education(
+        "Programme fictif | Université Exemple\nMention très bien\n\nMémoire"
+    )
+
+    assert reading.structuring_rule_id is (
+        StructuringRule.EDUCATION_PIPE_INSTITUTION_PROGRAM_V1
+    )
+    assert reading.description_text == "Mention très bien\n\nMémoire"
+
+
+def test_the_two_segments_are_trimmed_and_otherwise_untouched() -> None:
+    reading = structure_education("  Programme   fictif  |   Université  Exemple ")
+
+    assert reading.program_text == "Programme   fictif"
+    assert reading.institution_text == "Université  Exemple"
+
+
+def test_no_year_is_looked_for_inside_a_two_segment_header() -> None:
+    """A header with no date is a header with no date."""
+    reading = structure_education("Programme fictif 2022 | Université Exemple")
+
+    assert reading.period_text is None
+    assert reading.program_text == "Programme fictif 2022"
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("Programme fictif | Autre programme", "no marker: nothing says which"),
+        ("Université Exemple | École Exemple", "two markers: still nothing says"),
+        ("Programme fictif |   ", "an empty segment"),
+        ("  | Université Exemple", "an empty segment"),
+        ("- Programme fictif | Université Exemple", "a list marker opens it"),
+        ("Programme fictif, Université Exemple", "a comma is not a pipe"),
+    ],
+)
+def test_a_two_segment_header_the_registry_cannot_answer_stays_unparsed(
+    value: str, reason: str
+) -> None:
+    reading = structure_education(value)
+
+    assert reading.structuring_rule_id is StructuringRule.EDUCATION_UNPARSED_V1, reason
+    assert (
+        reading.institution_text,
+        reading.program_text,
+        reading.period_text,
+        reading.description_text,
+    ) == (None, None, None, None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Université Exemple | 2020 - 2022",
+        "2020 - 2022 | Université Exemple",
+        "Programme fictif | 2023/2024",
+        "2020 | 2022",
+    ],
+)
+def test_a_two_segment_header_holding_a_date_is_never_read(value: str) -> None:
+    """Calling a date a programme is exactly the invention this package refuses.
+
+    Two segments carry no evidence of what the unmarked one is *for*, and when
+    that unmarked one is a date, reading it as a programme would be a plain
+    falsehood. The fact keeps its wording and the row keeps its `NULL`s.
+    """
+    reading = structure_education(value)
+
+    assert reading.structuring_rule_id is StructuringRule.EDUCATION_UNPARSED_V1
+    assert (reading.institution_text, reading.program_text) == (None, None)
+    assert reading.period_text is None
+
+
+def test_a_three_segment_header_with_no_date_is_still_not_read() -> None:
+    """The third segment would have no honest home, so the reading declines."""
+    reading = structure_education("Programme fictif | Université Exemple | Ville")
+
+    assert reading.structuring_rule_id is StructuringRule.EDUCATION_UNPARSED_V1
+
+
+# --------------------------------------------------------------------------
 # EDUCATION — the period is certain and the rest is not
 # --------------------------------------------------------------------------
 
@@ -188,7 +318,7 @@ def test_a_school_year_is_kept_verbatim_and_never_becomes_two_dates() -> None:
     "value",
     [
         "Master 2 Data Science, Université de Paris, 2020-2022",
-        "Master 2 Data Science | Université de Paris",
+        "Master 2 Data Science | Programme complémentaire",
         "Master | Université de Paris | 2020 | 2021",
         "Master | Université de Paris | Paris",
         "Master | | 2020 - 2022",

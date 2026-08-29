@@ -376,6 +376,16 @@ PROFICIENCY_FORMS: tuple[str, ...] = (
     "bilingual", "bilingue",
 )
 
+#: How many written segments an *education* first line must hold before it
+#: counts as a header. Lower than `MIN_PIPE_SEGMENTS` on purpose, and only
+#: here. The experience rule needs three because it reads segments by position
+#: — `role | employer | dates` — so two segments leave it nothing to anchor on,
+#: and a sentence that happens to hold one pipe would be read as a job. The
+#: education rules never read a segment by its position: they ask the closed
+#: marker registry which segment is the school. Two written segments are then
+#: enough to be answerable, or not, on exactly the same evidence as three.
+MIN_EDUCATION_PIPE_SEGMENTS = 2
+
 #: Whole words, for comparison against the closed registries above. Letters
 #: only: digits and punctuation separate words and belong to neither.
 _WORDS = re.compile(r"[^\W\d_]+")
@@ -411,20 +421,26 @@ def is_explicit_proficiency(fragment: str) -> bool:
     return comparison_form(fragment) in PROFICIENCY_FORMS
 
 
-def _pipe_header(source_value: str) -> tuple[list[str], list[str]] | None:
+def _pipe_header(
+    source_value: str, *, minimum: int = MIN_PIPE_SEGMENTS
+) -> tuple[list[str], list[str]] | None:
     """The segments of an explicit pipe header, and the lines after it.
 
     `None` when the first line is not one: it opens with a list marker, it
-    holds fewer than `MIN_PIPE_SEGMENTS` segments, or one of its segments is
-    empty. Two segments are how an ordinary sentence happens to use the
-    character; three written segments are a structure the document put there.
+    holds fewer than `minimum` segments, or one of its segments is empty.
+
+    `minimum` is how many written segments count as a structure the document
+    put there, and it is a property of the *rule* rather than of the
+    punctuation. Three for a rule that reads segments by position; two for the
+    education rules, which read none of them by position — see
+    `MIN_EDUCATION_PIPE_SEGMENTS`.
     """
     lines = _lines(source_value)
     header = lines[0] if lines else ""
     if not header or header[0] in BULLET_MARKERS:
         return None
     segments = [segment.strip() for segment in header.split(PIPE_SEPARATOR)]
-    if len(segments) < MIN_PIPE_SEGMENTS or not all(segments):
+    if len(segments) < minimum or not all(segments):
         return None
     return segments, lines[1:]
 
@@ -441,75 +457,118 @@ def _unparsed_education(source_value: str) -> StructuredEducation:
     )
 
 
+def _marked_institution(segments: list[str]) -> tuple[str, str] | None:
+    """Split exactly two segments into `(institution, programme)`, or refuse.
+
+    The answer comes from the closed `INSTITUTION_MARKERS` registry and from
+    nothing else: exactly one of the two segments must name an institution by a
+    whole word, and then that one is the institution and the other is the
+    programme — whichever order the document wrote them in. No position, no
+    capitalisation, no length, no comma counting and no similarity to anything
+    takes part. Zero marked segments and two marked segments are both refusals:
+    the punctuation proved that two segments exist, and nothing proved what
+    either of them is about.
+    """
+    if len(segments) != 2:
+        return None
+    marked = [
+        index
+        for index, segment in enumerate(segments)
+        if names_an_institution(segment)
+    ]
+    if len(marked) != 1:
+        return None
+    return segments[marked[0]], segments[1 - marked[0]]
+
+
 def structure_education(source_value: str) -> StructuredEducation:
-    """Read one EDUCATION fact with the two closed education rules, or decline.
+    """Read one EDUCATION fact with the three closed education rules, or decline.
 
-    Both rules start from the same certainty and stop at different points.
+    All three start from an explicit pipe header — a first line not opened by a
+    list marker, whose `|`-separated segments all carry text once trimmed — and
+    none of them ever reads a segment by its position. What separates them is
+    what the document proved.
 
-    The certainty is an explicit pipe header holding **exactly one** explicit
-    period. Zero periods is a header with no date; several is a header this
-    package cannot read without choosing, and choosing is inventing. The
-    period's *position* is never assumed: it is found, and the remaining
-    segments are what the two rules then argue about.
+    `EDUCATION_PIPE_EXPLICIT_V1` applies when the header holds **exactly one**
+    explicit period, exactly two segments remain beside it, and exactly one of
+    those two names an institution by a whole word of the closed
+    `INSTITUTION_MARKERS` registry. That one is the institution, the other the
+    programme. Zero periods is not this rule's shape; several is a header this
+    package cannot read without choosing, and choosing is inventing.
 
-    `EDUCATION_PIPE_EXPLICIT_V1` applies when exactly two segments remain and
-    exactly one of them names an institution by a whole word of the closed
-    `INSTITUTION_MARKERS` registry. That one is the institution and the other
-    is the programme — whichever order the document wrote them in. Nothing else
-    distinguishes them: no position, no capitalisation, no length, no comma
-    counting and no similarity to anything.
+    `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` applies to the shorter shape a CV
+    writes just as often: a header of **exactly two** segments, **neither** of
+    which is an explicit period, exactly one of which is marked. There is no
+    date to read, so `period_text` stays `None` — a header with no date is a
+    header with no date, not a reason to decline the part that is certain, and
+    not a reason to go looking for a year inside the words. Requiring both
+    segments to be free of an explicit period is what keeps this honest: in
+    `Université Exemple | 2020 - 2022` the unmarked segment is a date, and
+    calling it a programme would be exactly the invention this package refuses,
+    so that fact stays unparsed.
 
-    `EDUCATION_PIPE_PERIOD_ONLY_V1` applies whenever the period is certain and
-    that distinction is not: neither remaining segment carries a marker, both
-    do, or there are more than two of them. The period is kept verbatim, the
-    following lines are kept as the description, and `institution_text` and
-    `program_text` stay `None`. The certain part is preserved without the
-    uncertain part being invented.
+    `EDUCATION_PIPE_PERIOD_ONLY_V1` applies whenever a single explicit period
+    is certain and the institution/programme distinction is not: neither
+    remaining segment carries a marker, both do, or there are more than two of
+    them. The period is kept verbatim, the following lines are kept as the
+    description, and `institution_text` and `program_text` stay `None`. The
+    certain part is preserved without the uncertain part being invented.
 
     Everything else is `EDUCATION_UNPARSED_V1`, with every fragment `None`. In
     no case is a diploma deduced from a school, a school from a sentence, a
     `Bac+N` or any study level from the word "Master", or a calendar date from
     a school year: `2023/2024` is stored as `2023/2024`.
     """
-    header = _pipe_header(source_value)
-    if header is not None:
-        segments, rest = header
-        periods = [
-            index
-            for index, segment in enumerate(segments)
-            if is_explicit_period(segment)
-        ]
-        if len(periods) == 1:
-            others = [
-                segment
-                for index, segment in enumerate(segments)
-                if index != periods[0]
-            ]
-            marked = [
-                index
-                for index, segment in enumerate(others)
-                if names_an_institution(segment)
-            ]
-            institution: str | None = None
-            program: str | None = None
-            if len(others) == 2 and len(marked) == 1:
-                institution = others[marked[0]]
-                program = others[1 - marked[0]]
-            rule = (
-                StructuringRule.EDUCATION_PIPE_EXPLICIT_V1
-                if institution is not None
-                else StructuringRule.EDUCATION_PIPE_PERIOD_ONLY_V1
-            )
-            return StructuredEducation(
-                source_value=source_value,
-                institution_text=institution,
-                program_text=program,
-                period_text=segments[periods[0]],
-                description_text=_joined_rest(rest),
-                structurer_version=STRUCTURED_PROFILE_VERSION,
-                structuring_rule_id=rule,
-            )
-    return _unparsed_education(source_value)
+    header = _pipe_header(source_value, minimum=MIN_EDUCATION_PIPE_SEGMENTS)
+    if header is None:
+        return _unparsed_education(source_value)
+    segments, rest = header
+    periods = [
+        index for index, segment in enumerate(segments) if is_explicit_period(segment)
+    ]
+
+    if not periods:
+        # No date anywhere, so only the two-segment shape can say anything.
+        named = _marked_institution(segments)
+        if named is None:
+            return _unparsed_education(source_value)
+        institution, program = named
+        return StructuredEducation(
+            source_value=source_value,
+            institution_text=institution,
+            program_text=program,
+            period_text=None,
+            description_text=_joined_rest(rest),
+            structurer_version=STRUCTURED_PROFILE_VERSION,
+            structuring_rule_id=(
+                StructuringRule.EDUCATION_PIPE_INSTITUTION_PROGRAM_V1
+            ),
+        )
+
+    if len(periods) != 1 or len(segments) < MIN_PIPE_SEGMENTS:
+        # Several dates, or a two-segment header one of whose segments is a
+        # date: in both cases naming the rest would mean choosing.
+        return _unparsed_education(source_value)
+
+    others = [
+        segment for index, segment in enumerate(segments) if index != periods[0]
+    ]
+    named = _marked_institution(others)
+    institution, program = named if named is not None else (None, None)
+    rule = (
+        StructuringRule.EDUCATION_PIPE_EXPLICIT_V1
+        if named is not None
+        else StructuringRule.EDUCATION_PIPE_PERIOD_ONLY_V1
+    )
+    return StructuredEducation(
+        source_value=source_value,
+        institution_text=institution,
+        program_text=program,
+        period_text=segments[periods[0]],
+        description_text=_joined_rest(rest),
+        structurer_version=STRUCTURED_PROFILE_VERSION,
+        structuring_rule_id=rule,
+    )
 
 
 def _labelled_segment(segment: str) -> tuple[str, str] | None:

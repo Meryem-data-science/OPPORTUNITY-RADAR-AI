@@ -93,8 +93,10 @@ Phase 3 has started, and only these six slices of it exist:
   proves what they are about**, so a pipe-delimited diploma line is read as a
   school and a programme only when a closed, tiny marker registry
   (`université`, `école`, `institut`, `faculté`, `college`, …) can tell the two
-  apart — and when it cannot, only the explicit period is kept and both stay
-  `NULL`. A certification is read only from explicit labels
+  apart — never by position, and whether the line holds two segments or three.
+  When it cannot, only the explicit period is kept and both stay `NULL`; when
+  it can and the line carries no date, `period_text` stays `NULL` rather than a
+  year being looked for inside the words. A certification is read only from explicit labels
   (`Certification : … | Délivré par : …`), never from a sentence, and a stated
   intention ("préparation à", "objectif") is never turned into a credential. A
   language level is read only when it is a whole form of a closed registry

@@ -75,6 +75,7 @@ STRUCTURED_EDUCATION = (
     "Master 2 Data Science | Université de Test | 2020 - 2022\nMention"
 )
 PERIOD_ONLY_EDUCATION = "Master 2 Data Science | Promotion 2020 | 2020 - 2022"
+DATELESS_EDUCATION = "Programme fictif | Université Exemple"
 FREE_EDUCATION = "Diplômée en 2022 après deux ans d'études"
 STRUCTURED_CERTIFICATION = (
     "Certification : Test Cloud | Délivré par : Organisme Test | 2023"
@@ -611,6 +612,75 @@ def test_an_undecidable_education_stores_only_its_period(migrated, profile_id):
     assert (row.institution_text, row.program_text) == (None, None)
     # It named a fragment, so it is a reading, not a failure to read.
     assert (outcome.structured_educations, outcome.unparsed_educations) == (1, 0)
+
+
+def test_a_dateless_two_segment_education_is_stored_without_a_period(
+    migrated, profile_id
+):
+    """The shorter shape a CV writes just as often, read by the same registry."""
+    fact = accepted(migrated, profile_id, DATELESS_EDUCATION)
+
+    outcome = synchronize_structured_profile_entries(migrated, profile_id)
+    row = list_profile_educations(migrated, profile_id)[0]
+
+    assert row.fact_id == fact.id
+    assert row.structuring_rule_id == "EDUCATION_PIPE_INSTITUTION_PROGRAM_V1"
+    assert row.institution_text == "Université Exemple"
+    assert row.program_text == "Programme fictif"
+    assert row.period_text is None
+    assert row.description_text is None
+    assert (outcome.structured_educations, outcome.unparsed_educations) == (1, 0)
+
+
+def test_a_dateless_education_the_registry_cannot_answer_stays_unparsed(
+    migrated, profile_id
+):
+    fact = accepted(migrated, profile_id, "Programme fictif | Autre programme")
+
+    outcome = synchronize_structured_profile_entries(migrated, profile_id)
+    row = list_profile_educations(migrated, profile_id)[0]
+
+    assert row.fact_id == fact.id
+    assert row.structuring_rule_id == "EDUCATION_UNPARSED_V1"
+    assert (row.institution_text, row.program_text, row.period_text) == (
+        None,
+        None,
+        None,
+    )
+    assert (outcome.structured_educations, outcome.unparsed_educations) == (0, 1)
+
+
+def test_the_three_education_shapes_coexist_in_one_run(migrated, profile_id):
+    """One reconciliation, one row per fact, three different rules recorded."""
+    for value in (STRUCTURED_EDUCATION, DATELESS_EDUCATION, PERIOD_ONLY_EDUCATION):
+        accepted(migrated, profile_id, value)
+
+    outcome = synchronize_structured_profile_entries(migrated, profile_id)
+    rules = [row.structuring_rule_id for row in list_profile_educations(
+        migrated, profile_id
+    )]
+
+    assert rules == [
+        "EDUCATION_PIPE_EXPLICIT_V1",
+        "EDUCATION_PIPE_INSTITUTION_PROGRAM_V1",
+        "EDUCATION_PIPE_PERIOD_ONLY_V1",
+    ]
+    assert outcome.education_rows == outcome.accepted_education_facts == 3
+    assert (outcome.structured_educations, outcome.unparsed_educations) == (3, 0)
+
+
+def test_a_dateless_education_is_reconciled_like_any_other(migrated, profile_id):
+    fact = accepted(migrated, profile_id, DATELESS_EDUCATION)
+    synchronize_structured_profile_entries(migrated, profile_id)
+    before = list_profile_educations(migrated, profile_id)
+
+    unchanged = synchronize_structured_profile_entries(migrated, profile_id)
+    reject_profile_fact(migrated, profile_id, fact.id)
+    after_rejection = synchronize_structured_profile_entries(migrated, profile_id)
+
+    assert unchanged.changed is False
+    assert list_profile_educations(migrated, profile_id) == () != before
+    assert (after_rejection.created, after_rejection.removed) == (0, 1)
 
 
 def test_a_structured_certification_is_stored_fragment_by_fragment(
