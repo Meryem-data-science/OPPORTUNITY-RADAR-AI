@@ -8,7 +8,8 @@ It never says that the information is true of the person. There is no
 `verified` flag, no accepted/rejected state, no `profile_fact`, no skill level,
 no proficiency, no confidence and no score in this module, because none of
 those can be derived from reading a PDF. Deciding what is true is the job of
-the Phase 3.3 validation workflow, which does not exist yet.
+the Phase 3.3A validation cycle in `services/digital_twin/facts/`; nothing in
+this module reaches it, and the mapping that would is Phase 3.3B.
 
 Like Phase 3.2A, every value here is a pure function of the parsed document and
 of `CANDIDATE_EXTRACTOR_VERSION`: no clock, no environment variable, no network

@@ -18,6 +18,8 @@ EXPECTED_TABLES = {
     "source_runs",
     "users",
     "profiles",
+    "profile_facts",
+    "profile_fact_provenance",
 }
 
 
@@ -34,14 +36,14 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "SELECT version FROM schema_migrations"
         ).fetchall()
 
-    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     assert EXPECTED_TABLES <= tables
-    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",), ("0006",)]
+    assert recorded == [("0001",), ("0002",), ("0003",), ("0004",), ("0005",), ("0006",), ("0007",)]
 
 
 def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
     with connect_database(tmp_path / "unit.db") as connection:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
         assert apply_migrations(connection) == []
 
         counts = {
@@ -53,7 +55,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         ).fetchone()[0]
 
     assert counts == {"sources": 0, "opportunities": 0, "opportunity_sources": 0, "deduplication_decisions": 0, "users": 0, "profiles": 0}
-    assert migration_count == 6
+    assert migration_count == 7
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:

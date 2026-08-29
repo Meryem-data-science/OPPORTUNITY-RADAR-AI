@@ -11,7 +11,7 @@ def test_agent_automatically_reconciles_qualifications_idempotently_and_on_input
     path = tmp_path / "radar.db"
     connection = connect_database(path)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
     finally:
         connection.close()
     source = SourceConfig("fake_greenhouse", "greenhouse", True, "Org", "fake", status="active")

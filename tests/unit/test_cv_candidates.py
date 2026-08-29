@@ -864,8 +864,13 @@ def _statements(migration: Path) -> str:
     )
 
 
-def test_this_slice_creates_no_table_for_candidates_or_profile_facts() -> None:
-    """Phase 3.2B stores nothing: the schema must be exactly what 3.1A left."""
+#: The one migration allowed to know the words `profile_facts`: it is the
+#: Phase 3.3A validation foundation, not this slice.
+PROFILE_FACTS_MIGRATION = "0007_profile_facts.sql"
+
+
+def test_this_slice_still_creates_no_table_of_its_own() -> None:
+    """Phase 3.2B stores nothing, and 0007 belongs to Phase 3.3A, not to it."""
     migrations = sorted(Path("migrations").glob("*.sql"))
 
     assert [migration.name for migration in migrations] == [
@@ -875,12 +880,24 @@ def test_this_slice_creates_no_table_for_candidates_or_profile_facts() -> None:
         "0004_opportunity_qualifications.sql",
         "0005_source_runs.sql",
         "0006_user_profile_foundation.sql",
+        PROFILE_FACTS_MIGRATION,
     ]
     for migration in migrations:
         statements = _statements(migration)
-        assert "profile_facts" not in statements
         assert "cv_candidate" not in statements
         assert "cv_version" not in statements
+        if migration.name != PROFILE_FACTS_MIGRATION:
+            assert "profile_facts" not in statements
+
+
+def test_the_extractor_never_reaches_the_phase_33a_persistence() -> None:
+    """A candidate is still a reading: this package writes no fact anywhere."""
+    package = Path("services/digital_twin/cv/candidates")
+
+    for path in sorted(package.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        assert "digital_twin.facts" not in source
+        assert "propose_profile_fact" not in source
 
 
 def test_the_summary_never_quotes_the_cv(extract) -> None:

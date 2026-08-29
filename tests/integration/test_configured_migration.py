@@ -14,7 +14,7 @@ def test_configured_sqlite_migration_is_ready_empty_and_idempotent(tmp_path) -> 
     )
     connection = connect_configured_database(settings)
     try:
-        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006"]
+        assert apply_migrations(connection) == ["0001", "0002", "0003", "0004", "0005", "0006", "0007"]
         assert check_foundation_schema(connection) is True
         assert apply_migrations(connection) == []
         counts = {

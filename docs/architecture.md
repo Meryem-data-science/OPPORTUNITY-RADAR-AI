@@ -112,12 +112,12 @@ Twin table will point at. One user owns at most one profile, enforced by
 rest of the project does, and a local CLI initialises or reads the real profile
 without echoing or logging the address.
 
-That slice implements the root only. `cv_versions`, `profile_facts`, skills,
-education, experiences, projects, certifications, languages, preferences,
-eligibility, matching, scoring, personal notifications, a personal frontend,
-and any public profile API are **not** implemented — neither Phase 3.1 as a
-whole nor Phase 3 is complete. No LLM, no external API, and no remote write
-path is introduced: the operational database stays local SQLite.
+That slice implements the root only. `profile_facts` and their provenance
+arrive with Phase 3.3A below; `cv_versions`, skills, preferences, eligibility,
+matching, scoring, personal notifications, a personal frontend, and any public
+profile API are **not** implemented — neither Phase 3.1 as a whole nor Phase 3
+is complete. No LLM, no external API, and no remote write path is introduced:
+the operational database stays local SQLite.
 
 ## CV parser foundation (Phase 3.2A)
 
@@ -263,11 +263,80 @@ its file.
 
 Phase 3.2B stops there. It creates **no** `profile_facts` row, persists nothing,
 adds no migration and no table, and not one candidate is a verified fact. The
-validated Master CV and the proposed/accepted/corrected/rejected workflow are
-Phase 3.3; institutions, employers, canonical roles, normalized dates and skill
-aliases and levels are Phase 3.4. Matching, eligibility, ranking and scores are
-further out still. Phase 3.2 as a whole is finished as a *reading* of a
-document, and is not a validated Master CV.
+proposed/accepted/corrected/rejected cycle now exists, in Phase 3.3A below, but
+nothing in this package reaches it: no module here imports
+`services/digital_twin/facts`, and a test asserts that. Turning a candidate into
+a proposed fact is Phase 3.3B; institutions, employers, canonical roles,
+normalized dates and skill aliases and levels are Phase 3.4. Matching,
+eligibility, ranking and scores are further out still. Phase 3.2 as a whole is
+finished as a *reading* of a document, and is not a validated Master CV.
+
+## Validated profile facts (Phase 3.3A)
+
+`services/digital_twin/facts/` is where a claim about the person becomes, or
+fails to become, knowledge. It is the anti-hallucination foundation of the
+Digital Twin, and it holds one chain:
+
+```text
+profiles ─ profile_facts ─ profile_fact_provenance
+  (3.1A)     one claim       the evidence for it
+                 │
+                 └─ PROPOSED ─┬─ ACCEPTED ─┬─ CORRECTED → new ACCEPTED fact
+                              │            └─ REJECTED
+                              ├─ REJECTED
+                              └─ CORRECTED → new ACCEPTED fact
+```
+
+The design is three refusals.
+
+**It refuses a second definition of truth.** A fact is verified when, and only
+when, its status is `ACCEPTED`. There is no `verified` column, in this table or
+any other; `ProfileFact.is_verified` is a computed property over the status.
+Storing both a status and a boolean would be storing the same thing twice, and
+the copy that drifts is the copy that gets believed. `list_verified_profile_facts`
+filters on `ACCEPTED` in SQL, so a proposal, a rejection or a correction cannot
+reach a later phase by accident, and no caller can forget the filter.
+
+**It refuses to overwrite.** A correction writes a *new* fact carrying the
+corrected value, `ACCEPTED` because a person typing the right value is an
+explicit human validation; gives it a `USER_INPUT` provenance; marks the
+previous fact `CORRECTED`; and points it at its replacement — all in one
+transaction that commits whole or rolls back whole. The old row keeps its own
+`value`, so successive corrections build a chain in which every value ever
+proposed stays readable. No `UPDATE profile_facts SET value = ...` exists in the
+package, and a test reads the SQL the module actually executes to keep it that
+way.
+
+**It refuses to confuse evidence with a decision.** Provenance lives in its own
+table and says only where a value was read and by which rule: source type,
+locator, CV digest, parser and extractor versions, candidate fingerprint, rule
+id, pages, section and index. It carries no score, no confidence and no level,
+none of which a click or a regular expression can produce. Every fact the
+repository creates gets at least one provenance row in the same transaction,
+because a fact with no evidence is an assertion nobody could check, and
+`UNIQUE (fact_id, provenance_key)` stops the same proof from being recorded
+twice and looking like corroboration. A field the source did not carry stays
+`NULL` rather than being filled with something plausible.
+
+The persistence style is Phase 3.1A's: plain SQLite, no ORM, the same connection
+factory and the same migration runner, and one explicit `BEGIN IMMEDIATE` per
+multi-step write. Every mutation is scoped by `profile_id` as well as `fact_id`,
+so a valid id from another profile is reported as missing rather than mutated.
+`REJECTED` and `CORRECTED` are terminal; re-accepting an accepted fact and
+re-rejecting a rejected one are idempotent and keep the original decision date;
+every other move raises an explicit business error. The exact schema, the
+transition table and the provenance columns are in
+[database.md](database.md#profile-facts-and-their-provenance).
+
+Phase 3.3A stops at the store. The Phase 3.2B candidates are **not** imported —
+no mapping from an `ExtractedCandidate` to a proposed fact exists, and building
+it is Phase 3.3B — and there is no review CLI, no interface, no HTTP endpoint
+and no authentication, so the only way to record a fact today is to call the
+repository from Python. Nothing here generates a Master CV, a cover letter, an
+application, a form or an adapted CV, and nothing computes an eligibility, a
+match, a ranking or a score. No skill, alias, preference, eligibility or
+matching table exists: Phase 3.4 has not started. No network call, no model and
+no remote write path takes part.
 
 ## Data-processing boundaries
 
@@ -292,6 +361,12 @@ document, and is not a validated Master CV.
   that a recognised heading introduced these lines on these pages; it does not
   state that the person holds a diploma, a skill or a job. No parsed value is
   validated, and none of it is stored.
+- A profile fact is a decision, not a reading. A `profile_facts` row states
+  what a human decided about one claim, and its provenance states where that
+  claim was read; the two are separate rows on purpose. `ACCEPTED` is the only
+  thing that means verified, a correction adds a fact instead of replacing a
+  value, and a rejection is kept rather than deleted, so the record of what was
+  once proposed survives the decision taken about it.
 - A CV candidate is a reading, not a fact. An `ExtractedCandidate` states that
   one named rule found this text on this page of this section; it does not
   state that the person is called that, works there or knows that. Nothing is
@@ -312,9 +387,10 @@ There is no production scheduler or continuous deployment path, authenticated
 LinkedIn-session scraper, automatic application flow, personalized ranking,
 CV-to-offer recommendation engine, or ML recommendation model. The Digital
 Twin exists only as the empty `users`/`profiles` root added by Phase 3.1A, the
-read-only CV parser added by Phase 3.2A, and the unverified candidates added by
-Phase 3.2B, all described above; no profile content, matching, or scoring is
-derived from any of them.
+read-only CV parser added by Phase 3.2A, the unverified candidates added by
+Phase 3.2B, and the validated fact store added by Phase 3.3A, all described
+above; no matching, ranking or scoring is derived from any of them, no CV
+candidate is imported into the fact store, and no review interface exists.
 Source health detects exactly one anomaly, read-only, and does nothing with it
 beyond returning and displaying it. There is no alerting of any kind: no email,
 no web push, no notification path, no scheduler and no GitHub Actions schedule,
