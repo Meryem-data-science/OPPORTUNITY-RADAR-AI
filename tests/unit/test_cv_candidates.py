@@ -1175,11 +1175,17 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0006_user_profile_foundation.sql",
         PROFILE_FACTS_MIGRATION,
         "0008_normalized_profile_skills.sql",
+        "0009_structured_profile_experiences_projects.sql",
     ]
-    # `0008` projects accepted facts onto skills, so it names `profile_facts`
-    # in a foreign key. It still stores no candidate and no CV version, which
-    # is what this slice is asserting about itself.
-    fact_aware = (PROFILE_FACTS_MIGRATION, "0008_normalized_profile_skills.sql")
+    # `0008` and `0009` project accepted facts — onto skills, then onto
+    # structured experiences and projects — so both name `profile_facts` in a
+    # foreign key. Neither stores a candidate or a CV version, which is what
+    # this slice is asserting about itself.
+    fact_aware = (
+        PROFILE_FACTS_MIGRATION,
+        "0008_normalized_profile_skills.sql",
+        "0009_structured_profile_experiences_projects.sql",
+    )
     for migration in migrations:
         statements = _statements(migration)
         assert "cv_candidate" not in statements
