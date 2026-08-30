@@ -49,8 +49,6 @@ from services.collector.extractors.opportunity_constraints.models import (
     ConventionRequirement,
     DurationRequirement,
     EducationRequirement,
-    ExperienceObligation,
-    ExperienceRequirement,
     ExtractedConstraints,
     OpportunitySource,
     OpportunityType,
@@ -204,13 +202,8 @@ def extract_opportunity_constraints(
     locations, location_evidence = _multi_valued(hits, Slot.LOCATION)
     kept.extend(location_evidence)
 
-    bounds = settle(Slot.EXPERIENCE_BOUNDS)
-    obligation = settle(Slot.EXPERIENCE_OBLIGATION)
-    experience = ExperienceRequirement(
-        min_months=None if bounds is None else bounds[0],
-        max_months=None if bounds is None else bounds[1],
-        obligation=obligation or ExperienceObligation.UNKNOWN,
-    )
+    experience, experience_evidence = _multi_valued(hits, Slot.EXPERIENCE)
+    kept.extend(experience_evidence)
 
     duration_bounds = settle(Slot.DURATION)
     duration = DurationRequirement(
@@ -230,7 +223,7 @@ def extract_opportunity_constraints(
         extractor_version=EXTRACTOR_VERSION,
         opportunity_type=opportunity_type,
         education=education,
-        experience=experience,
+        experience=tuple(experience),
         duration=duration,
         start=start,
         locations=tuple(str(value) for value in locations),

@@ -64,11 +64,12 @@ BEFORE_THIS_SLICE = (
     "0010", "0011",
 )
 
-#: The six tables `0012` adds.
+#: The seven tables `0012` adds.
 CONSTRAINT_TABLES = (
     "opportunity_constraints",
     "opportunity_constraint_locations",
     "opportunity_education_requirements",
+    "opportunity_experience_requirements",
     "opportunity_constraint_evidence",
     "opportunity_constraint_conflicts",
     "opportunity_skill_requirements",
@@ -184,7 +185,7 @@ def test_migration_0012_is_discovered_after_the_earlier_ones() -> None:
     assert versions[len(BEFORE_THIS_SLICE)] == "0012"
 
 
-def test_migration_0012_creates_the_six_tables(migrated) -> None:
+def test_migration_0012_creates_the_seven_tables(migrated) -> None:
     assert set(CONSTRAINT_TABLES) <= _tables(migrated)
 
 
@@ -236,7 +237,7 @@ def test_deleting_a_posting_deletes_its_whole_projection(migrated, rich_opportun
     migrated.execute("DELETE FROM opportunities WHERE id = ?", (rich_opportunity,))
     migrated.commit()
 
-    assert _counts(migrated) == (0, 0, 0, 0, 0, 0)
+    assert _counts(migrated) == (0,) * len(CONSTRAINT_TABLES)
 
 
 def test_the_start_precision_check_refuses_a_row_that_lacks_its_parts(
@@ -313,7 +314,7 @@ def test_a_rich_posting_is_projected_and_read_back_unchanged(
     assert written
     assert stored == reading
     assert stored.opportunity_type is OpportunityType.PFE
-    assert stored.experience.min_months == 36
+    assert [item.min_months for item in stored.experience] == [36]
     assert [item.level for item in stored.education] == [EducationLevel.BAC_PLUS_5]
     assert stored.duration.min_months == 6
     assert (stored.start.year, stored.start.month) == (2027, 2)
@@ -331,14 +332,15 @@ def test_a_silent_posting_is_projected_with_nothing_asserted(migrated) -> None:
     extract_one_opportunity(migrated, opportunity_id)
 
     row = migrated.execute(
-        "SELECT opportunity_type, experience_min_months, duration_min_months, "
+        "SELECT opportunity_type, duration_min_months, "
         "start_precision, work_mode, visa_sponsorship, work_authorization, "
         "convention_requirement FROM opportunity_constraints WHERE opportunity_id = ?",
         (opportunity_id,),
     ).fetchone()
 
-    assert list(row) == [None] * 8
+    assert list(row) == [None] * 7
     stored = read_opportunity_constraints(migrated, opportunity_id)
+    assert stored.experience == ()
     assert stored.visa_sponsorship is VisaSponsorship.UNKNOWN
     assert stored.work_authorization is WorkAuthorization.UNKNOWN
     assert stored.convention is ConventionRequirement.UNKNOWN
@@ -380,7 +382,7 @@ def test_evidence_rows_name_their_rule_and_stay_fragments(
     assert rows
     for kind, source_field, rule_id, text in rows:
         assert kind in {member.value for member in ConstraintKind}
-        assert rule_id.strip() and rule_id.endswith("_V1")
+        assert rule_id.strip() and re.fullmatch(r"[A-Z_]+_V\d+", rule_id)
         assert 0 < len(text) <= 200
     # The whole description is never one of them.
     assert all(len(row[3]) < len(RICH_DESCRIPTION) for row in rows)
@@ -427,7 +429,7 @@ def test_a_changed_description_is_re_extracted(migrated, rich_opportunity) -> No
     stored = read_opportunity_constraints(migrated, rich_opportunity)
     assert stored.visa_sponsorship is VisaSponsorship.NOT_AVAILABLE
     # The previous reading is gone whole, not layered under the new one.
-    assert stored.experience.min_months is None
+    assert stored.experience == ()
     assert stored.education == ()
 
 
@@ -529,7 +531,7 @@ def test_storing_for_an_absent_posting_is_refused(migrated) -> None:
 
     with pytest.raises(OpportunityConstraintRepositoryError):
         store_opportunity_constraints(migrated, reading)
-    assert _counts(migrated) == (0, 0, 0, 0, 0, 0)
+    assert _counts(migrated) == (0,) * len(CONSTRAINT_TABLES)
 
 
 def test_synchronizing_before_the_migration_is_refused(tmp_path) -> None:
@@ -635,80 +637,131 @@ def test_the_summary_counts_and_never_quotes(migrated, rich_opportunity) -> None
 
 
 # --------------------------------------------------------------------------
-# Two contradictions about experience, and one row each
+# Several experience requirements, and no contradiction between them
 # --------------------------------------------------------------------------
 
-#: One posting disagreeing with itself about both experience slots at once.
-DOUBLE_CONFLICT_DESCRIPTION = (
-    "Minimum 3 years of experience required. "
-    "At least 5 years of experience preferred."
+#: One posting asking for two different things, which `v1` recorded as a
+#: contradiction and asserted neither of.
+MULTI_EXPERIENCE_DESCRIPTION = (
+    "7+ years of engineering experience. "
+    "2+ years of AI/ML production experience. "
+    "Prior experience with data platforms is a plus."
 )
 
 
-def test_two_experience_contradictions_are_stored_as_two_rows(migrated) -> None:
-    """Keyed by kind these collided on `UNIQUE (opportunity_id, kind)`.
+def test_several_experience_requirements_are_stored_as_several_rows(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated, description=MULTI_EXPERIENCE_DESCRIPTION)
 
-    The insert raised `IntegrityError` instead of producing the auditable
-    projection the whole slice exists to produce.
-    """
-    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
-
-    reading, written = extract_one_opportunity(migrated, opportunity_id)
+    _reading, written = extract_one_opportunity(migrated, opportunity_id)
 
     assert written
     rows = migrated.execute(
-        "SELECT constraint_slot, constraint_kind, conflicting_values_json "
-        "FROM opportunity_constraint_conflicts WHERE opportunity_id = ? "
-        "ORDER BY constraint_slot",
+        "SELECT position, min_months, max_months, obligation "
+        "FROM opportunity_experience_requirements WHERE opportunity_id = ? "
+        "ORDER BY position",
         (opportunity_id,),
     ).fetchall()
-    assert [row[0] for row in rows] == ["EXPERIENCE_BOUNDS", "EXPERIENCE_OBLIGATION"]
-    assert {row[1] for row in rows} == {"EXPERIENCE"}
-    # The two contradictions keep their own values rather than being merged.
-    assert json.loads(rows[0][2]) == ["36-", "60-"]
-    assert json.loads(rows[1][2]) == ["PREFERRED", "REQUIRED"]
+    assert [(row[1], row[2], row[3]) for row in rows] == [
+        (84, None, None),
+        (24, None, None),
+        (None, None, "PREFERRED"),
+    ]
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_constraint_conflicts WHERE opportunity_id = ?",
+            (opportunity_id,),
+        ).fetchone()[0]
+    ) == 0
 
 
-def test_neither_conflicting_part_of_experience_is_asserted(migrated) -> None:
-    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
-    extract_one_opportunity(migrated, opportunity_id)
-
-    row = migrated.execute(
-        "SELECT experience_min_months, experience_max_months, experience_obligation "
-        "FROM opportunity_constraints WHERE opportunity_id = ?",
-        (opportunity_id,),
-    ).fetchone()
-
-    assert list(row) == [None, None, None]
-
-
-def test_the_double_conflict_survives_a_round_trip(migrated) -> None:
-    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
+def test_several_experience_requirements_survive_a_round_trip(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated, description=MULTI_EXPERIENCE_DESCRIPTION)
     reading, _written = extract_one_opportunity(migrated, opportunity_id)
 
     stored = read_opportunity_constraints(migrated, opportunity_id)
 
     assert stored == reading
-    assert {conflict.slot for conflict in stored.conflicts} == {
-        Slot.EXPERIENCE_BOUNDS,
-        Slot.EXPERIENCE_OBLIGATION,
-    }
-    assert {conflict.kind for conflict in stored.conflicts} == {
-        ConstraintKind.EXPERIENCE
-    }
+    assert [item.min_months for item in stored.experience] == [84, 24, None]
 
 
-def test_the_conflict_table_refuses_a_slot_outside_the_registry(
-    migrated, rich_opportunity
+def test_a_posting_with_several_requirements_stays_idempotent(migrated) -> None:
+    insert_opportunity(migrated, description=MULTI_EXPERIENCE_DESCRIPTION)
+    first = synchronize_opportunity_constraints(migrated)
+    before = migrated.execute(
+        "SELECT id, opportunity_id, position, min_months, max_months, obligation, "
+        "created_at FROM opportunity_experience_requirements ORDER BY position"
+    ).fetchall()
+
+    second = synchronize_opportunity_constraints(migrated)
+
+    assert (first.created, first.known_experience) == (1, 1)
+    assert (second.created, second.replaced, second.unchanged) == (0, 0, 1)
+    assert not second.changed
+    assert migrated.execute(
+        "SELECT id, opportunity_id, position, min_months, max_months, obligation, "
+        "created_at FROM opportunity_experience_requirements ORDER BY position"
+    ).fetchall() == before
+
+
+def test_known_experience_counts_postings_not_requirements(migrated) -> None:
+    insert_opportunity(migrated, description=MULTI_EXPERIENCE_DESCRIPTION)
+    insert_opportunity(migrated, description="Minimum 2 years of experience.")
+
+    summary = synchronize_opportunity_constraints(migrated)
+
+    assert summary.known_experience == 2
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_experience_requirements"
+        ).fetchone()[0]
+    ) == 4
+
+
+def test_an_experience_row_must_require_something(migrated, rich_opportunity) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_experience_requirements "
+            "(opportunity_id, position, min_months, max_months, obligation) "
+            "VALUES (?, 99, NULL, NULL, NULL)",
+            (rich_opportunity,),
+        )
+
+
+def test_a_salary_range_never_becomes_a_stored_experience(migrated) -> None:
+    opportunity_id = insert_opportunity(
+        migrated,
+        description=(
+            "The range displayed reflects the minimum and maximum target for new "
+            "hire salaries across career levels and experience."
+        ),
+    )
+
+    extract_one_opportunity(migrated, opportunity_id)
+
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_experience_requirements "
+            "WHERE opportunity_id = ?",
+            (opportunity_id,),
+        ).fetchone()[0]
+    ) == 0
+
+
+@pytest.mark.parametrize("slot", ("EDUCATION", "EXPERIENCE", "LOCATION"))
+def test_the_conflict_table_refuses_a_multi_valued_slot(
+    migrated, rich_opportunity, slot
 ) -> None:
+    """Several answers are not a disagreement, so none of these can appear."""
     extract_one_opportunity(migrated, rich_opportunity)
 
     with pytest.raises(sqlite3.IntegrityError):
         migrated.execute(
             "INSERT INTO opportunity_constraint_conflicts (opportunity_id, "
             "constraint_slot, constraint_kind, conflicting_values_json, rule_ids_json) "
-            "VALUES (?, 'EDUCATION', 'EDUCATION', '[\"A\",\"B\"]', '[\"R\"]')",
-            (rich_opportunity,),
+            "VALUES (?, ?, ?, '[\"A\",\"B\"]', '[\"R\"]')",
+            (rich_opportunity, slot, slot),
         )
 
 

@@ -76,6 +76,7 @@ class OpportunityConstraintRepositoryError(RuntimeError):
 _PROJECTION_TABLES = (
     "opportunity_constraint_conflicts",
     "opportunity_constraint_evidence",
+    "opportunity_experience_requirements",
     "opportunity_education_requirements",
     "opportunity_constraint_locations",
     "opportunity_skill_requirements",
@@ -83,8 +84,7 @@ _PROJECTION_TABLES = (
 )
 
 _SCALAR_COLUMNS = (
-    "opportunity_type", "experience_min_months", "experience_max_months",
-    "experience_obligation", "duration_min_months", "duration_max_months",
+    "opportunity_type", "duration_min_months", "duration_max_months",
     "start_year", "start_month", "start_day", "start_precision", "work_mode",
     "visa_sponsorship", "work_authorization", "convention_requirement",
     "extractor_version", "source_fingerprint", "extracted_at",
@@ -135,7 +135,6 @@ def _insert(
     extracted_at: str,
 ) -> None:
     start = constraints.start
-    experience = constraints.experience
     duration = constraints.duration
     connection.execute(
         f"INSERT INTO opportunity_constraints (opportunity_id, "
@@ -144,9 +143,6 @@ def _insert(
         (
             constraints.opportunity_id,
             _stored(constraints.opportunity_type),
-            experience.min_months,
-            experience.max_months,
-            _stored(experience.obligation),
             duration.min_months,
             duration.max_months,
             start.year,
@@ -167,6 +163,19 @@ def _insert(
             "INSERT INTO opportunity_constraint_locations "
             "(opportunity_id, position, location_text) VALUES (?, ?, ?)",
             (constraints.opportunity_id, position, location),
+        )
+    for position, requirement in enumerate(constraints.experience):
+        connection.execute(
+            "INSERT INTO opportunity_experience_requirements "
+            "(opportunity_id, position, min_months, max_months, obligation) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                constraints.opportunity_id,
+                position,
+                requirement.min_months,
+                requirement.max_months,
+                _stored(requirement.obligation),
+            ),
         )
     for position, requirement in enumerate(constraints.education):
         connection.execute(
@@ -295,6 +304,21 @@ def read_opportunity_constraints(
             (opportunity_id,),
         )
     )
+    experience = tuple(
+        ExperienceRequirement(
+            min_months=item[0],
+            max_months=item[1],
+            obligation=_member(
+                ExperienceObligation, item[2], ExperienceObligation.UNKNOWN
+            ),
+        )
+        for item in connection.execute(
+            "SELECT min_months, max_months, obligation "
+            "FROM opportunity_experience_requirements "
+            "WHERE opportunity_id = ? ORDER BY position",
+            (opportunity_id,),
+        )
+    )
     evidence = tuple(
         ConstraintEvidence(
             kind=ConstraintKind(str(item[0])),
@@ -333,15 +357,7 @@ def read_opportunity_constraints(
             else OpportunityType(str(values["opportunity_type"]))
         ),
         education=education,
-        experience=ExperienceRequirement(
-            min_months=values["experience_min_months"],
-            max_months=values["experience_max_months"],
-            obligation=_member(
-                ExperienceObligation,
-                values["experience_obligation"],
-                ExperienceObligation.UNKNOWN,
-            ),
-        ),
+        experience=experience,
         duration=DurationRequirement(
             min_months=values["duration_min_months"],
             max_months=values["duration_max_months"],

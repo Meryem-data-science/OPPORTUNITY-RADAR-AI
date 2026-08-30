@@ -1278,6 +1278,7 @@ opportunities
     +-> opportunity_constraints            (one row per posting read)
           +-> opportunity_constraint_locations
           +-> opportunity_education_requirements
+          +-> opportunity_experience_requirements
           +-> opportunity_constraint_evidence
           +-> opportunity_constraint_conflicts
           +-> opportunity_skill_requirements   (reserved for 3.5B, always empty)
@@ -1307,9 +1308,10 @@ stated a duration, and a posting in a given country has not refused to sponsor.
 
 | table | what it holds |
 | --- | --- |
-| `opportunity_constraints` | the scalars: `opportunity_type` (the Phase 3.4C registry, shared with the profile side), experience bounds in months and its obligation, duration bounds in months, `start_year`/`start_month`/`start_day` with a `start_precision` of `DATE`/`MONTH`/`YEAR`, `work_mode`, `visa_sponsorship`, `work_authorization`, `convention_requirement`, plus `extractor_version`, `source_fingerprint` and `extracted_at` |
+| `opportunity_constraints` | the scalars: `opportunity_type` (the Phase 3.4C registry, shared with the profile side), duration bounds in months, `start_year`/`start_month`/`start_day` with a `start_precision` of `DATE`/`MONTH`/`YEAR`, `work_mode`, `visa_sponsorship`, `work_authorization`, `convention_requirement`, plus `extractor_version`, `source_fingerprint` and `extracted_at` |
 | `opportunity_constraint_locations` | the places the posting named, in order: the collected `location` and `country`, trimmed and exactly deduplicated. No geocoding, no country deduced from a city, no region expanded |
 | `opportunity_education_requirements` | every level named, with `requirement_mode` `MINIMUM` or `EXACT`. Several rows are several accepted levels, not a contradiction. `BAC_PLUS_5` and `MASTER` stay separate levels |
+| `opportunity_experience_requirements` | **every experience the posting asked for, one row each**, in months, with an optional `REQUIRED`/`PREFERRED` obligation. A row must assert a bound or an obligation. Nothing ranks them |
 | `opportunity_constraint_evidence` | why each value was asserted: the kind, the source field, the `rule_id`, and the **minimal fragment** matched, capped at 200 characters. A pointer into the posting, never a copy of it |
 | `opportunity_constraint_conflicts` | the readings that disagreed and were therefore not used, as canonical JSON arrays of the values and the rules, keyed by `constraint_slot` |
 | `opportunity_skill_requirements` | **reserved for Phase 3.5B and always empty after a 3.5A run.** It exists now only to pin the offer side to the `skills` vocabulary `0008` created, so 3.5B extends one catalogue instead of starting a rival. Its `skill_id` is `ON DELETE RESTRICT`, like `profile_skills`: a term an offer still requires cannot be deleted out from under it |
@@ -1328,21 +1330,16 @@ above "fully on-site" — the scalar stays `NULL` and a row lands in
 
 **A conflict is keyed by its slot, not by its kind.** A *kind* is the subject a
 reader browses by; a *slot* is the thing that can actually disagree with
-itself, and `EXPERIENCE` holds two of them — how much experience a posting
-wants, and whether it insists. One posting can contradict itself about both:
+itself. `UNIQUE (opportunity_id, constraint_slot)` is the key, and
+`constraint_kind` stays for browsing, derived from the slot in code so the two
+cannot drift apart.
 
-```
-Minimum 3 years of experience required.
-At least 5 years of experience preferred.
-```
-
-That is two contradictions with two answers. `UNIQUE (opportunity_id,
-constraint_slot)` records both; keying by kind would have refused the second
-outright, and merging them would put `36-` beside `REQUIRED` in one list of
-"conflicting values", which describes nothing. `constraint_kind` stays for
-browsing and is derived from the slot in code, so the two cannot drift apart.
-`EDUCATION` and `LOCATION` are absent from the slot registry: several levels or
-several places are several answers, never a disagreement. Choosing
+`EDUCATION`, `EXPERIENCE` and `LOCATION` are absent from the slot registry:
+several levels, several requirements or several places are several answers,
+never a disagreement. A conflict now means one thing only — **the same global
+property of the offer was explicitly asserted two incompatible ways** — and
+nothing in the table any longer means "the posting asked for two different
+things". Choosing
 between them would turn a defect in the posting into a fact about it. The one
 documented exception is the opportunity type, where the title outranks the
 description exactly as the Phase 2 classifier already decides it: a posting

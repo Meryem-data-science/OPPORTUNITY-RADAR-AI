@@ -917,6 +917,7 @@ opportunities
          -> opportunity_constraints
               +-> opportunity_constraint_locations
               +-> opportunity_education_requirements
+              +-> opportunity_experience_requirements
               +-> opportunity_constraint_evidence
               +-> opportunity_constraint_conflicts
 ```
@@ -930,6 +931,11 @@ and `cli.py` the three commands. The extractor opens no database: it is handed
 an `OpportunitySource` value object and returns an `ExtractedConstraints`,
 which is what makes it testable in memory against real postings without writing
 anywhere.
+
+**The Phase 2 classifier outranks the description** for the opportunity type:
+title first, then the classifier, then the description. The classifier is a
+versioned reading whose whole subject is the type of an opportunity; a
+description mention is one word in a paragraph about something else.
 
 **Two registries are imported rather than redefined.** `OpportunityType` and
 `WorkMode` come from `services.digital_twin.preferences.models`, the Phase 3.4C
@@ -953,12 +959,27 @@ title naming seniority states no number of years, an address states no
 attendance policy, a country states no visa policy, and the word "internship"
 states neither an agreement nor a duration nor a student.
 
-**Contradictions are recorded, not resolved.** Two strong readings that
+**Contradictions are recorded, not resolved** — and a contradiction is now a
+narrow thing. Two strong readings of one **global property of the offer** that
 disagree leave the field UNKNOWN and write a conflict row naming the values and
-the rules. The unit is the **slot**, not the kind: a posting can disagree with
-itself about how much experience it wants and, separately, about whether it
-insists, and those are two contradictions with two answers rather than one row
-mixing `36-` with `REQUIRED`. The one documented exception is the opportunity type, where the
+the rules, keyed by the slot that disagreed. Asking for two different things is
+not a contradiction: education, experience and locations are multi-valued and
+never conflict.
+
+That distinction is what `v2` is mostly about. Running `v1` over 373 collected
+postings produced 46 conflicts, and reading the evidence showed most were not
+contradictions at all — a posting asking for "7+ years engineering experience"
+and "2+ years AI/ML experience" was told it disagreed with itself, and both
+requirements were dropped to describe a disagreement that was never there. So
+`v2` makes experience multi-valued, ties every quantity and every obligation to
+the experience it qualifies rather than to the sentence it sits in (a salary
+paragraph saying "minimum and maximum target" no longer states a required
+experience), refuses type wordings that are denied, describe a candidate's past
+or describe people being mentored, restricts `JUNIOR_ROLE` and `FIRST_JOB` to
+the title and the classifier, and requires a work mode to be attached to the
+role — so a `#LI-Onsite` tracking tag, "onsite solutions" and "time on-site
+with customers" no longer contradict a stated mode, while two genuine global
+declarations still do. The one documented exception is the opportunity type, where the
 title outranks the description — the precedent is the Phase 2 classifier, which
 already decides it that way, and a posting titled "PFE" whose body says
 "internship" is not contradicting itself.

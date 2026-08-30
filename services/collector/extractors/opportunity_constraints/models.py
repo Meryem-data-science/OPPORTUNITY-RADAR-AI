@@ -41,7 +41,18 @@ from services.digital_twin.preferences.models import OpportunityType, WorkMode
 #: shape of everything below. Any change to what this package produces **from a
 #: given posting** moves this version, and moving it is what makes the next
 #: synchronization recompute the rows it explains.
-EXTRACTOR_VERSION = "opportunity-constraints-v1"
+#:
+#: `v2` is the first reading of a real corpus talking back. Running `v1` over
+#: 373 collected postings produced 46 conflicts, and reading the evidence
+#: showed most of them were not contradictions at all: a posting asking for
+#: "7+ years engineering experience" and "2+ years AI/ML experience" was being
+#: told it disagreed with itself, when it was stating two requirements. `v2`
+#: makes experience multi-valued, ties every obligation and every quantity to
+#: the experience it qualifies rather than to the sentence it sits in, refuses
+#: incidental mentions of a type or a work mode, and keeps a conflict for what
+#: a conflict means: one global property of the offer, asserted two
+#: incompatible ways.
+EXTRACTOR_VERSION = "opportunity-constraints-v2"
 
 #: The longest evidence fragment stored for one rule match. Evidence is a
 #: pointer to why a value was asserted, not a copy of the posting: storing a
@@ -63,6 +74,7 @@ __all__ = [
     "ExperienceObligation",
     "ExperienceRequirement",
     "ExtractedConstraints",
+    "MULTI_VALUED_SLOTS",
     "OpportunityConstraintError",
     "OpportunitySource",
     "OpportunityType",
@@ -105,26 +117,30 @@ class Slot(StrEnum):
     """The single place a value lands, and the unit a contradiction is judged in.
 
     A *kind* is the category a reader browses by; a *slot* is the thing that can
-    actually disagree with itself, and the two are not the same. `EXPERIENCE`
-    holds two independent slots: a posting may state how much experience it
-    wants in one sentence and how badly it wants it in another, and those two
-    statements do not compete — so they can also contradict themselves
-    separately, and one posting can legitimately carry both an
-    `EXPERIENCE_BOUNDS` conflict and an `EXPERIENCE_OBLIGATION` one. Recording
-    them under one key would either lose one of them or merge `36-` and
-    `REQUIRED` into a single list of "conflicting values", which are two
-    different contradictions and one meaningless row.
+    actually disagree with itself, and the two are not the same.
 
-    `EDUCATION` and `LOCATION` are here because rules land in them, but they are
-    multi-valued: several levels or several places are several answers, never a
-    disagreement, so neither is ever conflict-resolved.
+    `EDUCATION`, `EXPERIENCE` and `LOCATION` are here because rules land in
+    them, but they are **multi-valued**: several levels, several requirements
+    or several places are several answers, never a disagreement, so none of
+    them is ever conflict-resolved.
+
+    Experience was a scalar in `v1`, and the real corpus showed why that was
+    wrong. A posting saying
+
+        7+ years of engineering experience
+        2+ years of AI/ML production experience
+
+    is not contradicting itself; it is asking for two different things. Reading
+    it as one number that had to be either 84 or 24 produced a conflict and
+    asserted neither, losing both requirements to describe a disagreement that
+    was never there. Two requirements in two sentences are two requirements.
     """
 
     OPPORTUNITY_TYPE = "OPPORTUNITY_TYPE"
     #: Multi-valued. Never conflict-resolved.
     EDUCATION = "EDUCATION"
-    EXPERIENCE_BOUNDS = "EXPERIENCE_BOUNDS"
-    EXPERIENCE_OBLIGATION = "EXPERIENCE_OBLIGATION"
+    #: Multi-valued. Never conflict-resolved — see below.
+    EXPERIENCE = "EXPERIENCE"
     DURATION = "DURATION"
     START = "START"
     #: Multi-valued. Never conflict-resolved.
@@ -246,14 +262,17 @@ class StartPrecision(StrEnum):
     YEAR = "YEAR"
 
 
-#: Which category each slot reports under. Both experience slots map to
-#: `EXPERIENCE`: they are one subject a reader browses by, and two things that
-#: can disagree independently.
+#: The slots that hold a list rather than a value. A second entry in one of
+#: them is another answer, never a contradiction, so none of them can appear in
+#: `opportunity_constraint_conflicts` and the migration's slot registry leaves
+#: them out.
+MULTI_VALUED_SLOTS: frozenset = frozenset()
+
+#: Which category each slot reports under.
 SLOT_KINDS: dict[Slot, ConstraintKind] = {
     Slot.OPPORTUNITY_TYPE: ConstraintKind.OPPORTUNITY_TYPE,
     Slot.EDUCATION: ConstraintKind.EDUCATION,
-    Slot.EXPERIENCE_BOUNDS: ConstraintKind.EXPERIENCE,
-    Slot.EXPERIENCE_OBLIGATION: ConstraintKind.EXPERIENCE,
+    Slot.EXPERIENCE: ConstraintKind.EXPERIENCE,
     Slot.DURATION: ConstraintKind.DURATION,
     Slot.START: ConstraintKind.START,
     Slot.LOCATION: ConstraintKind.LOCATION,
@@ -262,6 +281,8 @@ SLOT_KINDS: dict[Slot, ConstraintKind] = {
     Slot.WORK_AUTHORIZATION: ConstraintKind.WORK_AUTHORIZATION,
     Slot.CONVENTION: ConstraintKind.CONVENTION,
 }
+
+MULTI_VALUED_SLOTS = frozenset({Slot.EDUCATION, Slot.EXPERIENCE, Slot.LOCATION})
 
 
 @dataclass(frozen=True)
@@ -343,7 +364,7 @@ class ConstraintConflict:
     def __post_init__(self) -> None:
         if not isinstance(self.slot, Slot):
             raise OpportunityConstraintError("a conflict names the slot that disagreed")
-        if self.slot in (Slot.EDUCATION, Slot.LOCATION):
+        if self.slot in MULTI_VALUED_SLOTS:
             raise OpportunityConstraintError(
                 f"{self.slot.value} is multi-valued and cannot contradict itself"
             )
@@ -370,12 +391,23 @@ class EducationRequirement:
 
 @dataclass(frozen=True)
 class ExperienceRequirement:
-    """How much prior experience the posting asked for, in months.
+    """**One** thing the posting asked for experience in, in months.
+
+    A posting can carry several of these and usually does: "7+ years of
+    engineering experience" and "2+ years of AI/ML experience" are two
+    requirements, and each gets its own object. Nothing here says which
+    matters more, because the posting did not.
 
     Months rather than years because postings write both, and one unit is one
     comparison later. A bound is `None` when the posting did not give it:
     "3+ years" has a floor and no ceiling, and inventing a ceiling would be
     inventing a rejection.
+
+    A requirement with no bounds and only an obligation is legitimate and
+    common — "prior experience is a plus" says something real about what the
+    posting wants without naming a number. What is refused is a requirement
+    that asserts nothing at all: that is UNKNOWN, and UNKNOWN is the absence of
+    a row.
     """
 
     min_months: int | None = None
@@ -392,10 +424,18 @@ class ExperienceRequirement:
             and self.min_months > self.max_months
         ):
             raise OpportunityConstraintError("experience min must not exceed max")
+        if not self.known:
+            raise OpportunityConstraintError(
+                "an experience requirement must assert a bound or an obligation"
+            )
 
     @property
     def known(self) -> bool:
-        return self.min_months is not None or self.max_months is not None
+        return (
+            self.min_months is not None
+            or self.max_months is not None
+            or self.obligation is not ExperienceObligation.UNKNOWN
+        )
 
 
 @dataclass(frozen=True)
@@ -490,7 +530,9 @@ class ExtractedConstraints:
     extractor_version: str = EXTRACTOR_VERSION
     opportunity_type: OpportunityType | None = None
     education: tuple[EducationRequirement, ...] = ()
-    experience: ExperienceRequirement = field(default_factory=ExperienceRequirement)
+    #: Every experience the posting asked for, in the order it asked. Empty is
+    #: UNKNOWN — the posting named none, not that it wants none.
+    experience: tuple[ExperienceRequirement, ...] = ()
     duration: DurationRequirement = field(default_factory=DurationRequirement)
     start: StartRequirement = field(default_factory=StartRequirement)
     locations: tuple[str, ...] = ()

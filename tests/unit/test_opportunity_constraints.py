@@ -20,6 +20,7 @@ from services.collector.extractors.opportunity_constraints.extractor import (
 from services.collector.extractors.opportunity_constraints.models import (
     EXTRACTOR_VERSION,
     MAX_EVIDENCE_LENGTH,
+    MULTI_VALUED_SLOTS,
     SLOT_KINDS,
     ConstraintConflict,
     ConstraintKind,
@@ -27,6 +28,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     EducationLevel,
     EducationRequirementMode,
     ExperienceObligation,
+    ExperienceRequirement,
     OpportunityConstraintError,
     OpportunitySource,
     OpportunityType,
@@ -69,7 +71,7 @@ def test_the_opportunity_type_registry_is_the_one_the_profile_side_uses() -> Non
 
 
 def test_the_extractor_version_is_the_documented_one() -> None:
-    assert EXTRACTOR_VERSION == "opportunity-constraints-v1"
+    assert EXTRACTOR_VERSION == "opportunity-constraints-v2"
 
 
 # --------------------------------------------------------------------------
@@ -82,7 +84,7 @@ def test_an_escaped_html_description_is_read_as_text() -> None:
     escaped = "&lt;ul&gt;&lt;li&gt;Minimum 3 years of experience&lt;/li&gt;&lt;/ul&gt;"
 
     assert normalize_description(escaped) == "Minimum 3 years of experience"
-    assert read(escaped).experience.min_months == 36
+    assert read(escaped).experience[0].min_months == 36
 
 
 def test_block_tags_keep_two_requirements_apart() -> None:
@@ -111,8 +113,7 @@ def test_a_posting_that_says_nothing_asserts_nothing() -> None:
 
     assert result.opportunity_type is None
     assert result.education == ()
-    assert not result.experience.known
-    assert result.experience.obligation is ExperienceObligation.UNKNOWN
+    assert result.experience == ()
     assert not result.duration.known
     assert not result.start.known
     assert result.work_mode is None
@@ -126,8 +127,7 @@ def test_a_title_naming_seniority_states_no_number_of_years() -> None:
     """"Senior" is an adjective. It is not "five years", and never becomes one."""
     result = read("We are looking for an experienced professional.", title="Senior Data Scientist")
 
-    assert not result.experience.known
-    assert result.experience.min_months is None
+    assert result.experience == ()
 
 
 def test_a_description_written_in_english_does_not_require_english() -> None:
@@ -291,40 +291,76 @@ def test_student_is_not_a_level() -> None:
 def test_quantified_experience_is_normalized_to_months(sentence, minimum, maximum) -> None:
     result = read(sentence)
 
-    assert result.experience.min_months == minimum
-    assert result.experience.max_months == maximum
+    assert len(result.experience) == 1
+    assert result.experience[0].min_months == minimum
+    assert result.experience[0].max_months == maximum
 
 
 def test_a_number_with_no_experience_word_is_not_an_experience_requirement() -> None:
     result = read("We have 3 offices and 5 teams.")
 
-    assert not result.experience.known
+    assert result.experience == ()
 
 
 def test_experience_preferred_is_an_obligation_without_a_quantity() -> None:
     result = read("Prior experience with data pipelines is preferred.")
 
-    assert result.experience.obligation is ExperienceObligation.PREFERRED
-    assert not result.experience.known
+    assert [item.obligation for item in result.experience] == [
+        ExperienceObligation.PREFERRED
+    ]
+    assert result.experience[0].min_months is None
 
 
-def test_the_obligation_belongs_to_the_sentence_that_quantified() -> None:
-    """"3 years required" beside "Spark preferred" is two requirements.
+def test_two_sentences_asking_for_experience_are_two_requirements() -> None:
+    """Not one posting contradicting itself. The corpus is full of these."""
+    result = read(
+        "7+ years of engineering experience.\n"
+        "2+ years of AI/ML production experience."
+    )
 
-    Reading them as one posting contradicting itself would lose both.
-    """
-    result = read("Minimum 3 years of experience.\nExperience with Spark is preferred.")
-
-    assert result.experience.min_months == 36
-    assert result.experience.obligation is ExperienceObligation.REQUIRED
+    assert [item.min_months for item in result.experience] == [84, 24]
     assert result.conflicts == ()
 
 
-def test_an_obligation_alone_is_used_when_nothing_was_quantified() -> None:
-    result = read("Experience with data pipelines is preferred.")
+def test_an_obligation_is_attached_to_the_experience_it_qualifies() -> None:
+    result = read("Minimum 3 years of experience.\nExperience with Spark is preferred.")
 
-    assert not result.experience.known
-    assert result.experience.obligation is ExperienceObligation.PREFERRED
+    assert [
+        (item.min_months, item.obligation) for item in result.experience
+    ] == [
+        (36, ExperienceObligation.REQUIRED),
+        (None, ExperienceObligation.PREFERRED),
+    ]
+    assert result.conflicts == ()
+
+
+def test_a_salary_range_never_becomes_a_required_experience() -> None:
+    """The corpus case that made this rule necessary.
+
+    A boilerplate paragraph about pay contains "minimum", and somewhere in the
+    same sentence a word about careers or experience. `v1` read the two as
+    "experience is required". "Minimum" qualified the salary.
+    """
+    result = read(
+        "The range displayed reflects the minimum and maximum target for new "
+        "hire salaries across career levels and experience."
+    )
+
+    assert result.experience == ()
+
+
+def test_prior_experience_that_is_a_plus_is_preferred_and_not_required() -> None:
+    """"…is a plus but not required" contains the word, and denies it."""
+    result = read("Prior experience is a plus but not required.")
+
+    assert [item.obligation for item in result.experience] == [
+        ExperienceObligation.PREFERRED
+    ]
+
+
+def test_an_experience_requirement_must_require_something() -> None:
+    with pytest.raises(OpportunityConstraintError):
+        ExperienceRequirement()
 
 
 # --------------------------------------------------------------------------
@@ -579,7 +615,7 @@ def test_a_contradiction_in_one_field_leaves_the_others_alone() -> None:
     )
 
     assert result.work_mode is None
-    assert result.experience.min_months == 36
+    assert result.experience[0].min_months == 36
     assert result.visa_sponsorship is VisaSponsorship.AVAILABLE
 
 
@@ -616,7 +652,7 @@ def test_evidence_is_a_fragment_and_never_a_copy_of_the_posting() -> None:
     )
     result = read(long_posting)
 
-    assert result.experience.min_months == 36
+    assert result.experience[0].min_months == 36
     for evidence in result.evidence:
         assert len(evidence.text) <= MAX_EVIDENCE_LENGTH
 
@@ -631,7 +667,7 @@ def test_evidence_names_the_field_it_was_read_from() -> None:
 def test_nothing_is_asserted_without_evidence() -> None:
     result = read("Minimum 3 years of experience required.")
 
-    assert result.experience.known
+    assert result.experience
     assert result.evidence_for(ConstraintKind.EXPERIENCE)
 
 
@@ -709,49 +745,43 @@ def test_the_reading_carries_no_verdict_and_no_number_to_compare() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_one_posting_can_contradict_itself_twice_about_experience() -> None:
-    """Two slots, two contradictions, two answers.
+def test_two_experience_requirements_are_never_a_contradiction() -> None:
+    """`v1` recorded two conflicts here and asserted neither requirement.
 
-    How much experience a posting wants and whether it insists are separate
-    questions, so they can disagree separately. Keyed by kind these would have
-    been one row — and the second would have been refused by the database.
+    Running those rules over 373 real postings produced 46 conflicts, and this
+    shape was most of them. A posting asking for two things is asking for two
+    things.
     """
     result = read(
-        "Minimum 3 years of experience required.\n"
-        "At least 5 years of experience preferred."
+        "Minimum 3 years of engineering experience required.\n"
+        "At least 5 years of consulting experience preferred."
     )
 
-    assert result.conflicting_slots == {
-        Slot.EXPERIENCE_BOUNDS,
-        Slot.EXPERIENCE_OBLIGATION,
-    }
-    assert result.conflicting_kinds == {ConstraintKind.EXPERIENCE}
-    assert not result.experience.known
-    assert result.experience.obligation is ExperienceObligation.UNKNOWN
+    assert result.conflicts == ()
+    assert [
+        (item.min_months, item.obligation) for item in result.experience
+    ] == [
+        (36, ExperienceObligation.REQUIRED),
+        (60, ExperienceObligation.PREFERRED),
+    ]
 
 
-def test_the_two_experience_contradictions_keep_their_own_values() -> None:
-    """Bounds and obligations are never merged into one list of "values"."""
-    result = read(
-        "Minimum 3 years of experience required.\n"
-        "At least 5 years of experience preferred."
-    )
-    by_slot = {conflict.slot: conflict for conflict in result.conflicts}
-
-    assert by_slot[Slot.EXPERIENCE_BOUNDS].values == ("36-", "60-")
-    assert by_slot[Slot.EXPERIENCE_OBLIGATION].values == ("PREFERRED", "REQUIRED")
+def test_experience_is_multi_valued_and_holds_no_conflict_slot() -> None:
+    assert Slot.EXPERIENCE in MULTI_VALUED_SLOTS
+    with pytest.raises(OpportunityConstraintError):
+        ConstraintConflict(slot=Slot.EXPERIENCE, values=("A", "B"), rule_ids=("R",))
 
 
 def test_a_conflict_derives_its_kind_from_its_slot() -> None:
     """The two can never drift apart, because only one of them is passed in."""
     for slot, kind in SLOT_KINDS.items():
-        if slot in (Slot.EDUCATION, Slot.LOCATION):
+        if slot in MULTI_VALUED_SLOTS:
             continue
         conflict = ConstraintConflict(slot=slot, values=("A", "B"), rule_ids=("R",))
         assert conflict.kind is kind
 
 
-@pytest.mark.parametrize("slot", (Slot.EDUCATION, Slot.LOCATION))
+@pytest.mark.parametrize("slot", sorted(MULTI_VALUED_SLOTS, key=lambda s: s.value))
 def test_a_multi_valued_slot_cannot_hold_a_conflict(slot) -> None:
     """Several levels or several places are several answers, never a dispute."""
     with pytest.raises(OpportunityConstraintError):
@@ -827,3 +857,105 @@ def test_a_collected_place_is_trimmed_and_never_expanded() -> None:
     result = read("A role.", location="  Ville Exemple  ")
 
     assert result.locations == ("Ville Exemple",)
+
+
+# --------------------------------------------------------------------------
+# What the real corpus taught, case by case
+# --------------------------------------------------------------------------
+#
+# Each of these reproduces a *shape* observed while reading 373 collected
+# postings with the v1 rules. The wordings below are written for these tests;
+# no real description is copied. Every one of them produced a wrong value or a
+# false conflict before the v2 rules existed.
+
+
+def test_two_independent_experience_requirements_A() -> None:
+    result = read(
+        "7+ years engineering experience.\n2+ years AI/ML production experience."
+    )
+
+    assert [item.min_months for item in result.experience] == [84, 24]
+    assert result.conflicts == ()
+
+
+def test_two_independent_experience_requirements_B() -> None:
+    result = read(
+        "4+ years strategic experience.\n2+ years consulting experience."
+    )
+
+    assert [item.min_months for item in result.experience] == [48, 24]
+    assert result.conflicts == ()
+
+
+def test_a_denied_internship_is_not_an_internship_G() -> None:
+    assert read("This isn't a research internship.").opportunity_type is None
+
+
+def test_a_past_internship_requirement_is_not_the_type_of_the_offer_H() -> None:
+    result = read("Prior internship experience required.")
+
+    assert result.opportunity_type is None
+
+
+def test_mentoring_juniors_does_not_make_the_offer_junior_I() -> None:
+    assert read("Mentoring junior consultants and interns.").opportunity_type is None
+    assert read(
+        "Demonstrated ability to mentor junior team members."
+    ).opportunity_type is None
+
+
+def test_being_enrolled_in_a_graduate_program_is_not_a_first_job_J() -> None:
+    """That is the candidate's studies, not a programme the company runs."""
+    result = read("You are currently enrolled in an undergraduate or graduate program.")
+
+    assert result.opportunity_type is None
+
+
+def test_the_classifier_outranks_an_incidental_description_mention_K() -> None:
+    result = read(
+        "This is an internship opportunity for the team.",
+        qualification_type="APPRENTICESHIP",
+    )
+
+    assert result.opportunity_type is OpportunityType.ALTERNANCE
+    assert result.conflicts == ()
+
+
+def test_a_title_still_outranks_the_classifier() -> None:
+    result = read("A role.", title="PFE Data Engineer", qualification_type="INTERNSHIP")
+
+    assert result.opportunity_type is OpportunityType.PFE
+
+
+def test_a_tracking_tag_does_not_contradict_a_stated_work_mode_L() -> None:
+    """`#LI-Onsite` is appended by an applicant-tracking system, not written
+    by the employer describing the job."""
+    result = read("This is a fully remote position.\n#LI-Onsite")
+
+    assert result.work_mode is WorkMode.REMOTE
+    assert result.conflicts == ()
+
+
+def test_time_on_site_does_not_contradict_a_hybrid_role_M() -> None:
+    """Spending time on site is what hybrid means."""
+    result = read(
+        "A hybrid customer-facing engineering role.\n"
+        "Expect significant time on-site with customers."
+    )
+
+    assert result.work_mode is WorkMode.HYBRID
+    assert result.conflicts == ()
+
+
+def test_onsite_qualifying_something_other_than_the_role_is_not_a_work_mode_N() -> None:
+    assert read("You will be developing onsite solutions.").work_mode is None
+    assert read("You will mentor remote teams across Europe.").work_mode is None
+
+
+def test_two_global_declarations_that_disagree_are_still_a_conflict_O() -> None:
+    """The guard narrows what counts as a declaration; it settles nothing."""
+    result = read("This is a fully remote role.\nThis position is fully on-site.")
+
+    assert result.work_mode is None
+    assert [conflict.slot for conflict in result.conflicts] == [Slot.WORK_MODE]
+    assert result.conflicts[0].values == ("ON_SITE", "REMOTE")

@@ -103,13 +103,16 @@ def segments(text: str) -> tuple[str, ...]:
     A rule reads one segment at a time, and that is what keeps evidence
     minimal and keeps two unrelated sentences from being read as one claim.
     Splitting is on line breaks and on sentence-ending punctuation followed by
-    a space — not on every period, because `Bac+2.5` and `3.5 years` exist.
+    a space — not on every period, because `Bac+2.5` and `3.5 years` exist. A
+    digit opens a sentence as readily as a capital does: postings write
+    "7+ years of engineering experience. 2+ years of ML experience." on one
+    line, and those are two requirements.
     """
     if not text:
         return ()
     parts: list[str] = []
     for line in text.split(SEGMENT_SEPARATOR):
-        for piece in re.split(r"(?<=[.!?;])\s+(?=[A-ZÀ-ÖØ-Þ(])", line):
+        for piece in re.split(r"(?<=[.!?;])\s+(?=[A-ZÀ-ÖØ-Þ(\d])", line):
             trimmed = piece.strip()
             if trimmed:
                 parts.append(trimmed)

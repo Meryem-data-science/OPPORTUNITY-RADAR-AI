@@ -214,16 +214,17 @@ PHASE_34C_TABLES = frozenset(
     }
 )
 
-#: The six tables migration `0012` adds. They are the **offer** side, not a
+#: The seven tables migration `0012` adds. They are the **offer** side, not a
 #: second profile projection: they describe what a posting requires, and the
 #: guard below is about what may be derived from `profile_facts`. `education`
-#: and `skill` stay forbidden words all the same, so a second profile-side
-#: education table — or a rival skill catalogue — is still caught.
+#: `skill` and `experience` stay forbidden words all the same, so a second
+#: profile-side education, experience or skill table is still caught.
 PHASE_35A_TABLES = frozenset(
     {
         "opportunity_constraints",
         "opportunity_constraint_locations",
         "opportunity_education_requirements",
+        "opportunity_experience_requirements",
         "opportunity_constraint_evidence",
         "opportunity_constraint_conflicts",
         "opportunity_skill_requirements",

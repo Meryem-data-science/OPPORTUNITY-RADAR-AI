@@ -106,67 +106,146 @@ def _folded(text: str) -> str:
 
 #: Explicit wordings, longest and most specific first so `stage de fin
 #: d'études` is read as a PFE rather than as a plain internship.
-_TYPE_SIGNALS: tuple[tuple[OpportunityType, str, tuple[str, ...]], ...] = (
+#:
+#: The fourth element says whether the wording may be believed **in a
+#: description**. Two types are title-and-classifier only, and the corpus is
+#: why: both are statements about the seniority of the role, and descriptions
+#: talk about seniority constantly without describing the offer.
+#:
+#: * `JUNIOR_ROLE` — "mentoring junior consultants", "demonstrated ability to
+#:   mentor junior team members". The posting is for whoever mentors;
+#: * `FIRST_JOB` — "currently enrolled in an undergraduate or graduate
+#:   program". That is the candidate's studies, not a graduate programme the
+#:   company runs.
+#:
+#: A title reading "Junior Data Engineer" still settles it, and so does the
+#: Phase 2 classifier. What is refused is inferring the seniority of an offer
+#: from a sentence that merely contains the word.
+_TYPE_SIGNALS: tuple[tuple[OpportunityType, str, tuple[str, ...], bool], ...] = (
     (
         OpportunityType.PFE,
         "OPPORTUNITY_TYPE_PFE_V1",
         ("pfe", "projet de fin d'etudes", "projet de fin d'études",
          "stage de fin d'etudes", "stage de fin d'études", "final year project",
          "final-year internship", "end of studies internship"),
+        True,
     ),
     (
         OpportunityType.PFA,
         "OPPORTUNITY_TYPE_PFA_V1",
         ("pfa", "projet de fin d'annee", "projet de fin d'année"),
+        True,
     ),
     (
         OpportunityType.ALTERNANCE,
         "OPPORTUNITY_TYPE_ALTERNANCE_V1",
         ("alternance", "alternant", "alternante", "apprenticeship",
          "contrat d'apprentissage", "contrat de professionnalisation"),
+        True,
     ),
     (
         OpportunityType.SUMMER_INTERNSHIP,
         "OPPORTUNITY_TYPE_SUMMER_V1",
         ("summer internship", "stage d'ete", "stage d'été", "summer intern program"),
+        True,
     ),
     (
         OpportunityType.PRE_HIRE_INTERNSHIP,
         "OPPORTUNITY_TYPE_PRE_HIRE_V1",
         ("stage pre-embauche", "stage pré-embauche", "pre-hire internship",
          "internship with a view to hiring", "stage pre embauche"),
+        True,
     ),
     (
         OpportunityType.INTERNSHIP,
-        "OPPORTUNITY_TYPE_INTERNSHIP_V1",
+        "OPPORTUNITY_TYPE_INTERNSHIP_V2",
         ("internship", "intern position", "stage", "stagiaire"),
+        True,
     ),
     (
         OpportunityType.FIRST_JOB,
-        "OPPORTUNITY_TYPE_FIRST_JOB_V1",
+        "OPPORTUNITY_TYPE_FIRST_JOB_V2",
         ("first job", "premier emploi", "graduate programme", "graduate program",
          "jeune diplome", "jeune diplômé", "new graduate", "entry level",
          "entry-level"),
+        False,
     ),
     (
         OpportunityType.JUNIOR_ROLE,
-        "OPPORTUNITY_TYPE_JUNIOR_V1",
+        "OPPORTUNITY_TYPE_JUNIOR_V2",
         ("junior",),
+        False,
     ),
 )
+
+#: Words that, just before a type wording, mean the posting is denying it:
+#: "this isn't a research internship" is not an internship.
+_TYPE_NEGATIONS = (
+    "isn't a", "isn't an", "is not a", "is not an", "not a ", "not an ",
+    "rather than a", "instead of a", "n'est pas un", "n'est pas une",
+    "pas un ", "pas une ",
+)
+#: Words that, just before a type wording, mean it describes the **candidate's
+#: past**: "prior internship or project experience" is a requirement about
+#: somebody's history, not a statement about this offer.
+_TYPE_PAST_MARKERS = (
+    "prior", "previous", "past ", "former", "earlier", "précédent", "precedent",
+    "antérieur", "anterieur", "during your", "during their", "completed a",
+)
+#: Words that, just before a type wording, mean the posting is about
+#: **supervising** people of that kind rather than being one: "mentoring junior
+#: consultants and interns".
+_TYPE_SUPERVISION_MARKERS = (
+    "mentor", "manage", "managing", "supervise", "supervising", "coach",
+    "onboard", "encadrer", "encadrement", "recruit", "hiring intern",
+)
+#: Words that, just after a type wording, say the same thing the other way
+#: round: "internship experience", "internships you completed".
+_TYPE_PAST_SUFFIXES = ("experience", "expérience", "you completed", "you have done")
+
+#: How far before or after a wording those markers are believed. Long enough
+#: for "demonstrated ability to mentor junior team members", short enough that
+#: an unrelated clause on the same line does not reach.
+_TYPE_CONTEXT_WINDOW = 45
+
+
+def _incidental(folded: str, start: int, end: int) -> bool:
+    """True when a type wording describes something other than this offer.
+
+    Three ways a posting can name a kind of job without being one: it can deny
+    it, it can ask for it in somebody's past, or it can be about supervising
+    people who are it. All three appear in the real corpus, and all three
+    produced a wrong type before this guard existed.
+    """
+    before = folded[max(0, start - _TYPE_CONTEXT_WINDOW):start]
+    after = folded[end:end + _TYPE_CONTEXT_WINDOW]
+    if any(marker in before for marker in _TYPE_NEGATIONS):
+        return True
+    if any(marker in before for marker in _TYPE_PAST_MARKERS):
+        return True
+    if any(marker in before for marker in _TYPE_SUPERVISION_MARKERS):
+        return True
+    return any(suffix in after for suffix in _TYPE_PAST_SUFFIXES)
+
 
 #: Which field settles the type when two disagree. The title wins, exactly as
 #: the Phase 2 classifier already decides it — "infer from title first;
 #: ordinary description vocabulary cannot override it" — because a description
 #: that mentions an internship inside a posting titled PFE is describing the
-#: same thing at a coarser grain, not contradicting it. Within one tier a
-#: disagreement is a real conflict and nothing is asserted. The derived
-#: classifier reading is the weakest tier: it is another program's opinion,
-#: not the posting's words.
+#: same thing at a coarser grain, not contradicting it.
+#:
+#: The classifier's own reading sits **above** the description, not below it.
+#: That is a change from `v1` and the corpus argued for it: the classifier is a
+#: versioned reading whose entire subject is the type of an opportunity, while
+#: a description mention is one word in a paragraph about something else. An
+#: incidental "internship" three lines into a job posting should not outrank a
+#: dedicated classification of that posting.
+#:
+#: Within one tier a disagreement is a real conflict and nothing is asserted.
 TYPE_FIELD_PRECEDENCE: tuple[SourceField, ...] = (
     SourceField.TITLE,
-    SourceField.DESCRIPTION,
     SourceField.QUALIFICATION_TYPE,
+    SourceField.DESCRIPTION,
 )
 
 #: How the Phase 2 classifier's own reading maps onto the shared registry.
@@ -184,15 +263,27 @@ _QUALIFICATION_TYPE_MAP = {
 def _opportunity_type_hits(
     title: str, description_segments: Sequence[str], qualification_type: str | None
 ) -> Iterator[RuleHit]:
-    for field, source_field, texts in (
-        ("title", SourceField.TITLE, (title,) if title else ()),
-        ("description", SourceField.DESCRIPTION, tuple(description_segments)),
+    for source_field, texts in (
+        (SourceField.TITLE, (title,) if title else ()),
+        (SourceField.DESCRIPTION, tuple(description_segments)),
     ):
+        in_description = source_field is SourceField.DESCRIPTION
         for fragment in texts:
             folded = _folded(fragment)
-            for opportunity_type, rule_id, signals in _TYPE_SIGNALS:
-                matched = next((s for s in signals if s in folded), None)
-                if matched is None:
+            for opportunity_type, rule_id, signals, description_ok in _TYPE_SIGNALS:
+                if in_description and not description_ok:
+                    continue
+                position, matched = -1, ""
+                for signal in signals:
+                    found = folded.find(signal)
+                    if found != -1:
+                        position, matched = found, signal
+                        break
+                if position == -1:
+                    continue
+                if in_description and _incidental(
+                    folded, position, position + len(matched)
+                ):
                     continue
                 yield RuleHit(
                     slot=Slot.OPPORTUNITY_TYPE,
@@ -215,6 +306,7 @@ def _opportunity_type_hits(
             source_field=SourceField.QUALIFICATION_TYPE,
             fragment=str(qualification_type),
         )
+
 
 
 # --------------------------------------------------------------------------
@@ -293,110 +385,192 @@ def _education_hits(description_segments: Sequence[str]) -> Iterator[RuleHit]:
 # --------------------------------------------------------------------------
 # Experience
 # --------------------------------------------------------------------------
+#
+# Everything here is tied to the word "experience" by the pattern itself, not
+# by sharing a sentence with it. The corpus is why. A posting whose salary
+# boilerplate reads "…reflects the minimum and maximum target for new hire
+# salaries…" was being read as stating a *required* experience, because the
+# segment happened to contain the word "minimum" and, somewhere else, a word
+# about careers. "Minimum" qualified the salary. A marker that is merely
+# present in the same sentence qualifies nothing.
 
-_EXPERIENCE_WORDS = ("experience", "expérience", "experiences", "expériences")
-_YEARS = r"(?:years?|yrs?|ans?|années?|annees?)"
-_MONTHS = r"(?:months?|mois)"
+_EXP = r"(?:experiences?|expériences?|experiences|expérience)"
+_UNIT = r"(?:years?|yrs?|ans?|années?|annees?|months?|mois)"
+#: How far a quantity or a marker may sit from the experience it qualifies,
+#: without crossing a sentence boundary. Wide enough for "7+ years of AI/ML
+#: production experience", narrow enough that a salary range on the same line
+#: never reaches it.
+#:
+#: The gap may not contain another quantity, which is what keeps two
+#: requirements written on one line from collapsing into one: in "7+ years
+#: engineering, 2+ years ML experience" the first phrase cannot reach past the
+#: second to borrow its "experience", so each is read against its own.
+#:
+#: A known and deliberate limit follows: where two quantities on one line share
+#: a single trailing "experience", only the nearer one is attached and the
+#: other is left unread. That is a missing requirement — an UNKNOWN — rather
+#: than a merged number nobody wrote, and it is the side to err on. Postings
+#: that write the two as separate sentences, which is the common shape, are
+#: read in full.
+_NEAR = (
+    r"(?:(?!\d{1,2}\s*\+?\s*"
+    r"(?:years?|yrs?|ans?|années?|annees?|months?|mois))[^.\n]){0,40}?"
+)
+
+#: "1-2 years of experience", "2 to 4 years of X experience".
 _RANGE = re.compile(
-    rf"\b(\d{{1,2}})\s*(?:-|–|to|à|a|and|et)\s*(\d{{1,2}})\s*\+?\s*({_YEARS}|{_MONTHS})\b",
+    rf"\b(\d{{1,2}})\s*(?:-|–|to|à|a|and|et)\s*(\d{{1,2}})\s*\+?\s*({_UNIT})"
+    rf"{_NEAR}{_EXP}",
     re.IGNORECASE,
 )
+#: "at least 3 years of experience", "minimum 6 months of X experience".
 _AT_LEAST = re.compile(
     rf"\b(?:at least|minimum(?: of)?|min\.?|au moins|minimum de|plus de|over)\s*"
-    rf"(\d{{1,2}})\s*({_YEARS}|{_MONTHS})\b",
+    rf"(\d{{1,2}})\s*({_UNIT}){_NEAR}{_EXP}",
     re.IGNORECASE,
 )
-_PLUS = re.compile(rf"\b(\d{{1,2}})\s*\+\s*({_YEARS}|{_MONTHS})\b", re.IGNORECASE)
-_REQUIRED_MARKERS = (
-    "required", "must have", "requis", "obligatoire", "exige", "exigé",
-    "minimum", "at least", "au moins", "we require",
+#: "7+ years of engineering experience".
+_PLUS = re.compile(
+    rf"\b(\d{{1,2}})\s*\+\s*({_UNIT}){_NEAR}{_EXP}", re.IGNORECASE
 )
-_PREFERRED_MARKERS = (
-    "preferred", "nice to have", "a plus", "is a plus", "souhaite", "souhaité",
-    "souhaitee", "souhaitée", "apprecie", "apprécié", "ideally", "idealement",
-    "idéalement", "bonus",
+#: "experience: 3+ years", the same claim written backwards.
+_EXP_FIRST = re.compile(
+    rf"{_EXP}{_NEAR}\b(\d{{1,2}})\s*\+?\s*({_UNIT})", re.IGNORECASE
+)
+
+#: An obligation counts only when it is attached to the experience it
+#: qualifies, in either order and within one sentence.
+_PREFERRED_NEAR = re.compile(
+    rf"(?:{_EXP}{_NEAR}\b(?:preferred|a plus|nice to have|desirable|welcome|"
+    rf"souhait[ée]e?s?|appréci[ée]e?s?|apprecie[es]?|bonus)\b"
+    rf"|\b(?:preferred|ideally|idéalement|idealement|nice to have)\b{_NEAR}{_EXP})",
+    re.IGNORECASE,
+)
+_REQUIRED_NEAR = re.compile(
+    rf"(?:{_EXP}{_NEAR}\b(?:required|mandatory|requise?s?|obligatoires?|"
+    rf"exig[ée]e?s?)\b"
+    rf"|\b(?:must have|we require|requires?|required)\b{_NEAR}{_EXP})",
+    re.IGNORECASE,
 )
 
 
 def _to_months(quantity: int, unit: str) -> int:
-    return quantity * 12 if re.match(_YEARS, unit, re.IGNORECASE) else quantity
+    return quantity * 12 if re.match(r"(?:years?|yrs?|ans?|ann)", unit, re.IGNORECASE) else quantity
+
+
+def _segment_obligation(fragment: str, from_at_least: bool) -> ExperienceObligation:
+    """The obligation attached to this segment's experience, or UNKNOWN.
+
+    `PREFERRED` is tested first and wins, which is what makes "prior experience
+    is a plus but not required" read as preferred rather than required: the
+    word "required" is in the sentence, but it is the thing being denied.
+    Preferring the weaker reading is the conservative direction — it never
+    invents a demand the posting did not make.
+
+    `from_at_least` is the one case where a marker needs no separate test: a
+    quantity written "at least 3 years" carries its own obligation inside the
+    expression that matched, so the attachment is structural.
+    """
+    if _PREFERRED_NEAR.search(fragment) is not None:
+        return ExperienceObligation.PREFERRED
+    if _REQUIRED_NEAR.search(fragment) is not None or from_at_least:
+        return ExperienceObligation.REQUIRED
+    return ExperienceObligation.UNKNOWN
+
+
+#: The quantity patterns, in the order a match is preferred when two overlap.
+#: A range is the most specific reading, then an explicit floor, then a `+`,
+#: then the same claim written backwards.
+_EXPERIENCE_QUANTITIES = (
+    ("EXPERIENCE_RANGE_V2", _RANGE, True, False),
+    ("EXPERIENCE_MIN_YEARS_V2", _AT_LEAST, False, True),
+    ("EXPERIENCE_MIN_PLUS_V2", _PLUS, False, False),
+    ("EXPERIENCE_MIN_TRAILING_V2", _EXP_FIRST, False, False),
+)
+
+
+def _quantities(fragment: str):
+    """Every experience quantity in one segment, left to right, non-overlapping.
+
+    `finditer` rather than `search`, because one bullet can carry two: "7+
+    years engineering, 2+ years ML experience" is two requirements on one line.
+    Overlapping matches are resolved by pattern order — a range beats the floor
+    hiding inside it — and never by taking both.
+    """
+    found: list[tuple[int, int, tuple[int | None, int | None], str, bool]] = []
+    for rule_id, pattern, is_range, from_at_least in _EXPERIENCE_QUANTITIES:
+        for match in pattern.finditer(fragment):
+            if is_range:
+                unit = match.group(3)
+                low, high = int(match.group(1)), int(match.group(2))
+                if low > high:
+                    continue
+                bounds = (_to_months(low, unit), _to_months(high, unit))
+            else:
+                bounds = (_to_months(int(match.group(1)), match.group(2)), None)
+            found.append((match.start(), match.end(), bounds, rule_id, from_at_least))
+
+    kept: list[tuple[int, int, tuple[int | None, int | None], str, bool]] = []
+    for candidate in found:
+        start, end = candidate[0], candidate[1]
+        if any(start < other[1] and other[0] < end for other in kept):
+            continue
+        kept.append(candidate)
+    return sorted(kept, key=lambda item: item[0])
 
 
 def _experience_hits(description_segments: Sequence[str]) -> Iterator[RuleHit]:
-    """Read quantities and obligations, and keep them attached to each other.
+    """Every experience the posting asked for, one hit each.
 
-    An obligation qualifies a requirement, so a sentence carrying both — "at
-    least 3 years of experience required" — settles the obligation for the
-    quantity it states. A sentence carrying only an obligation word is used
-    only when no sentence quantified anything: otherwise "3 years required"
-    beside "Spark experience is preferred" would read as one posting
-    contradicting itself, when it is really two different requirements.
+    A posting may ask for several, and usually does. Each quantity is its own
+    requirement, carrying the obligation its own sentence attached; a sentence
+    naming an obligation and no quantity becomes a requirement of its own, with
+    no bounds. Two requirements are never a contradiction, so nothing here
+    competes with anything.
     """
-    quantified: list[tuple[str, tuple[int | None, int | None], str]] = []
-    obligations: list[tuple[str, ExperienceObligation, bool]] = []
-
     for fragment in description_segments:
-        folded = _folded(fragment)
-        if not any(word in folded for word in _EXPERIENCE_WORDS):
-            # No experience word, no experience claim. A seniority adjective in
-            # a title is not a number and never reaches this function anyway.
+        quantities = _quantities(fragment)
+        obligation = _segment_obligation(
+            fragment, any(item[4] for item in quantities)
+        )
+        if not quantities:
+            if obligation is not ExperienceObligation.UNKNOWN:
+                yield _experience_hit(fragment, None, None, obligation,
+                                      f"EXPERIENCE_{obligation.value}_V2")
             continue
+        for _start, _end, (minimum, maximum), rule_id, _from_at_least in quantities:
+            yield _experience_hit(fragment, minimum, maximum, obligation, rule_id)
 
-        bounds: tuple[int | None, int | None] | None = None
-        rule_id = ""
-        if (match := _RANGE.search(fragment)) is not None:
-            unit = match.group(3)
-            low, high = int(match.group(1)), int(match.group(2))
-            if low <= high:
-                bounds = (_to_months(low, unit), _to_months(high, unit))
-                rule_id = "EXPERIENCE_RANGE_V1"
-        if bounds is None and (match := _PLUS.search(fragment)) is not None:
-            bounds = (_to_months(int(match.group(1)), match.group(2)), None)
-            rule_id = "EXPERIENCE_MIN_PLUS_V1"
-        if bounds is None and (match := _AT_LEAST.search(fragment)) is not None:
-            bounds = (_to_months(int(match.group(1)), match.group(2)), None)
-            rule_id = "EXPERIENCE_MIN_YEARS_V1"
-        if bounds is not None:
-            quantified.append((fragment, bounds, rule_id))
 
-        obligation: ExperienceObligation | None = None
-        if any(marker in folded for marker in _PREFERRED_MARKERS):
-            obligation = ExperienceObligation.PREFERRED
-        elif any(marker in folded for marker in _REQUIRED_MARKERS):
-            obligation = ExperienceObligation.REQUIRED
-        if obligation is not None:
-            obligations.append((fragment, obligation, bounds is not None))
-
-    for fragment, (minimum, maximum), rule_id in quantified:
-        yield RuleHit(
-            slot=Slot.EXPERIENCE_BOUNDS,
-            kind=ConstraintKind.EXPERIENCE,
-            value=(minimum, maximum),
-            value_key=f"{'' if minimum is None else minimum}-"
-            f"{'' if maximum is None else maximum}",
-            rule_id=rule_id,
-            source_field=SourceField.DESCRIPTION,
-            fragment=fragment,
-        )
-
-    attached = [item for item in obligations if item[2]]
-    chosen = attached if attached else ([] if quantified else obligations)
-    for fragment, obligation, _ in chosen:
-        yield RuleHit(
-            slot=Slot.EXPERIENCE_OBLIGATION,
-            kind=ConstraintKind.EXPERIENCE,
-            value=obligation,
-            value_key=obligation.value,
-            rule_id=f"EXPERIENCE_{obligation.value}_V1",
-            source_field=SourceField.DESCRIPTION,
-            fragment=fragment,
-        )
+def _experience_hit(
+    fragment: str,
+    minimum: int | None,
+    maximum: int | None,
+    obligation: ExperienceObligation,
+    rule_id: str,
+) -> RuleHit:
+    requirement = ExperienceRequirement(
+        min_months=minimum, max_months=maximum, obligation=obligation
+    )
+    return RuleHit(
+        slot=Slot.EXPERIENCE,
+        kind=ConstraintKind.EXPERIENCE,
+        value=requirement,
+        value_key=(
+            f"{'' if minimum is None else minimum}-"
+            f"{'' if maximum is None else maximum}:{obligation.value}"
+        ),
+        rule_id=rule_id,
+        source_field=SourceField.DESCRIPTION,
+        fragment=fragment,
+    )
 
 
 # --------------------------------------------------------------------------
 # Duration
 # --------------------------------------------------------------------------
 
+_MONTHS = r"(?:months?|mois)"
 _DURATION_WORDS = ("duration", "durée", "duree", "lasts", "internship", "stage",
                    "contract", "mission", "programme", "program")
 _DURATION_RANGE = re.compile(
@@ -425,7 +599,7 @@ def _duration_hits(description_segments: Sequence[str]) -> Iterator[RuleHit]:
         folded = _folded(fragment)
         if not any(word in folded for word in _DURATION_WORDS):
             continue
-        if any(word in folded for word in _EXPERIENCE_WORDS):
+        if re.search(_EXP, folded, re.IGNORECASE) is not None:
             # "3 years of experience" is not how long the job lasts.
             continue
         if (match := _DURATION_RANGE.search(fragment)) is not None:
@@ -546,29 +720,70 @@ _REMOTE_TYPE_MAP = {
     "on_site": WorkMode.ON_SITE, "onsite": WorkMode.ON_SITE,
     "on-site": WorkMode.ON_SITE, "sur_site": WorkMode.ON_SITE,
 }
-_WORK_MODE_SIGNALS: tuple[tuple[WorkMode, tuple[str, ...]], ...] = (
-    (WorkMode.HYBRID, ("hybrid", "hybride", "mode hybride")),
+
+#: A work mode is a **global property of the role**, so only a statement about
+#: the role counts. The corpus made the distinction unavoidable:
+#:
+#: * "fully remote … position" beside the tracking tag `#LI-Onsite` was read as
+#:   a contradiction. A tag an applicant-tracking system appends is not the
+#:   employer describing the job;
+#: * "developing onsite solutions" was read as on-site. The word qualified the
+#:   solutions, not the contract;
+#: * "hybrid customer-facing engineering role" beside "significant time on-site
+#:   with customers" was read as a contradiction. Spending time on site is what
+#:   hybrid *means*; the second sentence elaborates the first.
+#:
+#: So every pattern below requires the mode to be attached to the role — by a
+#: noun like role, position or job, by an explicit "this role is …", or by a
+#: whole-role adverb like "fully" or "100%". A bare occurrence of the word
+#: never suffices, which is what makes all three of those cases resolve
+#: correctly without any priority rule deciding between them.
+_ROLE = r"(?:role|position|job|opportunity|poste)"
+_WORK_MODE_PATTERNS: tuple[tuple[WorkMode, str, str], ...] = (
+    (
+        WorkMode.HYBRID,
+        "WORK_MODE_HYBRID_V2",
+        rf"(?:\bhybrid\b[^.\n]{{0,30}}?\b{_ROLE}\b"
+        rf"|\bthis\s+{_ROLE}\s+is\s+[^.\n]{{0,15}}?hybrid\b"
+        rf"|\bhybrid\s+(?:work|working)\s+(?:model|setup|arrangement|policy)\b"
+        rf"|\bmode\s+hybride\b|\bposte\s+hybride\b)",
+    ),
     (
         WorkMode.REMOTE,
-        ("fully remote", "100% remote", "full remote", "remote position",
-         "remote role", "work from home", "teletravail", "télétravail",
-         "remote-first", "remote first", "entierement a distance",
-         "entièrement à distance"),
+        "WORK_MODE_REMOTE_V2",
+        rf"(?:\b(?:fully|100\s*%|full)[\s-]*remote\b"
+        rf"|\bremote\s+{_ROLE}\b"
+        rf"|\bremote[\s-]first\b"
+        rf"|\bthis\s+{_ROLE}\s+is\s+[^.\n]{{0,15}}?remote\b"
+        rf"|\bwork\s+from\s+home\s+{_ROLE}\b"
+        rf"|\bt[ée]l[ée]travail\s+(?:complet|total|int[ée]gral)\b"
+        rf"|\benti[èe]rement\s+[àa]\s+distance\b)",
     ),
     (
         WorkMode.ON_SITE,
-        ("on-site", "on site", "onsite", "sur site", "en presentiel",
-         "en présentiel", "presentiel", "présentiel"),
+        "WORK_MODE_ON_SITE_V2",
+        rf"(?:\b(?:fully|100\s*%)[\s-]*on[\s-]?site\b"
+        rf"|\bon[\s-]?site\s+{_ROLE}\b"
+        rf"|\bthis\s+{_ROLE}\s+is\s+[^.\n]{{0,15}}?on[\s-]?site\b"
+        rf"|\brequires?\s+(?:full[\s-]?time\s+)?on[\s-]?site\s+presence\b"
+        rf"|\bposte\s+en\s+pr[ée]sentiel\b"
+        rf"|\b(?:100\s*%|enti[èe]rement)\s+en\s+pr[ée]sentiel\b)",
     ),
 )
+_WORK_MODE_RULES = tuple(
+    (mode, rule_id, re.compile(pattern, re.IGNORECASE))
+    for mode, rule_id, pattern in _WORK_MODE_PATTERNS
+)
+
 #: A refusal of remote is not a claim of on-site. "No remote work" says where
 #: the work is not done; it does not say the office is mandatory, and this
 #: package will not fill in the rest. The phrases exist here only to stop the
 #: REMOTE rule from firing on the word inside them.
-_NO_REMOTE = (
-    "no remote", "not remote", "without remote", "pas de teletravail",
-    "pas de télétravail", "no remote work", "aucun teletravail",
-    "aucun télétravail", "remote is not", "no telework",
+_NO_REMOTE = re.compile(
+    r"(?:\bno\s+(?:remote|telework)\b|\bnot\s+(?:a\s+)?remote\b"
+    r"|\bwithout\s+remote\b|\bremote\s+is\s+not\b"
+    r"|\bpas\s+de\s+t[ée]l[ée]travail\b|\baucun\s+t[ée]l[ée]travail\b)",
+    re.IGNORECASE,
 )
 
 
@@ -588,22 +803,22 @@ def _work_mode_hits(
             fragment=str(remote_type),
         )
     for fragment in description_segments:
-        folded = _folded(fragment)
-        suppressed = any(phrase in folded for phrase in _NO_REMOTE)
-        for work_mode, signals in _WORK_MODE_SIGNALS:
+        suppressed = _NO_REMOTE.search(fragment) is not None
+        for work_mode, rule_id, pattern in _WORK_MODE_RULES:
             if work_mode is WorkMode.REMOTE and suppressed:
                 continue
-            if any(signal in folded for signal in signals):
-                yield RuleHit(
-                    slot=Slot.WORK_MODE,
-                    kind=ConstraintKind.WORK_MODE,
-                    value=work_mode,
-                    value_key=work_mode.value,
-                    rule_id=f"WORK_MODE_{work_mode.value}_V1",
-                    source_field=SourceField.DESCRIPTION,
-                    fragment=fragment,
-                )
-                break
+            if pattern.search(fragment) is None:
+                continue
+            yield RuleHit(
+                slot=Slot.WORK_MODE,
+                kind=ConstraintKind.WORK_MODE,
+                value=work_mode,
+                value_key=work_mode.value,
+                rule_id=rule_id,
+                source_field=SourceField.DESCRIPTION,
+                fragment=fragment,
+            )
+            break
 
 
 # --------------------------------------------------------------------------

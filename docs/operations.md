@@ -894,8 +894,9 @@ a non-SQLite backend before connecting.
 
 **What it extracts.** The kind of opportunity (the Phase 3.4C registry, shared
 with the profile side), the education levels named and whether they are floors,
-the experience asked for in months and whether it is required or preferred, the
-duration, the start at the precision it was written, the places named, the work
+**every** experience asked for — a posting wanting seven years of engineering
+and two of ML states two requirements, not one contradiction — in months and
+each with its own optional `REQUIRED`/`PREFERRED`, the duration, the start at the precision it was written, the places named, the work
 mode, and what the posting says about visa sponsorship, work authorization and
 internship agreements.
 
@@ -906,7 +907,12 @@ internship agreements.
 posting with an address has not required attendance. A posting written in
 English has not required English. A title reading "Senior" states no number of
 years. An internship does not imply a school agreement, a duration or a
-student. A date written as `01/02/2027` is two different days depending on the
+student. A salary paragraph saying "minimum and maximum target" states no
+required experience. "This isn't a research internship", "prior internship
+experience" and "mentoring junior consultants" describe something other than
+this offer, and none of them sets its type. `#LI-Onsite`, "onsite solutions"
+and "significant time on-site with customers" do not state a work mode: only a
+declaration attached to the role does. A date written as `01/02/2027` is two different days depending on the
 reader's country, so it is not read at all; a month with no year keeps no year,
 never the current one.
 
@@ -942,9 +948,9 @@ one:
 | `total_opportunities` / `processed` | postings in scope, and postings read |
 | `unchanged` / `created` / `replaced` | skipped, first-projected, re-projected |
 | `projected` / `not_projected` | `status` only: how many hold a stored reading |
-| `known_opportunity_type` … `known_convention` | how many postings **stated** each thing. Never how many are suitable: there is nobody to be suitable for |
+| `known_opportunity_type` … `known_convention` | how many postings **stated** each thing. Never how many are suitable: there is nobody to be suitable for. `known_experience` counts postings holding at least one requirement, not requirements |
 | `conflicts` | how many contradictions were recorded rather than settled |
-| `extractor_version` | `opportunity-constraints-v1` |
+| `extractor_version` | `opportunity-constraints-v2` |
 | `changed` | `false` when the run found every projection already correct |
 
 A `known_*` count is a property of how postings are written. A low

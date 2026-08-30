@@ -137,8 +137,9 @@ Phase 3 has started, and only these six slices of it exist:
   title.
 - **Phase 3.5A** — the other side of the same coin: what an **opportunity**
   requires. `services/collector/extractors/opportunity_constraints/` reads a
-  posting and records the kind of opportunity, the education levels, the
-  experience in months, the duration, the start at the precision it was
+  posting and records the kind of opportunity, the education levels, every
+  experience it asks for (two requirements in two sentences are two
+  requirements, not a contradiction), the duration, the start at the precision it was
   written, the places, the work mode, and what it says about visa sponsorship,
   work authorization and internship agreements — projected by migration `0012`
   onto `opportunity_constraints` and its evidence, location, education and

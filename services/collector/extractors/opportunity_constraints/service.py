@@ -135,7 +135,10 @@ class ConstraintSyncSummary:
     """What one run did, and how much is now known. Counters, never a value.
 
     Every `known_*` counter is "how many postings stated this", never "how many
-    are suitable": a posting that never mentions visas is counted as not
+    are suitable". `known_experience` counts postings holding **at least one**
+    experience requirement, not requirements: a posting asking for seven years
+    of engineering and two of ML counts once, and both rows are in
+    `opportunity_experience_requirements`: a posting that never mentions visas is counted as not
     stating it, which is different from stating that it will not sponsor. The
     summary is printed and logged, and a posting's words are not.
     """
@@ -201,7 +204,7 @@ def summarize_constraints(
     for reading in readings:
         counters["known_opportunity_type"] += reading.opportunity_type is not None
         counters["known_education"] += bool(reading.education)
-        counters["known_experience"] += reading.experience.known
+        counters["known_experience"] += bool(reading.experience)
         counters["known_duration"] += reading.duration.known
         counters["known_start"] += reading.start.known
         counters["known_location"] += bool(reading.locations)

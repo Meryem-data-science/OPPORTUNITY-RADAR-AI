@@ -18,6 +18,7 @@
 --         +-> opportunity_constraints            (one row per read posting)
 --               +-> opportunity_constraint_locations
 --               +-> opportunity_education_requirements
+--               +-> opportunity_experience_requirements
 --               +-> opportunity_constraint_evidence
 --               +-> opportunity_constraint_conflicts
 --
@@ -65,21 +66,6 @@ CREATE TABLE opportunity_constraints (
         'PFA', 'PFE', 'SUMMER_INTERNSHIP', 'PRE_HIRE_INTERNSHIP',
         'ALTERNANCE', 'INTERNSHIP', 'FIRST_JOB', 'JUNIOR_ROLE'
     )),
-
-    -- Months, always, because postings write both years and months and one
-    -- unit is one comparison later. A bound is NULL when the posting gave it
-    -- no bound: "3+ years" has a floor and no ceiling, and a ceiling invented
-    -- here would be a rejection nobody wrote.
-    experience_min_months INTEGER CHECK (
-        experience_min_months IS NULL OR experience_min_months >= 0
-    ),
-    experience_max_months INTEGER CHECK (
-        experience_max_months IS NULL OR experience_max_months >= 0
-    ),
-    experience_obligation TEXT CHECK (
-        experience_obligation IS NULL
-        OR experience_obligation IN ('REQUIRED', 'PREFERRED')
-    ),
 
     -- How long the work lasts. Never derived from the kind of posting: the
     -- word "internship" carries no number.
@@ -143,10 +129,6 @@ CREATE TABLE opportunity_constraints (
             AND start_month IS NOT NULL AND start_day IS NULL)
         OR (start_precision = 'YEAR'
             AND start_year IS NOT NULL AND start_month IS NULL AND start_day IS NULL)
-    ),
-    CHECK (
-        experience_min_months IS NULL OR experience_max_months IS NULL
-        OR experience_min_months <= experience_max_months
     ),
     CHECK (
         duration_min_months IS NULL OR duration_max_months IS NULL
@@ -213,6 +195,51 @@ CREATE TABLE opportunity_education_requirements (
 CREATE INDEX idx_opportunity_education_requirements_opportunity
     ON opportunity_education_requirements(opportunity_id);
 
+-- Every experience the posting asked for. **One posting, several rows.**
+--
+-- This is not a scalar, and a real corpus is what settled it. A posting saying
+--
+--     7+ years of engineering experience
+--     2+ years of AI/ML production experience
+--
+-- is asking for two different things, and reading it as one number that had to
+-- be either 84 or 24 turned it into a contradiction: the projection recorded a
+-- conflict and asserted neither, losing both requirements to describe a
+-- disagreement that was never there. Running the v1 rules over 373 collected
+-- postings produced 46 conflicts, and most were this. Two requirements in two
+-- sentences are two requirements.
+--
+-- Nothing here ranks them, because the posting did not. There is no primary
+-- requirement, no weight and no order beyond the order the posting used.
+--
+-- A row with no bounds and only an obligation is legitimate and common:
+-- "prior experience is a plus" says something real about what the posting
+-- wants without naming a number. A row asserting nothing at all is refused —
+-- that is UNKNOWN, and UNKNOWN is the absence of a row.
+CREATE TABLE opportunity_experience_requirements (
+    id INTEGER PRIMARY KEY,
+    opportunity_id INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    -- Months, always, because postings write both years and months and one
+    -- unit is one comparison later. A bound is NULL when the posting gave it
+    -- no bound: "3+ years" has a floor and no ceiling, and a ceiling invented
+    -- here would be a rejection nobody wrote.
+    min_months INTEGER CHECK (min_months IS NULL OR min_months >= 0),
+    max_months INTEGER CHECK (max_months IS NULL OR max_months >= 0),
+    obligation TEXT CHECK (obligation IS NULL OR obligation IN ('REQUIRED', 'PREFERRED')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (min_months IS NULL OR max_months IS NULL OR min_months <= max_months),
+    -- A requirement has to require something.
+    CHECK (min_months IS NOT NULL OR max_months IS NOT NULL OR obligation IS NOT NULL),
+    UNIQUE (opportunity_id, position),
+    UNIQUE (opportunity_id, min_months, max_months, obligation),
+    FOREIGN KEY (opportunity_id)
+        REFERENCES opportunity_constraints(opportunity_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_opportunity_experience_requirements_opportunity
+    ON opportunity_experience_requirements(opportunity_id);
+
 -- Why each value was asserted: the rule, the field, and the words.
 --
 -- `evidence_text` is the **minimal fragment** the rule matched, capped by the
@@ -259,29 +286,24 @@ CREATE INDEX idx_opportunity_constraint_evidence_kind
 --
 -- **A conflict is identified by its slot, not by its kind.** The two are not
 -- the same thing: a kind is the subject a reader browses by, a slot is the
--- thing that can actually disagree with itself. `EXPERIENCE` holds two — how
--- much experience a posting wants, and whether it insists — and one posting
--- can contradict itself about both at once:
+-- thing that can actually disagree with itself. `constraint_kind` stays for
+-- browsing and is derived from the slot in code, so the two cannot drift.
 --
---     "Minimum 3 years of experience required."
---     "At least 5 years of experience preferred."
+-- `EDUCATION`, `EXPERIENCE` and `LOCATION` are absent from the slot list:
+-- several levels, several requirements or several places are several answers,
+-- never a disagreement, so none of them can appear here at all.
 --
--- That is two contradictions with two answers. Keying the row by kind would
--- refuse the second one outright, and merging them would put `36-` beside
--- `REQUIRED` in a single list of "conflicting values", which describes nothing.
--- `constraint_kind` stays for browsing and is derived from the slot in code, so
--- the two can never drift apart.
---
--- `EDUCATION` and `LOCATION` are absent from the slot list: several levels or
--- several places are several answers, never a disagreement, so neither can
--- appear here at all.
+-- A conflict now means one thing only: **the same global property of the offer
+-- was explicitly asserted two incompatible ways.** "This is a fully remote
+-- role" beside "This position is fully on-site" is a conflict, and there is
+-- nothing left in this table that merely means "the posting asked for two
+-- different things".
 CREATE TABLE opportunity_constraint_conflicts (
     id INTEGER PRIMARY KEY,
     opportunity_id INTEGER NOT NULL,
     constraint_slot TEXT NOT NULL CHECK (constraint_slot IN (
-        'OPPORTUNITY_TYPE', 'EXPERIENCE_BOUNDS', 'EXPERIENCE_OBLIGATION',
-        'DURATION', 'START', 'WORK_MODE', 'VISA_SPONSORSHIP',
-        'WORK_AUTHORIZATION', 'CONVENTION'
+        'OPPORTUNITY_TYPE', 'DURATION', 'START', 'WORK_MODE',
+        'VISA_SPONSORSHIP', 'WORK_AUTHORIZATION', 'CONVENTION'
     )),
     constraint_kind TEXT NOT NULL CHECK (constraint_kind IN (
         'OPPORTUNITY_TYPE', 'EDUCATION', 'EXPERIENCE', 'DURATION', 'START',
