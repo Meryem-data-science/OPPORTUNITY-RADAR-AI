@@ -900,7 +900,8 @@ each with its own optional `REQUIRED`/`PREFERRED`, the duration, the start at th
 mode, and what the posting says about visa sponsorship, work authorization and
 internship agreements.
 
-**What it refuses to extract.** Skills and languages — see Phase 3.5B below.
+**What it refuses to extract.** Skills and languages — those are Phase 3.5B,
+below.
 
 **UNKNOWN is the answer whenever a posting was silent, and UNKNOWN is never a
 "no".** A posting that never mentions visas has not refused to sponsor. A
@@ -974,11 +975,137 @@ to one, no eligibility result, no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no
 no notification and no auto-apply. It opens no network connection and calls no
 model, and there is no web interface or HTTP endpoint for any of it.
 
-### Reserved for Phase 3.5B
+### The table 3.5A reserves
 
-`opportunity_skill_requirements` is created empty and Phase 3.5A never writes a
-row into it. It exists now only to pin the offer side to the `skills`
-vocabulary Phase 3.4A created, so 3.5B extends one catalogue instead of
-starting a second, incompatible one. Language requirements have no table yet
-for the mirror reason: 3.5A cannot fill one, and an empty table with no writer
-is schema nobody can trust.
+`opportunity_skill_requirements` is created by `0012`, left empty by every 3.5A
+run, and filled by Phase 3.5B below. It exists in `0012` only to pin the offer
+side to the `skills` vocabulary Phase 3.4A created, so 3.5B extends one
+catalogue instead of starting a second, incompatible one.
+
+## Opportunity skill and language requirements (Phase 3.5B)
+
+Which technologies and which languages a posting **explicitly asks for**, and
+how hard it asks. This still reads listings and still compares them to nobody.
+
+Migration `0013` is applied by the ordinary explicit command:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `opportunity_skill_requirement_evidence`,
+`opportunity_language_requirements`,
+`opportunity_language_requirement_evidence`,
+`opportunity_requirement_ambiguities` and
+`opportunity_requirement_extraction_state`, and **inserts no row** — not a
+skill, not a language, not a catalogue entry.
+
+Three commands, same shape as 3.5A's:
+
+```bash
+python -m services.collector.extractors.opportunity_constraints.requirements.cli status
+python -m services.collector.extractors.opportunity_constraints.requirements.cli sync
+python -m services.collector.extractors.opportunity_constraints.requirements.cli \
+    extract-one --opportunity-id 42
+```
+
+`status` reads what is stored and counts it, writing nothing and extracting
+nothing; `sync` reconciles every posting in scope — active, not a merged
+duplicate, the same filter 3.5A and the qualification pipeline use;
+`extract-one` does the same for a single posting. Both `status` and `sync`
+accept `--limit`. The commands run no migration and refuse a non-SQLite backend
+before connecting.
+
+**Run Phase 3.5A first.** Every 3.5B row hangs off `opportunity_constraints`, so
+a posting with no 3.5A projection is refused with an explicit error naming what
+to do, before anything is written. 3.5B never runs the 3.5A sync for you: two
+phases that trigger each other are two phases nobody can reason about
+separately. A 3.5A re-synchronization also cascades the 3.5B reading away, so
+the usual order after a collection is: `migrate`, then 3.5A `sync`, then 3.5B
+`sync`.
+
+**What it extracts.** A technology or a language named under a heading that
+makes it a demand (`Required Qualifications`, `Must Have`, `Prérequis`, `Profil
+recherché`) or a preference (`Nice to Have`, `Preferred Qualifications`,
+`Atouts`), or named in a sentence that says so itself (`Must have…`, `…is
+required`, `…is a plus`, `…preferred`). Each requirement carries the fragment
+that stated it, the rule that fired, the heading it sat under, and the level
+that mention stated. `REQUIRED` outranks `PREFERRED` when one posting says
+both, and the weaker mention survives as evidence.
+
+**Levels are read per clause.** "Python required and Spark preferred" stores one
+demand and one preference, and "No Python experience required, but SQL is
+required" stores SQL alone — one skill's cancelling words never delete another's
+demand. Terms joined by a bare connector still share one level, so "Python and
+SQL required" is two requirements.
+
+**What it refuses to extract, and this is the point.** A mention is not a
+requirement:
+
+```text
+Our stack includes Python, Spark and Kafka.   -> nothing
+You will build pipelines using Python.        -> nothing
+We use SQL across the company.                -> nothing
+Training in Python will be provided.          -> nothing
+No prior Python experience is required.       -> nothing
+```
+
+French prose is not a technology either: token boundaries are Unicode-aware, so
+`Réseaux`, `Régression`, `Réalisation` and `Câblage` never produce the `R` or
+`C` skills, in composed or decomposed spelling.
+
+A slash is not an `or` either. `AI/ML engineering` and `ML/LLM-powered system`
+name one field, so they are refused under their own reason,
+`COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`, rather than reported as a choice the
+posting never offered — and neither half is stored. The registry of such
+expressions is closed; `Python/R`, `C/C++` and `TensorFlow/PyTorch` stay refused
+as choices. `Bilingualism (English/French)` names both languages, like
+`Bilingual English/French`.
+
+Identical refusals of one sentence are stored once: the row holds no terms, so a
+second copy would carry nothing. Expect `ambiguity_rows` to stay substantial —
+real postings really do offer choices, and refusing them is the point.
+
+An `or` is not an `and`: "Python or R required" stores neither, and writes a
+row in `opportunity_requirement_ambiguities` instead — so an operator can see
+that the extractor understood an explicit demand and refused to corrupt it,
+rather than finding a silence indistinguishable from a posting that never
+mentioned either. "Python and SQL required" still stores both.
+
+A language is never inferred from a country, a city, a nationality or the
+language the advertisement is written in, and a level is stored exactly as
+written: `B2` stays `B2`, `Fluent` stays `Fluent`, and nothing maps `Fluent` to
+`C1`. When one posting demands one language at two incompatible levels, the
+language stays `REQUIRED` and only the level becomes UNKNOWN, with a
+`CONFLICTING_LANGUAGE_PROFICIENCY` ambiguity.
+
+**The vocabulary grows only from what was observed.** A `skills` row appears the
+first time a real posting is found to require that term, inside the same
+transaction; an existing row is reused and never renamed; a term no posting
+requires any more is left in place, because it is vocabulary and not a claim
+about anybody.
+
+**Idempotence.** `source_fingerprint` is over the description and nothing else,
+and `extractor_version` is `opportunity-requirements-v3`. A second `sync` writes
+nothing and reports `changed=false`, including for a posting that requires
+nothing — `opportunity_requirement_extraction_state` records that it was read.
+An edited description recomputes; a new extractor version recomputes even when
+the text is identical.
+
+**The output is counters.** No description, no title, no evidence fragment, no
+heading, and not even the name of a technology or a language reaches stdout or
+the structured log, and there is no flag that would print one. Inspecting a
+particular reading is a read-only SQL query, not something a routine command
+dumps. The failures reported are a refused backend, an unmigrated database, a
+missing 3.5A projection, an absent or out-of-scope posting, and `extract-one`
+called without `--opportunity-id`, each with exit code 1.
+
+What this slice does **not** do: no profile is read — no query in it names
+`profiles`, `profile_skills` or `profile_languages` — no opportunity is compared
+to one, no eligibility result, no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no skill
+gap, no `match_score`, no TF-IDF, no cosine similarity, no embedding, no fuzzy
+matching, no ranking, no recommendation, no notification and no auto-apply. It
+opens no network connection, downloads no model and calls no LLM, and there is
+no web interface or HTTP endpoint for any of it.

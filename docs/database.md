@@ -1281,7 +1281,7 @@ opportunities
           +-> opportunity_experience_requirements
           +-> opportunity_constraint_evidence
           +-> opportunity_constraint_conflicts
-          +-> opportunity_skill_requirements   (reserved for 3.5B, always empty)
+          +-> opportunity_skill_requirements   (reserved here, filled by 0013)
 ```
 
 `opportunities` is the source and is never written: no row is updated, no
@@ -1314,7 +1314,7 @@ stated a duration, and a posting in a given country has not refused to sponsor.
 | `opportunity_experience_requirements` | **every experience the posting asked for, one row each**, in months, with an optional `REQUIRED`/`PREFERRED` obligation. A row must assert a bound or an obligation. Nothing ranks them |
 | `opportunity_constraint_evidence` | why each value was asserted: the kind, the source field, the `rule_id`, and the **minimal fragment** matched, capped at 200 characters. A pointer into the posting, never a copy of it |
 | `opportunity_constraint_conflicts` | the readings that disagreed and were therefore not used, as canonical JSON arrays of the values and the rules, keyed by `constraint_slot` |
-| `opportunity_skill_requirements` | **reserved for Phase 3.5B and always empty after a 3.5A run.** It exists now only to pin the offer side to the `skills` vocabulary `0008` created, so 3.5B extends one catalogue instead of starting a rival. Its `skill_id` is `ON DELETE RESTRICT`, like `profile_skills`: a term an offer still requires cannot be deleted out from under it |
+| `opportunity_skill_requirements` | created here, **always empty after a 3.5A run**, and filled by `0013` — see [Opportunity skill and language requirements](#opportunity-skill-and-language-requirements). It exists in `0012` to pin the offer side to the `skills` vocabulary `0008` created, so 3.5B extends one catalogue instead of starting a rival. Its `skill_id` is `ON DELETE RESTRICT`, like `profile_skills`: a term an offer still requires cannot be deleted out from under it |
 
 Three separate claims are kept apart on purpose, and no rule turns one into
 another: `visa_sponsorship` is what the **employer** offers to do,
@@ -1379,3 +1379,226 @@ is no HTTP endpoint and no remote write path over these tables.
 `match_score`, `priority_score` and `interview_potential_score` from `0001`.
 They are Phase 1 leftovers; Phase 3.5A neither reads nor writes them, and a
 test asserts they stay `NULL`.)
+
+## Opportunity skill and language requirements
+
+Migration `0013` adds the Phase 3.5B reading of **which skills and which
+languages a posting explicitly asks for**: five tables, no column on any
+existing table, and **no seeded row of any kind**. It does not recreate
+`opportunity_skill_requirements` — `0012` created that table for exactly this
+purpose, and there is no `opportunity_skill_requirements_v2`, no `offer_skills`
+and no `required_skills` anywhere.
+
+```text
+opportunities
+    +-> opportunity_constraints                       (3.5A, migration 0012)
+          +-> opportunity_skill_requirements          (0012, filled by 0013)
+          |     +-> opportunity_skill_requirement_evidence
+          +-> opportunity_language_requirements
+          |     +-> opportunity_language_requirement_evidence
+          +-> opportunity_requirement_ambiguities
+          +-> opportunity_requirement_extraction_state
+```
+
+**Every table hangs off `opportunity_constraints`, not off `opportunities`.**
+3.5B is structurally a continuation of 3.5A, so a posting with no 3.5A
+projection cannot receive a 3.5B one, and a 3.5A re-synchronization — which
+deletes and rebuilds the constraint row — cascades the whole 3.5B reading away,
+extraction state included. A stale state can never outlive the projection it
+was computed beside.
+
+| Table | What one row is |
+| --- | --- |
+| `opportunity_skill_requirements` (from `0012`) | one technology the posting asks for, `REQUIRED` or `PREFERRED`, pointing at the shared `skills` vocabulary. `UNIQUE (opportunity_id, skill_id)`: `REQUIRED` outranks `PREFERRED` when a posting says both |
+| `opportunity_skill_requirement_evidence` | one mention: the minimal fragment (≤ 200 chars), the `rule_id`, the `source_field`, the heading it sat under, and `observed_requirement` — the level **that mention** stated, which may be weaker than the projected one |
+| `opportunity_language_requirements` | one language, `REQUIRED` or `PREFERRED`, with `proficiency_text` as the posting wrote it or `NULL`. `UNIQUE (opportunity_id, language_key)` |
+| `opportunity_language_requirement_evidence` | the same, plus `observed_proficiency_text`: the level *this* mention named |
+| `opportunity_requirement_ambiguities` | a demand the extractor understood and deliberately refused to store: `ALTERNATIVE_GROUP_UNSUPPORTED`, `COMPOUND_SKILL_EXPRESSION_UNSUPPORTED` or `CONFLICTING_LANGUAGE_PROFICIENCY`, with the fragment, the rule and the heading. Deduplicated per posting on everything the row holds |
+| `opportunity_requirement_extraction_state` | that a posting **was read**, at which version, from which text: `source_fingerprint`, `extractor_version`, `extracted_at` |
+
+### The vocabulary is shared and never seeded
+
+A `skills` row says a canonical name exists. It does not say a person holds the
+skill (`profile_skills` says that) and it does not say a posting wants it
+(`opportunity_skill_requirements` says that). So `0013` inserts nothing: the
+catalogue of ~115 recognisable terms lives in Python, and a vocabulary row is
+created — transactionally, inside the same write as the requirement that needed
+it — the first time a real posting is found to require that term. Three hundred
+pre-inserted names would be three hundred rows nobody observed, and a later
+reader could not tell them from the ones a posting produced.
+
+Canonical keys come from the Phase 3.4A normalizer, not from a second one, so
+the offer side and the profile side compute the same key for the same
+technology. An existing row is reused and **never renamed**: one profile
+spelling a skill differently must not change what the other side reads. A term
+that no posting requires any more is left in `skills`, exactly as `0008` allows
+— it is vocabulary, not a claim.
+
+### What produces a row, and what does not
+
+A requirement needs a section that says the items under it are demands or
+preferences, or a sentence that says so itself. These produce **nothing**:
+
+```text
+Our stack includes Python, Spark and Kafka.   -> nothing
+You will build pipelines using Python.        -> nothing
+We use SQL across the company.                -> nothing
+Training in Python will be provided.          -> nothing
+No prior Python experience is required.       -> nothing
+```
+
+Signals are read in a fixed order: a cancelling clause, then a local marker,
+then the section, then nothing. So `Python preferred` under `Required
+Qualifications` is `PREFERRED`, and `Must have strong Python skills` is
+`REQUIRED` with no section at all. An unrecognised title-shaped line resets the
+context to neutral rather than letting a requirements heading leak downward.
+
+**The unit is the clause, not the sentence.** Two technologies in one sentence
+can carry two different levels, and one of them can be cancelled without
+touching the other:
+
+```text
+Python required and Spark preferred.                 -> Python REQUIRED, Spark PREFERRED
+Python preferred and SQL required.                   -> Python PREFERRED, SQL REQUIRED
+No Python experience required, but SQL is required.  -> SQL REQUIRED only
+```
+
+The cut happens only in the text **between** two matched terms and only at a
+connector, so terms joined by a bare connector stay in one clause: `Python and
+SQL required` is two requirements and `Python, SQL and Spark required` is three.
+This is a different question from one technology named twice, where `REQUIRED`
+still beats `PREFERRED`.
+
+Matching is on token boundaries that are **Unicode-aware** and that know about
+`+`, `#`, `&` and combining marks, and on longest-alias-first, non-overlapping
+spans: `PostgreSQL` never yields `SQL`, `PySpark` never yields `Spark`,
+`Google` never yields `Go`, `C`, `C++` and `C#` are three technologies, and
+`Réseaux`, `Régression`, `Réalisation` and `Câblage` yield nothing at all. One-
+and two-character aliases must be written as the catalogue writes them, so
+ordinary prose cannot produce `Go`, `C` or `R`.
+
+### Alternatives are refused, on the record
+
+"Python or R required" states one requirement satisfiable two ways. Storing
+`Python REQUIRED` **and** `R REQUIRED` would turn the employer's choice into
+two obligations, and would let a later phase reject somebody the posting would
+have accepted with either. So neither is stored, and a row lands in
+`opportunity_requirement_ambiguities` — because without it, an explicit demand
+this version cannot represent would be indistinguishable from a posting that
+never mentioned either technology.
+
+`and` still gives two requirements.
+
+### A bare slash is not an `or`, and not an `and`
+
+Running the extractor over the real corpus produced 175 refusals, and most were
+right: `Python or JavaScript`, `AWS, GCP, or Azure`,
+`TensorFlow, PyTorch, or HuggingFace` and `English, Dutch or French` are choices
+and stay refused. One recurring family was not a choice at all —
+`AI/ML engineering`, `AI/ML APIs`, `ML/LLM-powered system`. Nobody writing those
+is offering to accept either half; it is one field written with a slash.
+
+Neither available reading was right, so a third exists. A closed registry —
+`COMPOUND_SKILL_EXPRESSIONS` in `requirements/skill_catalog.py`, keyed by
+**canonical skill key** so `AI/ML` and `ML/AI` are one entry and every alias is
+covered — names the slashed expressions that mean one thing. They are refused
+under `COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`: neither half is stored, and the
+row says the posting used a combined expression this version cannot represent.
+
+Everything else keeps the conservative reading. `Python/R`,
+`JavaScript/TypeScript`, `C/C++` and `TensorFlow/PyTorch` are refused as
+choices, `Python/Julia` is guarded even though the catalogue knows one half,
+and `and/or` is a written `or`. There is no rule of the shape "two AI skills
+around a slash are one expression", and nothing turns a slash into a
+conjunction.
+
+`bilingual English/French` still gives two languages, and so does
+`Bilingualism (English/French) is a significant asset` — the marker knows the
+nouns (`bilingualism`, `bilinguisme`) as well as the adjectives, because that is
+how the corpus wrote it. Without such a marker, `English/French required` stays
+refused; with an explicit `or`, so does `Bilingual English or French required`.
+
+### One refusal per thing refused
+
+An ambiguity row holds the kind, the reason, the rule, the fragment and the
+heading — and deliberately **not** the terms of the group it refused, since
+storing those would be storing half a requirement. So when one sentence produces
+two refusals agreeing on all five fields, the second carries nothing the first
+does not, and only the first is kept; positions are then renumbered from zero.
+Two refusals differing in any field — a different fragment, a different reason,
+a different kind — are two facts and both survive.
+
+### Language proficiency is never translated
+
+`B2` is stored as `B2`, `Fluent` as `Fluent`, `Native` as `Native`. Nothing maps
+`Fluent` to `C1` or `Native` to `C2`: those are somebody's convention, not the
+employer's sentence, and `profile_languages` in `0010` keeps proficiency as
+written for the same reason.
+
+No language is inferred from a country, a city, a nationality, a company name or
+the language the advertisement itself is written in. A posting written in
+English has not required English; a posting in Paris has not required French;
+"work with English-speaking customers" and "the French market" are descriptions
+of work, not demands.
+
+When one posting demands one language at two incompatible levels — "English B2
+required" beside "English C1 required" — the language stays `REQUIRED`, because
+that part is not in dispute, and only `proficiency_text` becomes `NULL`, with a
+`CONFLICTING_LANGUAGE_PROFICIENCY` ambiguity saying why. A `PREFERRED` mention
+naming another level does not blur a `REQUIRED` one: only observations at the
+projected level are consulted.
+
+### Evidence
+
+`evidence_text` is the minimal fragment, capped at 200 characters — a pointer
+into the posting, never a copy of it. `context_heading_text` is the heading the
+fragment sat under, stored **separately and verbatim**: a posting whose
+"Required Qualifications" section lists "Python" is explained by two texts, not
+by an invented sentence reading "Required Qualifications > Python".
+
+`observed_requirement` is what *this* fragment stated. A posting that preferred
+Python in one line and required it in another projects one `REQUIRED` row and
+keeps both mentions, and the preferred one still reads `PREFERRED` — so an
+audit never finds a fragment claiming to have demanded something it did not.
+
+### Idempotence
+
+`extractor_version` is `REQUIREMENT_EXTRACTOR_VERSION`
+(`opportunity-requirements-v3`), the version of the code that produced the row,
+and no caller can name another. `v2` made token boundaries Unicode-aware and
+moved a requirement's level from the sentence to the clause; `v3` separated the
+slash from the `or`, taught the bilingual marker its nouns, and deduplicated
+identical refusals. Each changes what a given description reads as, so an older
+row is recomputed rather than trusted. It is deliberately **not**
+`opportunity-constraints-v3`: 3.5A and 3.5B change for different reasons, and
+one shared label would make every skill fix recompute every start date.
+
+`source_fingerprint` is a SHA-256 over canonical JSON of exactly the field 3.5B
+reads — the **description**, and nothing else. Not the title: a title names a
+role, and a name is not a demand. Not the location or the country: neither says
+anything about a skill or a language. Putting an unread field in the digest
+would make an edit nobody's rules looked at recompute every posting.
+
+`opportunity_requirement_extraction_state` is what makes zero an answer. A
+posting that names no technology and no language produces no requirement row,
+no evidence row and no ambiguity row — and so does a posting nobody has run the
+extractor over. The state row tells the two apart, so a coverage figure never
+counts unread postings as postings requiring nothing.
+
+One posting is written whole or not at all: the vocabulary it needs, its skill
+requirements, their evidence, its language requirements, their evidence, its
+ambiguities and its state, in one transaction. A failure rolls back everything,
+the newly created `skills` rows included, so a requirement never survives
+without its evidence and a state row never claims an extraction that partly
+failed.
+
+### Not implemented by `0013`
+
+No opportunity is compared to a profile. No query in the whole slice names
+`profiles`, `profile_skills`, `profile_languages` or `profile_facts`. No
+eligibility result, no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no `candidate_has`, no
+`missing_skill`, no `skill_gap`, no `match_score`, no TF-IDF, no cosine
+similarity, no embedding, no fuzzy matching, no ranking, no recommendation, no
+notification and no auto-apply. There is no `confidence` and no `score` column.
+There is no HTTP endpoint and no remote write path over these tables, and no
+LLM, model download or network call takes part in producing a single row.
