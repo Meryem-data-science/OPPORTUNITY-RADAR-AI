@@ -110,7 +110,7 @@ def test_status_on_an_unprojected_database_reports_nothing_known(
     assert summary["projected"] == "0"
     assert summary["not_projected"] == "2"
     assert summary["known_visa_sponsorship"] == "0"
-    assert summary["extractor_version"] == "opportunity-constraints-v2"
+    assert summary["extractor_version"] == "opportunity-constraints-v3"
 
 
 def test_sync_projects_the_postings_and_reports_counters(

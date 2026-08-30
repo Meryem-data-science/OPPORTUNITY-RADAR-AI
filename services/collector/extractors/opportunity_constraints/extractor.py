@@ -10,6 +10,11 @@ change" is a decidable question rather than a guess.
 
 Two decisions live here rather than in the rules.
 
+One relation is applied before a disagreement is declared, and only one: the
+four specific internship kinds are `INTERNSHIP` said more precisely, so a
+posting naming both keeps the precise one. See `SPECIFIC_INTERNSHIP_TYPES`;
+two specific kinds still conflict.
+
 **Conflict resolution, which is mostly a refusal to resolve.** Rules produce
 hits; hits land in slots; a slot holding two different values is a
 contradiction in the posting, and a contradiction is recorded rather than
@@ -54,6 +59,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     OpportunityType,
     Slot,
     SourceField,
+    more_specific_internship,
     StartRequirement,
     VisaSponsorship,
     WorkAuthorization,
@@ -139,6 +145,16 @@ def _settle_opportunity_type(hits: Sequence[RuleHit]):
         distinct = {hit.value_key: hit.value for hit in tier}
         if len(distinct) == 1:
             return tier[0].value, tier, None
+        # A posting calling itself a `stage` and, elsewhere, a `PFE` is not
+        # disagreeing with itself: the second name is the first one said more
+        # precisely. Only that one relation is applied, and only when exactly
+        # one specific kind is in play — two of them is a real disagreement.
+        specific = more_specific_internship(set(distinct.values()))
+        if specific is not None:
+            # The evidence kept is the evidence for what was asserted, so an
+            # auditor never reads a row whose value the projection does not
+            # hold.
+            return specific, tuple(hit for hit in tier if hit.value is specific), None
         return None, tier, ConstraintConflict(
             slot=Slot.OPPORTUNITY_TYPE,
             values=tuple(sorted(distinct)),

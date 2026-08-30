@@ -932,6 +932,12 @@ an `OpportunitySource` value object and returns an `ExtractedConstraints`,
 which is what makes it testable in memory against real postings without writing
 anywhere.
 
+**One hierarchy relation is modelled, and only one.** The four specific
+internship kinds are `INTERNSHIP` said more precisely, so a posting naming both
+keeps the precise one instead of being reported as contradicting itself — the
+last of those 46 conflicts. Two specific kinds still disagree: a posting cannot
+be both a PFE and a PFA, and an alternance is not an internship at all.
+
 **The Phase 2 classifier outranks the description** for the opportunity type:
 title first, then the classifier, then the description. The classifier is a
 versioned reading whose whole subject is the type of an opportunity; a

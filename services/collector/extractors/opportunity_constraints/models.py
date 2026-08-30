@@ -52,7 +52,12 @@ from services.digital_twin.preferences.models import OpportunityType, WorkMode
 #: incidental mentions of a type or a work mode, and keeps a conflict for what
 #: a conflict means: one global property of the offer, asserted two
 #: incompatible ways.
-EXTRACTOR_VERSION = "opportunity-constraints-v2"
+#:
+#: `v3` is the last of those 46 conflicts. A posting described as a `stage` and
+#: also, explicitly, as a `PFE` was being reported as contradicting itself, and
+#: it is not: a PFE **is** an internship, named more precisely. See
+#: `SPECIFIC_INTERNSHIP_TYPES`.
+EXTRACTOR_VERSION = "opportunity-constraints-v3"
 
 #: The longest evidence fragment stored for one rule match. Evidence is a
 #: pointer to why a value was asserted, not a copy of the posting: storing a
@@ -75,10 +80,12 @@ __all__ = [
     "ExperienceRequirement",
     "ExtractedConstraints",
     "MULTI_VALUED_SLOTS",
+    "more_specific_internship",
     "OpportunityConstraintError",
     "OpportunitySource",
     "OpportunityType",
     "SLOT_KINDS",
+    "SPECIFIC_INTERNSHIP_TYPES",
     "Slot",
     "SourceField",
     "StartRequirement",
@@ -262,6 +269,22 @@ class StartPrecision(StrEnum):
     YEAR = "YEAR"
 
 
+#: The four internship kinds that are `INTERNSHIP` said more precisely.
+#:
+#: This is the whole hierarchy this package models, and it is deliberately not
+#: a general one. A posting saying "stage" in one line and "PFE" in another is
+#: not disagreeing with itself; the second line says the same thing with the
+#: name that carries more information, so the specific reading wins and no
+#: contradiction is recorded.
+#:
+#: The relation holds in one direction and between one generic type and these
+#: four only. Two *specific* kinds that disagree still conflict — a posting
+#: cannot be both a PFE and a PFA, and `SUMMER_INTERNSHIP` beside
+#: `PRE_HIRE_INTERNSHIP` is a real disagreement about what the internship is
+#: for. Nothing here ranks `ALTERNANCE` against anything: an alternance is not
+#: an internship, and a posting claiming both is contradicting itself.
+SPECIFIC_INTERNSHIP_TYPES: frozenset = frozenset()
+
 #: The slots that hold a list rather than a value. A second entry in one of
 #: them is another answer, never a contradiction, so none of them can appear in
 #: `opportunity_constraint_conflicts` and the migration's slot registry leaves
@@ -283,6 +306,34 @@ SLOT_KINDS: dict[Slot, ConstraintKind] = {
 }
 
 MULTI_VALUED_SLOTS = frozenset({Slot.EDUCATION, Slot.EXPERIENCE, Slot.LOCATION})
+
+SPECIFIC_INTERNSHIP_TYPES = frozenset(
+    {
+        OpportunityType.PFE,
+        OpportunityType.PFA,
+        OpportunityType.SUMMER_INTERNSHIP,
+        OpportunityType.PRE_HIRE_INTERNSHIP,
+    }
+)
+
+
+def more_specific_internship(
+    values: "frozenset[OpportunityType] | set[OpportunityType]",
+) -> "OpportunityType | None":
+    """The one specific kind a set of readings agrees on, or None.
+
+    Returns a value only when the set is exactly the generic `INTERNSHIP` plus
+    **one** specific kind. Two specific kinds is a real disagreement and gets
+    `None`, so the caller records a conflict; so does anything that is not an
+    internship at all.
+    """
+    if OpportunityType.INTERNSHIP not in values:
+        return None
+    others = set(values) - {OpportunityType.INTERNSHIP}
+    if len(others) != 1:
+        return None
+    specific = next(iter(others))
+    return specific if specific in SPECIFIC_INTERNSHIP_TYPES else None
 
 
 @dataclass(frozen=True)

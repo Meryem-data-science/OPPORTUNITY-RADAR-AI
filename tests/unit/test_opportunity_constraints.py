@@ -12,6 +12,9 @@ reads exactly like one the posting wrote.
 
 import pytest
 
+from services.collector.extractors.opportunity_constraints.rules import (
+    TYPE_FIELD_PRECEDENCE,
+)
 from services.collector.extractors.opportunity_constraints.extractor import (
     FINGERPRINT_FIELDS,
     extract_opportunity_constraints,
@@ -22,6 +25,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     MAX_EVIDENCE_LENGTH,
     MULTI_VALUED_SLOTS,
     SLOT_KINDS,
+    SPECIFIC_INTERNSHIP_TYPES,
     ConstraintConflict,
     ConstraintKind,
     ConventionRequirement,
@@ -35,6 +39,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     Slot,
     SourceField,
     StartPrecision,
+    more_specific_internship,
     VisaSponsorship,
     WorkAuthorization,
     WorkMode,
@@ -71,7 +76,7 @@ def test_the_opportunity_type_registry_is_the_one_the_profile_side_uses() -> Non
 
 
 def test_the_extractor_version_is_the_documented_one() -> None:
-    assert EXTRACTOR_VERSION == "opportunity-constraints-v2"
+    assert EXTRACTOR_VERSION == "opportunity-constraints-v3"
 
 
 # --------------------------------------------------------------------------
@@ -959,3 +964,127 @@ def test_two_global_declarations_that_disagree_are_still_a_conflict_O() -> None:
     assert result.work_mode is None
     assert [conflict.slot for conflict in result.conflicts] == [Slot.WORK_MODE]
     assert result.conflicts[0].values == ("ON_SITE", "REMOTE")
+
+
+# --------------------------------------------------------------------------
+# A PFE is an internship, named more precisely
+# --------------------------------------------------------------------------
+#
+# The last of the 46 conflicts the v1 rules produced over 373 real postings: a
+# listing described as a `stage` that also, explicitly, called itself a PFE was
+# reported as contradicting itself. It was not. One relation is modelled — the
+# four specific internship kinds are `INTERNSHIP` said precisely — and nothing
+# beyond it.
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    (
+        (
+            "Vous serez stagiaire dans notre équipe.\nCe PFE porte sur la data.",
+            OpportunityType.PFE,
+        ),
+        (
+            "Offre de stage data.\nIl s'agit d'un PFA encadré.",
+            OpportunityType.PFA,
+        ),
+        (
+            "This internship runs in our data team.\n"
+            "A summer internship in analytics.",
+            OpportunityType.SUMMER_INTERNSHIP,
+        ),
+        (
+            "An internship in our data team.\nThis is a pre-hire internship.",
+            OpportunityType.PRE_HIRE_INTERNSHIP,
+        ),
+    ),
+    ids=("PFE", "PFA", "SUMMER_INTERNSHIP", "PRE_HIRE_INTERNSHIP"),
+)
+def test_a_specific_internship_kind_beats_the_generic_one(description, expected) -> None:
+    result = read(description)
+
+    assert result.opportunity_type is expected
+    assert result.conflicts == ()
+
+
+def test_the_evidence_kept_is_the_evidence_for_what_was_asserted() -> None:
+    """An auditor never reads a row whose value the projection does not hold."""
+    result = read("Vous serez stagiaire.\nCe PFE porte sur la data.")
+
+    assert result.opportunity_type is OpportunityType.PFE
+    assert [
+        item.normalized_value
+        for item in result.evidence_for(ConstraintKind.OPPORTUNITY_TYPE)
+    ] == ["PFE"]
+
+
+@pytest.mark.parametrize(
+    "description,expected_values",
+    (
+        (
+            "Ce PFE porte sur la data.\nIl s'agit aussi d'un PFA.",
+            ("PFA", "PFE"),
+        ),
+        (
+            "Ce PFE porte sur la data.\nContrat en alternance.",
+            ("ALTERNANCE", "PFE"),
+        ),
+        (
+            "A summer internship in analytics.\nThis is a pre-hire internship.",
+            ("PRE_HIRE_INTERNSHIP", "SUMMER_INTERNSHIP"),
+        ),
+    ),
+    ids=("PFE_PFA", "PFE_ALTERNANCE", "SUMMER_PRE_HIRE"),
+)
+def test_two_specific_kinds_that_disagree_are_still_a_conflict(
+    description, expected_values
+) -> None:
+    """The relation is one generic type against one specific one, and no more.
+
+    A posting cannot be both a PFE and a PFA, an alternance is not an
+    internship at all, and whether an internship is a summer one or a pre-hire
+    one is a real disagreement about what it is for.
+    """
+    result = read(description)
+
+    assert result.opportunity_type is None
+    assert [conflict.values for conflict in result.conflicts] == [expected_values]
+
+
+def test_the_relation_names_exactly_four_kinds() -> None:
+    assert SPECIFIC_INTERNSHIP_TYPES == {
+        OpportunityType.PFE,
+        OpportunityType.PFA,
+        OpportunityType.SUMMER_INTERNSHIP,
+        OpportunityType.PRE_HIRE_INTERNSHIP,
+    }
+
+
+def test_the_relation_refuses_anything_that_is_not_one_generic_and_one_specific() -> None:
+    assert more_specific_internship(
+        {OpportunityType.INTERNSHIP, OpportunityType.PFE}
+    ) is OpportunityType.PFE
+    # Two specific kinds, no generic one, and a non-internship all get None.
+    assert more_specific_internship(
+        {OpportunityType.INTERNSHIP, OpportunityType.PFE, OpportunityType.PFA}
+    ) is None
+    assert more_specific_internship({OpportunityType.PFE, OpportunityType.PFA}) is None
+    assert more_specific_internship(
+        {OpportunityType.INTERNSHIP, OpportunityType.ALTERNANCE}
+    ) is None
+    assert more_specific_internship(
+        {OpportunityType.INTERNSHIP, OpportunityType.JUNIOR_ROLE}
+    ) is None
+
+
+def test_the_precedence_between_fields_is_unchanged() -> None:
+    """The relation applies inside one tier; it does not reorder the tiers."""
+    assert TYPE_FIELD_PRECEDENCE == (
+        SourceField.TITLE,
+        SourceField.QUALIFICATION_TYPE,
+        SourceField.DESCRIPTION,
+    )
+    # A title still settles it against anything the description says.
+    assert read(
+        "This is an alternance contract.", title="PFE Data Engineer"
+    ).opportunity_type is OpportunityType.PFE

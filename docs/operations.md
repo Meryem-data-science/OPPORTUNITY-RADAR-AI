@@ -916,6 +916,13 @@ declaration attached to the role does. A date written as `01/02/2027` is two dif
 reader's country, so it is not read at all; a month with no year keeps no year,
 never the current one.
 
+**A PFE is an internship, named precisely.** A posting calling itself a
+`stage` in one line and a `PFE` in another is not disagreeing with itself, so
+the precise kind wins and nothing is recorded as a conflict. That one relation
+holds between the generic `INTERNSHIP` and the four specific kinds — `PFE`,
+`PFA`, `SUMMER_INTERNSHIP`, `PRE_HIRE_INTERNSHIP` — and nowhere else: a posting
+claiming both a PFE and a PFA, or a PFE and an alternance, still conflicts.
+
 **Contradictions stop an assertion rather than being settled.** "Fully remote"
 three lines above "fully on-site" leaves `work_mode` unset and writes a row to
 `opportunity_constraint_conflicts` naming both values and both rules. A conflict
@@ -950,7 +957,7 @@ one:
 | `projected` / `not_projected` | `status` only: how many hold a stored reading |
 | `known_opportunity_type` … `known_convention` | how many postings **stated** each thing. Never how many are suitable: there is nobody to be suitable for. `known_experience` counts postings holding at least one requirement, not requirements |
 | `conflicts` | how many contradictions were recorded rather than settled |
-| `extractor_version` | `opportunity-constraints-v2` |
+| `extractor_version` | `opportunity-constraints-v3` |
 | `changed` | `false` when the run found every projection already correct |
 
 A `known_*` count is a property of how postings are written. A low

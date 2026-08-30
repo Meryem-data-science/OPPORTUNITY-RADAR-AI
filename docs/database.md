@@ -1334,6 +1334,11 @@ itself. `UNIQUE (opportunity_id, constraint_slot)` is the key, and
 `constraint_kind` stays for browsing, derived from the slot in code so the two
 cannot drift apart.
 
+One relation is applied before a disagreement is declared: the four specific
+internship kinds — `PFE`, `PFA`, `SUMMER_INTERNSHIP`, `PRE_HIRE_INTERNSHIP` —
+are `INTERNSHIP` said more precisely, so a posting naming both stores the
+precise one and no conflict. Two specific kinds still conflict.
+
 `EDUCATION`, `EXPERIENCE` and `LOCATION` are absent from the slot registry:
 several levels, several requirements or several places are several answers,
 never a disagreement. A conflict now means one thing only — **the same global
