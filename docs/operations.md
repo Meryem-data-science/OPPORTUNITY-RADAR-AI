@@ -912,7 +912,10 @@ never the current one.
 
 **Contradictions stop an assertion rather than being settled.** "Fully remote"
 three lines above "fully on-site" leaves `work_mode` unset and writes a row to
-`opportunity_constraint_conflicts` naming both values and both rules. The one
+`opportunity_constraint_conflicts` naming both values and both rules. A conflict
+is keyed by the slot that disagreed, so a posting asking for "minimum 3 years
+required" and "at least 5 years preferred" records two conflicts — one about
+the quantity, one about the obligation — instead of colliding on one row. The one
 exception is the opportunity type, where the title outranks the description,
 exactly as the Phase 2 classifier already decides it.
 
@@ -921,7 +924,9 @@ the field it was read from, and the minimal fragment matched — capped at 200
 characters, so evidence stays a pointer into the posting rather than a copy of
 it. There is no confidence and no score.
 
-Re-running is expected and cheap. Idempotence is `(source_fingerprint,
+Re-running is expected and cheap. `extractor_version` is fixed by the code and
+cannot be passed in: a label a caller could choose per run would stop naming
+the rules that produced the rows. Idempotence is `(source_fingerprint,
 extractor_version)`: an unchanged posting is skipped entirely — no delete, no
 insert, no timestamp moved — an edited description is re-extracted whole, and a
 new extractor version re-extracts even identical text. A second run reports

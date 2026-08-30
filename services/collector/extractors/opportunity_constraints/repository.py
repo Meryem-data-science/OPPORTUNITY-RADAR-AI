@@ -49,6 +49,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     ExperienceRequirement,
     ExtractedConstraints,
     OpportunityType,
+    Slot,
     SourceField,
     StartPrecision,
     StartRequirement,
@@ -196,10 +197,11 @@ def _insert(
     for conflict in constraints.conflicts:
         connection.execute(
             "INSERT INTO opportunity_constraint_conflicts (opportunity_id, "
-            "constraint_kind, conflicting_values_json, rule_ids_json) "
-            "VALUES (?, ?, ?, ?)",
+            "constraint_slot, constraint_kind, conflicting_values_json, "
+            "rule_ids_json) VALUES (?, ?, ?, ?, ?)",
             (
                 constraints.opportunity_id,
+                conflict.slot.value,
                 conflict.kind.value,
                 _canonical_json(conflict.values),
                 _canonical_json(conflict.rule_ids),
@@ -310,14 +312,14 @@ def read_opportunity_constraints(
     )
     conflicts = tuple(
         ConstraintConflict(
-            kind=ConstraintKind(str(item[0])),
+            slot=Slot(str(item[0])),
             values=tuple(json.loads(item[1])),
             rule_ids=tuple(json.loads(item[2])),
         )
         for item in connection.execute(
-            "SELECT constraint_kind, conflicting_values_json, rule_ids_json "
+            "SELECT constraint_slot, conflicting_values_json, rule_ids_json "
             "FROM opportunity_constraint_conflicts "
-            "WHERE opportunity_id = ? ORDER BY constraint_kind",
+            "WHERE opportunity_id = ? ORDER BY constraint_slot",
             (opportunity_id,),
         )
     )

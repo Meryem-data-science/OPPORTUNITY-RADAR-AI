@@ -20,13 +20,17 @@ from services.collector.extractors.opportunity_constraints.extractor import (
 from services.collector.extractors.opportunity_constraints.models import (
     EXTRACTOR_VERSION,
     MAX_EVIDENCE_LENGTH,
+    SLOT_KINDS,
+    ConstraintConflict,
     ConstraintKind,
     ConventionRequirement,
     EducationLevel,
     EducationRequirementMode,
     ExperienceObligation,
+    OpportunityConstraintError,
     OpportunitySource,
     OpportunityType,
+    Slot,
     SourceField,
     StartPrecision,
     VisaSponsorship,
@@ -547,6 +551,7 @@ def test_two_contradicting_work_modes_assert_nothing() -> None:
     assert result.work_mode is None
     assert len(result.conflicts) == 1
     conflict = result.conflicts[0]
+    assert conflict.slot is Slot.WORK_MODE
     assert conflict.kind is ConstraintKind.WORK_MODE
     assert conflict.values == ("ON_SITE", "REMOTE")
     assert len(conflict.rule_ids) == 2
@@ -697,3 +702,128 @@ def test_the_reading_carries_no_verdict_and_no_number_to_compare() -> None:
         "confidence", "weight", "recommendation", "profile_id",
     ):
         assert forbidden not in fields
+
+
+# --------------------------------------------------------------------------
+# A contradiction belongs to a slot, not to a kind
+# --------------------------------------------------------------------------
+
+
+def test_one_posting_can_contradict_itself_twice_about_experience() -> None:
+    """Two slots, two contradictions, two answers.
+
+    How much experience a posting wants and whether it insists are separate
+    questions, so they can disagree separately. Keyed by kind these would have
+    been one row — and the second would have been refused by the database.
+    """
+    result = read(
+        "Minimum 3 years of experience required.\n"
+        "At least 5 years of experience preferred."
+    )
+
+    assert result.conflicting_slots == {
+        Slot.EXPERIENCE_BOUNDS,
+        Slot.EXPERIENCE_OBLIGATION,
+    }
+    assert result.conflicting_kinds == {ConstraintKind.EXPERIENCE}
+    assert not result.experience.known
+    assert result.experience.obligation is ExperienceObligation.UNKNOWN
+
+
+def test_the_two_experience_contradictions_keep_their_own_values() -> None:
+    """Bounds and obligations are never merged into one list of "values"."""
+    result = read(
+        "Minimum 3 years of experience required.\n"
+        "At least 5 years of experience preferred."
+    )
+    by_slot = {conflict.slot: conflict for conflict in result.conflicts}
+
+    assert by_slot[Slot.EXPERIENCE_BOUNDS].values == ("36-", "60-")
+    assert by_slot[Slot.EXPERIENCE_OBLIGATION].values == ("PREFERRED", "REQUIRED")
+
+
+def test_a_conflict_derives_its_kind_from_its_slot() -> None:
+    """The two can never drift apart, because only one of them is passed in."""
+    for slot, kind in SLOT_KINDS.items():
+        if slot in (Slot.EDUCATION, Slot.LOCATION):
+            continue
+        conflict = ConstraintConflict(slot=slot, values=("A", "B"), rule_ids=("R",))
+        assert conflict.kind is kind
+
+
+@pytest.mark.parametrize("slot", (Slot.EDUCATION, Slot.LOCATION))
+def test_a_multi_valued_slot_cannot_hold_a_conflict(slot) -> None:
+    """Several levels or several places are several answers, never a dispute."""
+    with pytest.raises(OpportunityConstraintError):
+        ConstraintConflict(slot=slot, values=("A", "B"), rule_ids=("R",))
+
+
+def test_several_locations_are_never_a_conflict() -> None:
+    result = read("A role.", location="Ville Exemple", country="Pays Exemple")
+
+    assert result.locations == ("Ville Exemple", "Pays Exemple")
+    assert result.conflicts == ()
+
+
+# --------------------------------------------------------------------------
+# A projected location is explainable, like every other value
+# --------------------------------------------------------------------------
+
+
+def test_a_location_alone_is_projected_with_its_evidence() -> None:
+    result = read("A role.", location="Ville Exemple")
+
+    assert result.locations == ("Ville Exemple",)
+    evidence = result.evidence_for(ConstraintKind.LOCATION)
+    assert len(evidence) == 1
+    assert evidence[0].source_field is SourceField.LOCATION
+    assert evidence[0].rule_id == "LOCATION_COLLECTED_FIELD_V1"
+    assert evidence[0].text == "Ville Exemple"
+    assert evidence[0].normalized_value == "Ville Exemple"
+
+
+def test_a_country_alone_is_projected_with_its_evidence() -> None:
+    result = read("A role.", country="Pays Exemple")
+
+    assert result.locations == ("Pays Exemple",)
+    evidence = result.evidence_for(ConstraintKind.LOCATION)
+    assert len(evidence) == 1
+    assert evidence[0].source_field is SourceField.COUNTRY
+    assert evidence[0].rule_id == "COUNTRY_COLLECTED_FIELD_V1"
+
+
+def test_a_location_and_a_country_are_two_places_and_two_proofs() -> None:
+    result = read("A role.", location="Ville Exemple", country="Pays Exemple")
+    evidence = result.evidence_for(ConstraintKind.LOCATION)
+
+    assert result.locations == ("Ville Exemple", "Pays Exemple")
+    assert [item.source_field for item in evidence] == [
+        SourceField.LOCATION,
+        SourceField.COUNTRY,
+    ]
+    assert [item.normalized_value for item in evidence] == [
+        "Ville Exemple",
+        "Pays Exemple",
+    ]
+
+
+def test_no_collected_place_means_no_location_and_no_evidence() -> None:
+    result = read("A role with no address anywhere in it.")
+
+    assert result.locations == ()
+    assert result.evidence_for(ConstraintKind.LOCATION) == ()
+
+
+def test_a_place_written_twice_is_projected_once_and_explained_once() -> None:
+    """Otherwise one row would carry two proofs and look corroborated."""
+    result = read("A role.", location="Ville Exemple", country="Ville Exemple")
+
+    assert result.locations == ("Ville Exemple",)
+    assert len(result.evidence_for(ConstraintKind.LOCATION)) == 1
+
+
+def test_a_collected_place_is_trimmed_and_never_expanded() -> None:
+    """No geocoding, no country from a city, no city from a country."""
+    result = read("A role.", location="  Ville Exemple  ")
+
+    assert result.locations == ("Ville Exemple",)

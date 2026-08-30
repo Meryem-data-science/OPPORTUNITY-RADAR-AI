@@ -955,13 +955,18 @@ states neither an agreement nor a duration nor a student.
 
 **Contradictions are recorded, not resolved.** Two strong readings that
 disagree leave the field UNKNOWN and write a conflict row naming the values and
-the rules. The one documented exception is the opportunity type, where the
+the rules. The unit is the **slot**, not the kind: a posting can disagree with
+itself about how much experience it wants and, separately, about whether it
+insists, and those are two contradictions with two answers rather than one row
+mixing `36-` with `REQUIRED`. The one documented exception is the opportunity type, where the
 title outranks the description — the precedent is the Phase 2 classifier, which
 already decides it that way, and a posting titled "PFE" whose body says
 "internship" is not contradicting itself.
 
-**Everything asserted is explainable.** Each value carries the rule id, the
-source field and the minimal fragment matched, capped so evidence stays a
+**Everything asserted is explainable**, projected places included: a location
+read from the collected `location` or `country` field carries its own rule and
+its own evidence, so no projection is a value a reader cannot trace. Each value
+carries the rule id, the source field and the minimal fragment matched, capped so evidence stays a
 pointer into the posting rather than a copy of it. There is no confidence and
 no score: a rule fired or it did not.
 

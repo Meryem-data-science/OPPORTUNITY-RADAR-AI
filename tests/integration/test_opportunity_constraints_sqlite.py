@@ -13,6 +13,7 @@ state, or grow a column that compares a posting to a person.
 """
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from services.collector.extractors.opportunity_constraints.extractor import (
 from services.collector.extractors.opportunity_constraints.models import (
     EXTRACTOR_VERSION,
     ConstraintKind,
+    Slot,
     ConventionRequirement,
     EducationLevel,
     OpportunitySource,
@@ -128,6 +130,17 @@ def source_of(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def executable_sql(path: Path) -> str:
+    """A migration's statements, with its `--` commentary removed.
+
+    The guards below are about what the migration *does*. `0012` explains at
+    length why a `RESTRICT` foreign key refuses to drop a vocabulary row, and a
+    guard that read its own explanation as a violation would be a guard nobody
+    could write comments around.
+    """
+    return re.sub(r"--[^\n]*", "", source_of(path))
+
+
 def _tables(connection) -> set[str]:
     return {
         row[0]
@@ -182,7 +195,11 @@ def test_no_constraint_table_is_seeded(migrated, table) -> None:
 
 
 def test_migration_0012_alters_no_existing_table() -> None:
-    body = source_of(MIGRATION).upper()
+    # Executable SQL only: the prose explains *why* a `RESTRICT` foreign key
+    # refuses to drop a vocabulary row, and a guard that reads its own
+    # explanation as a violation would be a guard nobody can write comments
+    # around.
+    body = executable_sql(MIGRATION).upper()
     assert "ALTER TABLE" not in body
     assert "DROP" not in body
 
@@ -414,17 +431,58 @@ def test_a_changed_description_is_re_extracted(migrated, rich_opportunity) -> No
     assert stored.education == ()
 
 
-def test_a_new_extractor_version_re_extracts_identical_text(
+def test_a_projection_stored_under_an_older_version_is_re_extracted(
     migrated, rich_opportunity
 ) -> None:
+    """And comes back labelled with the version that actually read it.
+
+    The stored label has to describe the code that produced the rows. Before
+    this test the service accepted an `extractor_version` argument: passing a
+    different one forced a recomputation, but the reading carried
+    `EXTRACTOR_VERSION` of its own, so the projection was written back under
+    v1 while the caller believed it had asked for v2. The run looked right and
+    the label lied. There is no such argument now, and this asserts the label.
+    """
     synchronize_opportunity_constraints(migrated)
-
-    summary = synchronize_opportunity_constraints(
-        migrated, extractor_version="opportunity-constraints-test-v2"
+    migrated.execute(
+        "UPDATE opportunity_constraints SET extractor_version = ? WHERE opportunity_id = ?",
+        ("opportunity-constraints-v0", rich_opportunity),
     )
+    migrated.commit()
 
-    assert summary.replaced == 1
-    assert summary.unchanged == 0
+    summary = synchronize_opportunity_constraints(migrated)
+
+    assert (summary.replaced, summary.unchanged) == (1, 0)
+    assert summary.extractor_version == EXTRACTOR_VERSION
+    # The label now names the rules that read the posting, not a caller's wish.
+    assert stored_signature(migrated, rich_opportunity)[1] == EXTRACTOR_VERSION
+    assert read_opportunity_constraints(
+        migrated, rich_opportunity
+    ).extractor_version == EXTRACTOR_VERSION
+
+
+def test_no_caller_can_name_the_version_a_projection_is_stored_under() -> None:
+    """`EXTRACTOR_VERSION` is the contract; changing it means editing the code."""
+    import inspect
+
+    for function in (synchronize_opportunity_constraints, extract_one_opportunity):
+        assert "extractor_version" not in inspect.signature(function).parameters
+
+
+def test_extract_one_also_re_extracts_an_older_stored_version(
+    migrated, rich_opportunity
+) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+    migrated.execute(
+        "UPDATE opportunity_constraints SET extractor_version = ? WHERE opportunity_id = ?",
+        ("opportunity-constraints-v0", rich_opportunity),
+    )
+    migrated.commit()
+
+    _reading, written = extract_one_opportunity(migrated, rich_opportunity)
+
+    assert written
+    assert stored_signature(migrated, rich_opportunity)[1] == EXTRACTOR_VERSION
 
 
 def test_the_fingerprint_stored_is_the_one_the_source_produces(
@@ -574,3 +632,218 @@ def test_the_summary_counts_and_never_quotes(migrated, rich_opportunity) -> None
     assert summary["conflicts"] == 1
     for fragment in ("Casablanca", "sponsorship", "Convention", "remote", RICH_TITLE):
         assert fragment not in rendered
+
+
+# --------------------------------------------------------------------------
+# Two contradictions about experience, and one row each
+# --------------------------------------------------------------------------
+
+#: One posting disagreeing with itself about both experience slots at once.
+DOUBLE_CONFLICT_DESCRIPTION = (
+    "Minimum 3 years of experience required. "
+    "At least 5 years of experience preferred."
+)
+
+
+def test_two_experience_contradictions_are_stored_as_two_rows(migrated) -> None:
+    """Keyed by kind these collided on `UNIQUE (opportunity_id, kind)`.
+
+    The insert raised `IntegrityError` instead of producing the auditable
+    projection the whole slice exists to produce.
+    """
+    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
+
+    reading, written = extract_one_opportunity(migrated, opportunity_id)
+
+    assert written
+    rows = migrated.execute(
+        "SELECT constraint_slot, constraint_kind, conflicting_values_json "
+        "FROM opportunity_constraint_conflicts WHERE opportunity_id = ? "
+        "ORDER BY constraint_slot",
+        (opportunity_id,),
+    ).fetchall()
+    assert [row[0] for row in rows] == ["EXPERIENCE_BOUNDS", "EXPERIENCE_OBLIGATION"]
+    assert {row[1] for row in rows} == {"EXPERIENCE"}
+    # The two contradictions keep their own values rather than being merged.
+    assert json.loads(rows[0][2]) == ["36-", "60-"]
+    assert json.loads(rows[1][2]) == ["PREFERRED", "REQUIRED"]
+
+
+def test_neither_conflicting_part_of_experience_is_asserted(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
+    extract_one_opportunity(migrated, opportunity_id)
+
+    row = migrated.execute(
+        "SELECT experience_min_months, experience_max_months, experience_obligation "
+        "FROM opportunity_constraints WHERE opportunity_id = ?",
+        (opportunity_id,),
+    ).fetchone()
+
+    assert list(row) == [None, None, None]
+
+
+def test_the_double_conflict_survives_a_round_trip(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated, description=DOUBLE_CONFLICT_DESCRIPTION)
+    reading, _written = extract_one_opportunity(migrated, opportunity_id)
+
+    stored = read_opportunity_constraints(migrated, opportunity_id)
+
+    assert stored == reading
+    assert {conflict.slot for conflict in stored.conflicts} == {
+        Slot.EXPERIENCE_BOUNDS,
+        Slot.EXPERIENCE_OBLIGATION,
+    }
+    assert {conflict.kind for conflict in stored.conflicts} == {
+        ConstraintKind.EXPERIENCE
+    }
+
+
+def test_the_conflict_table_refuses_a_slot_outside_the_registry(
+    migrated, rich_opportunity
+) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_constraint_conflicts (opportunity_id, "
+            "constraint_slot, constraint_kind, conflicting_values_json, rule_ids_json) "
+            "VALUES (?, 'EDUCATION', 'EDUCATION', '[\"A\",\"B\"]', '[\"R\"]')",
+            (rich_opportunity,),
+        )
+
+
+def test_one_slot_holds_at_most_one_conflict(migrated, rich_opportunity) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+    values = (rich_opportunity, "WORK_MODE", "WORK_MODE", '["A","B"]', '["R"]')
+    migrated.execute(
+        "INSERT INTO opportunity_constraint_conflicts (opportunity_id, "
+        "constraint_slot, constraint_kind, conflicting_values_json, rule_ids_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        values,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_constraint_conflicts (opportunity_id, "
+            "constraint_slot, constraint_kind, conflicting_values_json, rule_ids_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            values,
+        )
+
+
+# --------------------------------------------------------------------------
+# A projected place is explainable
+# --------------------------------------------------------------------------
+
+
+def test_a_projected_location_carries_its_own_evidence(migrated) -> None:
+    opportunity_id = insert_opportunity(
+        migrated, location="Ville Exemple", country="Pays Exemple"
+    )
+    extract_one_opportunity(migrated, opportunity_id)
+
+    places = [
+        row[0]
+        for row in migrated.execute(
+            "SELECT location_text FROM opportunity_constraint_locations "
+            "WHERE opportunity_id = ? ORDER BY position",
+            (opportunity_id,),
+        )
+    ]
+    evidence = migrated.execute(
+        "SELECT source_field, rule_id, evidence_text, normalized_value "
+        "FROM opportunity_constraint_evidence "
+        "WHERE opportunity_id = ? AND constraint_kind = 'LOCATION' ORDER BY position",
+        (opportunity_id,),
+    ).fetchall()
+
+    assert places == ["Ville Exemple", "Pays Exemple"]
+    assert [row[0] for row in evidence] == ["LOCATION", "COUNTRY"]
+    assert [row[1] for row in evidence] == [
+        "LOCATION_COLLECTED_FIELD_V1",
+        "COUNTRY_COLLECTED_FIELD_V1",
+    ]
+    # Every projected place is explained, and nothing else is.
+    assert [row[3] for row in evidence] == places
+
+
+def test_a_posting_with_no_collected_place_projects_none(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated)
+    extract_one_opportunity(migrated, opportunity_id)
+
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+            (opportunity_id,),
+        ).fetchone()[0]
+    ) == 0
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_constraint_evidence "
+            "WHERE opportunity_id = ? AND constraint_kind = 'LOCATION'",
+            (opportunity_id,),
+        ).fetchone()[0]
+    ) == 0
+
+
+# --------------------------------------------------------------------------
+# The shared skills vocabulary is protected
+# --------------------------------------------------------------------------
+
+
+def test_a_skill_an_offer_requires_cannot_be_deleted_from_the_vocabulary(
+    migrated, rich_opportunity
+) -> None:
+    """`RESTRICT`, like `profile_skills` in `0008`.
+
+    `CASCADE` would let a vocabulary cleanup silently drop a requirement a
+    posting stated: the constraint would vanish without anybody deciding it
+    should.
+    """
+    migrated.execute("PRAGMA foreign_keys = ON")
+    extract_one_opportunity(migrated, rich_opportunity)
+    skill_id = int(
+        migrated.execute(
+            "INSERT INTO skills (canonical_key, canonical_name) "
+            "VALUES ('test-only-skill', 'TEST ONLY Skill') RETURNING id"
+        ).fetchone()[0]
+    )
+    # Written by hand: Phase 3.5A extracts no skill. This is the 3.5B socle.
+    migrated.execute(
+        "INSERT INTO opportunity_skill_requirements (opportunity_id, skill_id, "
+        "requirement, extractor_version) VALUES (?, ?, 'REQUIRED', ?)",
+        (rich_opportunity, skill_id, EXTRACTOR_VERSION),
+    )
+    migrated.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+
+
+def test_removing_the_posting_releases_the_vocabulary_reference(
+    migrated, rich_opportunity
+) -> None:
+    """The requirement goes with its posting, and then the term is free."""
+    migrated.execute("PRAGMA foreign_keys = ON")
+    extract_one_opportunity(migrated, rich_opportunity)
+    skill_id = int(
+        migrated.execute(
+            "INSERT INTO skills (canonical_key, canonical_name) "
+            "VALUES ('test-only-skill', 'TEST ONLY Skill') RETURNING id"
+        ).fetchone()[0]
+    )
+    migrated.execute(
+        "INSERT INTO opportunity_skill_requirements (opportunity_id, skill_id, "
+        "requirement, extractor_version) VALUES (?, ?, 'REQUIRED', ?)",
+        (rich_opportunity, skill_id, EXTRACTOR_VERSION),
+    )
+    migrated.commit()
+
+    migrated.execute("DELETE FROM opportunities WHERE id = ?", (rich_opportunity,))
+    migrated.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+    migrated.commit()
+
+    assert int(
+        migrated.execute("SELECT COUNT(*) FROM opportunity_skill_requirements").fetchone()[0]
+    ) == 0
+    assert int(migrated.execute("SELECT COUNT(*) FROM skills").fetchone()[0]) == 0

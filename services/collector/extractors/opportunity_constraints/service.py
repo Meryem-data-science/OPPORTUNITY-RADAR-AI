@@ -223,13 +223,23 @@ def extract_one_opportunity(
     connection: sqlite3.Connection,
     opportunity_id: int,
     *,
-    extractor_version: str = EXTRACTOR_VERSION,
     extracted_at: str | None = None,
 ) -> tuple[ExtractedConstraints, bool]:
     """Extract and store one posting. Returns the reading and whether it wrote.
 
     `False` means the stored fingerprint and version already matched, so
     nothing was rewritten — not even a timestamp.
+
+    There is no `extractor_version` argument, here or in
+    `synchronize_opportunity_constraints`, and that is deliberate.
+    `EXTRACTOR_VERSION` is the version of *this code*, so it is the only honest
+    label for what this code produced. A caller allowed to pass another one
+    could ask for a recomputation under a version it invented — the run would
+    dutifully re-extract, and then store the reading under the real version
+    anyway, because the reading carries its own. The label would say a v2
+    extractor produced these rows when a v1 extractor did, and the whole point
+    of storing a version is to know which rules explain a row. Making a new
+    version means editing `EXTRACTOR_VERSION`; the rows follow.
     """
     _require_schema(connection)
     source = load_opportunity_source(connection, opportunity_id)
@@ -240,7 +250,7 @@ def extract_one_opportunity(
     signature = stored_signature(connection, opportunity_id)
     fingerprint = source_fingerprint(source)
     reading = extract_opportunity_constraints(source)
-    if signature == (fingerprint, extractor_version):
+    if signature == (fingerprint, EXTRACTOR_VERSION):
         return reading, False
     store_opportunity_constraints(connection, reading, extracted_at=extracted_at)
     return reading, True
@@ -250,7 +260,6 @@ def synchronize_opportunity_constraints(
     connection: sqlite3.Connection,
     *,
     limit: int | None = None,
-    extractor_version: str = EXTRACTOR_VERSION,
     extracted_at: str | None = None,
     after_source: Callable[[OpportunitySource], None] | None = None,
 ) -> ConstraintSyncSummary:
@@ -263,14 +272,16 @@ def synchronize_opportunity_constraints(
 
     A posting whose stored `(fingerprint, version)` already matches is left
     exactly as it is: no delete, no insert, no timestamp moved. That is what
-    makes a second run write nothing and report `changed=false`.
+    makes a second run write nothing and report `changed=false`. A posting
+    stored under an older `extractor_version` is re-extracted even when its
+    text is identical, and comes back labelled with the version that actually
+    read it — see `extract_one_opportunity` for why no caller may name that
+    version itself.
 
     `after_source` is a test seam invoked with each source before it is stored;
     production callers leave it unset.
     """
     _require_schema(connection)
-    if not extractor_version.strip():
-        raise ValueError("extractor_version must not be empty")
     timestamp = extracted_at or datetime.now(UTC).isoformat(timespec="microseconds")
     sources = load_opportunity_sources(connection, limit=limit)
 
@@ -281,7 +292,7 @@ def synchronize_opportunity_constraints(
         fingerprint = source_fingerprint(source)
         reading = extract_opportunity_constraints(source)
         readings.append(reading)
-        if signature == (fingerprint, extractor_version):
+        if signature == (fingerprint, EXTRACTOR_VERSION):
             unchanged += 1
             continue
         if after_source is not None:
@@ -299,6 +310,6 @@ def synchronize_opportunity_constraints(
         unchanged=unchanged,
         created=created,
         replaced=replaced,
-        extractor_version=extractor_version,
+        extractor_version=EXTRACTOR_VERSION,
         **counters,
     )

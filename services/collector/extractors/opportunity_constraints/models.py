@@ -66,6 +66,8 @@ __all__ = [
     "OpportunityConstraintError",
     "OpportunitySource",
     "OpportunityType",
+    "SLOT_KINDS",
+    "Slot",
     "SourceField",
     "StartRequirement",
     "StartPrecision",
@@ -92,6 +94,40 @@ class ConstraintKind(StrEnum):
     EXPERIENCE = "EXPERIENCE"
     DURATION = "DURATION"
     START = "START"
+    LOCATION = "LOCATION"
+    WORK_MODE = "WORK_MODE"
+    VISA_SPONSORSHIP = "VISA_SPONSORSHIP"
+    WORK_AUTHORIZATION = "WORK_AUTHORIZATION"
+    CONVENTION = "CONVENTION"
+
+
+class Slot(StrEnum):
+    """The single place a value lands, and the unit a contradiction is judged in.
+
+    A *kind* is the category a reader browses by; a *slot* is the thing that can
+    actually disagree with itself, and the two are not the same. `EXPERIENCE`
+    holds two independent slots: a posting may state how much experience it
+    wants in one sentence and how badly it wants it in another, and those two
+    statements do not compete — so they can also contradict themselves
+    separately, and one posting can legitimately carry both an
+    `EXPERIENCE_BOUNDS` conflict and an `EXPERIENCE_OBLIGATION` one. Recording
+    them under one key would either lose one of them or merge `36-` and
+    `REQUIRED` into a single list of "conflicting values", which are two
+    different contradictions and one meaningless row.
+
+    `EDUCATION` and `LOCATION` are here because rules land in them, but they are
+    multi-valued: several levels or several places are several answers, never a
+    disagreement, so neither is ever conflict-resolved.
+    """
+
+    OPPORTUNITY_TYPE = "OPPORTUNITY_TYPE"
+    #: Multi-valued. Never conflict-resolved.
+    EDUCATION = "EDUCATION"
+    EXPERIENCE_BOUNDS = "EXPERIENCE_BOUNDS"
+    EXPERIENCE_OBLIGATION = "EXPERIENCE_OBLIGATION"
+    DURATION = "DURATION"
+    START = "START"
+    #: Multi-valued. Never conflict-resolved.
     LOCATION = "LOCATION"
     WORK_MODE = "WORK_MODE"
     VISA_SPONSORSHIP = "VISA_SPONSORSHIP"
@@ -210,6 +246,24 @@ class StartPrecision(StrEnum):
     YEAR = "YEAR"
 
 
+#: Which category each slot reports under. Both experience slots map to
+#: `EXPERIENCE`: they are one subject a reader browses by, and two things that
+#: can disagree independently.
+SLOT_KINDS: dict[Slot, ConstraintKind] = {
+    Slot.OPPORTUNITY_TYPE: ConstraintKind.OPPORTUNITY_TYPE,
+    Slot.EDUCATION: ConstraintKind.EDUCATION,
+    Slot.EXPERIENCE_BOUNDS: ConstraintKind.EXPERIENCE,
+    Slot.EXPERIENCE_OBLIGATION: ConstraintKind.EXPERIENCE,
+    Slot.DURATION: ConstraintKind.DURATION,
+    Slot.START: ConstraintKind.START,
+    Slot.LOCATION: ConstraintKind.LOCATION,
+    Slot.WORK_MODE: ConstraintKind.WORK_MODE,
+    Slot.VISA_SPONSORSHIP: ConstraintKind.VISA_SPONSORSHIP,
+    Slot.WORK_AUTHORIZATION: ConstraintKind.WORK_AUTHORIZATION,
+    Slot.CONVENTION: ConstraintKind.CONVENTION,
+}
+
+
 @dataclass(frozen=True)
 class OpportunitySource:
     """Exactly the already-collected values the extractor is allowed to read.
@@ -272,21 +326,38 @@ class ConstraintConflict:
     one of them — the first, the last, the longest match — would be this
     package deciding what an employer meant. The field stays UNKNOWN and this
     row says why, which is the only answer that stays true.
+
+    The identity of a conflict is its **slot**, not its kind. One posting can
+    contradict itself about how much experience it wants *and* about whether it
+    insists, and those are two contradictions with two answers; keying them by
+    `EXPERIENCE` would collide. `kind` stays for browsing, and is derived from
+    the slot rather than passed in, so the two can never disagree.
     """
 
-    kind: ConstraintKind
+    slot: Slot
     #: The incompatible values, as text, sorted so the row is deterministic.
     values: tuple[str, ...]
     #: The rules that produced them, sorted, deduplicated.
     rule_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.slot, Slot):
+            raise OpportunityConstraintError("a conflict names the slot that disagreed")
+        if self.slot in (Slot.EDUCATION, Slot.LOCATION):
+            raise OpportunityConstraintError(
+                f"{self.slot.value} is multi-valued and cannot contradict itself"
+            )
         if len(self.values) < 2:
             raise OpportunityConstraintError("a conflict needs two values to conflict")
         if tuple(sorted(self.values)) != self.values:
             raise OpportunityConstraintError("conflict values must be sorted")
         if tuple(sorted(self.rule_ids)) != self.rule_ids:
             raise OpportunityConstraintError("conflict rule ids must be sorted")
+
+    @property
+    def kind(self) -> ConstraintKind:
+        """The category this contradiction belongs to, derived from the slot."""
+        return SLOT_KINDS[self.slot]
 
 
 @dataclass(frozen=True)
@@ -447,6 +518,10 @@ class ExtractedConstraints:
     @property
     def conflicting_kinds(self) -> frozenset[ConstraintKind]:
         return frozenset(conflict.kind for conflict in self.conflicts)
+
+    @property
+    def conflicting_slots(self) -> frozenset[Slot]:
+        return frozenset(conflict.slot for conflict in self.conflicts)
 
     def evidence_for(self, kind: ConstraintKind) -> tuple[ConstraintEvidence, ...]:
         return tuple(item for item in self.evidence if item.kind is kind)

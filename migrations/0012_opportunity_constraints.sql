@@ -256,9 +256,33 @@ CREATE INDEX idx_opportunity_constraint_evidence_kind
 -- and not a tie to be broken later: it says the posting contradicted itself,
 -- names the incompatible values and the rules that produced them, and leaves
 -- the field unasserted.
+--
+-- **A conflict is identified by its slot, not by its kind.** The two are not
+-- the same thing: a kind is the subject a reader browses by, a slot is the
+-- thing that can actually disagree with itself. `EXPERIENCE` holds two — how
+-- much experience a posting wants, and whether it insists — and one posting
+-- can contradict itself about both at once:
+--
+--     "Minimum 3 years of experience required."
+--     "At least 5 years of experience preferred."
+--
+-- That is two contradictions with two answers. Keying the row by kind would
+-- refuse the second one outright, and merging them would put `36-` beside
+-- `REQUIRED` in a single list of "conflicting values", which describes nothing.
+-- `constraint_kind` stays for browsing and is derived from the slot in code, so
+-- the two can never drift apart.
+--
+-- `EDUCATION` and `LOCATION` are absent from the slot list: several levels or
+-- several places are several answers, never a disagreement, so neither can
+-- appear here at all.
 CREATE TABLE opportunity_constraint_conflicts (
     id INTEGER PRIMARY KEY,
     opportunity_id INTEGER NOT NULL,
+    constraint_slot TEXT NOT NULL CHECK (constraint_slot IN (
+        'OPPORTUNITY_TYPE', 'EXPERIENCE_BOUNDS', 'EXPERIENCE_OBLIGATION',
+        'DURATION', 'START', 'WORK_MODE', 'VISA_SPONSORSHIP',
+        'WORK_AUTHORIZATION', 'CONVENTION'
+    )),
     constraint_kind TEXT NOT NULL CHECK (constraint_kind IN (
         'OPPORTUNITY_TYPE', 'EDUCATION', 'EXPERIENCE', 'DURATION', 'START',
         'LOCATION', 'WORK_MODE', 'VISA_SPONSORSHIP', 'WORK_AUTHORIZATION',
@@ -274,13 +298,15 @@ CREATE TABLE opportunity_constraint_conflicts (
         json_valid(rule_ids_json) AND json_array_length(rule_ids_json) >= 1
     ),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (opportunity_id, constraint_kind),
+    UNIQUE (opportunity_id, constraint_slot),
     FOREIGN KEY (opportunity_id)
         REFERENCES opportunity_constraints(opportunity_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_opportunity_constraint_conflicts_opportunity
     ON opportunity_constraint_conflicts(opportunity_id);
+CREATE INDEX idx_opportunity_constraint_conflicts_kind
+    ON opportunity_constraint_conflicts(constraint_kind);
 
 -- Reserved for Phase 3.5B: the skills a posting requires or prefers.
 --
@@ -314,7 +340,13 @@ CREATE TABLE opportunity_skill_requirements (
     UNIQUE (opportunity_id, skill_id),
     FOREIGN KEY (opportunity_id)
         REFERENCES opportunity_constraints(opportunity_id) ON DELETE CASCADE,
-    FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+    -- `RESTRICT`, like `profile_skills` in `0008`, and for the same reason:
+    -- `skills` is shared vocabulary, so a term an offer still requires cannot
+    -- be deleted out from under it. `CASCADE` here would let a vocabulary
+    -- cleanup silently drop a requirement a posting stated — the constraint
+    -- would disappear without anybody deciding it should. Removing the
+    -- posting is what removes its requirements, through the cascade above.
+    FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE RESTRICT
 );
 
 CREATE INDEX idx_opportunity_skill_requirements_opportunity

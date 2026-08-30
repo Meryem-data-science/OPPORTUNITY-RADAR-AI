@@ -13,7 +13,10 @@ Two decisions live here rather than in the rules.
 **Conflict resolution, which is mostly a refusal to resolve.** Rules produce
 hits; hits land in slots; a slot holding two different values is a
 contradiction in the posting, and a contradiction is recorded rather than
-settled. Picking the first match, the last match or the longest one would be
+settled. The unit is the **slot**, not the kind: a posting can disagree with
+itself about how much experience it wants and, separately, about whether it
+insists, and those are two contradictions with two answers rather than one row
+mixing `36-` with `REQUIRED`. Picking the first match, the last match or the longest one would be
 this package deciding what an employer meant, and the field would then read as
 a fact. It stays UNKNOWN and a conflict row says which values disagreed and
 which rules produced them.
@@ -51,17 +54,16 @@ from services.collector.extractors.opportunity_constraints.models import (
     ExtractedConstraints,
     OpportunitySource,
     OpportunityType,
+    Slot,
     SourceField,
     StartRequirement,
     VisaSponsorship,
     WorkAuthorization,
     WorkMode,
-    deduplicate_texts,
 )
 from services.collector.extractors.opportunity_constraints.rules import (
     TYPE_FIELD_PRECEDENCE,
     RuleHit,
-    Slot,
     read_posting,
 )
 
@@ -105,7 +107,7 @@ def _by_slot(hits: Sequence[RuleHit], slot: Slot) -> tuple[RuleHit, ...]:
     return tuple(hit for hit in hits if hit.slot is slot)
 
 
-def _settle(hits: Sequence[RuleHit], slot: Slot, kind: ConstraintKind):
+def _settle(hits: Sequence[RuleHit], slot: Slot):
     """One slot's value, or None plus a conflict when the posting disagrees.
 
     Returns `(value, kept_hits, conflict)`. `kept_hits` are the pieces of
@@ -120,7 +122,7 @@ def _settle(hits: Sequence[RuleHit], slot: Slot, kind: ConstraintKind):
     if len(distinct) == 1:
         return relevant[0].value, relevant, None
     conflict = ConstraintConflict(
-        kind=kind,
+        slot=slot,
         values=tuple(sorted(distinct)),
         rule_ids=tuple(sorted({hit.rule_id for hit in relevant})),
     )
@@ -140,26 +142,33 @@ def _settle_opportunity_type(hits: Sequence[RuleHit]):
         if len(distinct) == 1:
             return tier[0].value, tier, None
         return None, tier, ConstraintConflict(
-            kind=ConstraintKind.OPPORTUNITY_TYPE,
+            slot=Slot.OPPORTUNITY_TYPE,
             values=tuple(sorted(distinct)),
             rule_ids=tuple(sorted({hit.rule_id for hit in tier})),
         )
     return None, (), None
 
 
-def _education(hits: Sequence[RuleHit]):
-    """Every level the posting named. Several levels are answers, not conflicts."""
-    relevant = _by_slot(hits, Slot.EDUCATION)
-    requirements: list[EducationRequirement] = []
+def _multi_valued(hits: Sequence[RuleHit], slot: Slot):
+    """Every distinct value one multi-valued slot holds, and its evidence.
+
+    Several education levels or several places are several answers, never a
+    disagreement, so nothing is settled here and no conflict can arise. The
+    deduplication is exact and keeps the first occurrence, and it drops the
+    losing hit with its value — otherwise a posting whose `location` and
+    `country` were written identically would project one place and explain it
+    twice.
+    """
+    values: list[object] = []
     kept: list[RuleHit] = []
     seen: set[str] = set()
-    for hit in relevant:
+    for hit in _by_slot(hits, slot):
         if hit.value_key in seen:
             continue
         seen.add(hit.value_key)
-        requirements.append(hit.value)
+        values.append(hit.value)
         kept.append(hit)
-    return tuple(requirements), tuple(kept)
+    return tuple(values), tuple(kept)
 
 
 def extract_opportunity_constraints(
@@ -174,12 +183,12 @@ def extract_opportunity_constraints(
     if not isinstance(source, OpportunitySource):
         raise TypeError("source must be an OpportunitySource")
 
-    hits, collected_locations = read_posting(source)
+    hits = read_posting(source)
     kept: list[RuleHit] = []
     conflicts: list[ConstraintConflict] = []
 
-    def settle(slot: Slot, kind: ConstraintKind):
-        value, evidence, conflict = _settle(hits, slot, kind)
+    def settle(slot: Slot):
+        value, evidence, conflict = _settle(hits, slot)
         kept.extend(evidence)
         if conflict is not None:
             conflicts.append(conflict)
@@ -190,28 +199,30 @@ def extract_opportunity_constraints(
     if type_conflict is not None:
         conflicts.append(type_conflict)
 
-    education, education_evidence = _education(hits)
+    education, education_evidence = _multi_valued(hits, Slot.EDUCATION)
     kept.extend(education_evidence)
+    locations, location_evidence = _multi_valued(hits, Slot.LOCATION)
+    kept.extend(location_evidence)
 
-    bounds = settle(Slot.EXPERIENCE_BOUNDS, ConstraintKind.EXPERIENCE)
-    obligation = settle(Slot.EXPERIENCE_OBLIGATION, ConstraintKind.EXPERIENCE)
+    bounds = settle(Slot.EXPERIENCE_BOUNDS)
+    obligation = settle(Slot.EXPERIENCE_OBLIGATION)
     experience = ExperienceRequirement(
         min_months=None if bounds is None else bounds[0],
         max_months=None if bounds is None else bounds[1],
         obligation=obligation or ExperienceObligation.UNKNOWN,
     )
 
-    duration_bounds = settle(Slot.DURATION, ConstraintKind.DURATION)
+    duration_bounds = settle(Slot.DURATION)
     duration = DurationRequirement(
         min_months=None if duration_bounds is None else duration_bounds[0],
         max_months=None if duration_bounds is None else duration_bounds[1],
     )
 
-    start = settle(Slot.START, ConstraintKind.START) or StartRequirement()
-    work_mode = settle(Slot.WORK_MODE, ConstraintKind.WORK_MODE)
-    sponsorship = settle(Slot.VISA_SPONSORSHIP, ConstraintKind.VISA_SPONSORSHIP)
-    authorization = settle(Slot.WORK_AUTHORIZATION, ConstraintKind.WORK_AUTHORIZATION)
-    convention = settle(Slot.CONVENTION, ConstraintKind.CONVENTION)
+    start = settle(Slot.START) or StartRequirement()
+    work_mode = settle(Slot.WORK_MODE)
+    sponsorship = settle(Slot.VISA_SPONSORSHIP)
+    authorization = settle(Slot.WORK_AUTHORIZATION)
+    convention = settle(Slot.CONVENTION)
 
     return ExtractedConstraints(
         opportunity_id=source.opportunity_id,
@@ -222,11 +233,11 @@ def extract_opportunity_constraints(
         experience=experience,
         duration=duration,
         start=start,
-        locations=deduplicate_texts(collected_locations),
+        locations=tuple(str(value) for value in locations),
         work_mode=work_mode,
         visa_sponsorship=sponsorship or VisaSponsorship.UNKNOWN,
         work_authorization=authorization or WorkAuthorization.UNKNOWN,
         convention=convention or ConventionRequirement.UNKNOWN,
         evidence=tuple(hit.evidence() for hit in kept),
-        conflicts=tuple(sorted(conflicts, key=lambda item: item.kind.value)),
+        conflicts=tuple(sorted(conflicts, key=lambda item: item.slot.value)),
     )

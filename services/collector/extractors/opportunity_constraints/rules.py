@@ -40,7 +40,6 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 
 from services.collector.extractors.opportunity_constraints.models import (
     MAX_EVIDENCE_LENGTH,
@@ -55,6 +54,7 @@ from services.collector.extractors.opportunity_constraints.models import (
     ExperienceRequirement,
     OpportunitySource,
     OpportunityType,
+    Slot,
     SourceField,
     StartPrecision,
     StartRequirement,
@@ -70,30 +70,6 @@ from services.collector.extractors.opportunity_constraints.text import (
 )
 
 __all__ = ["TYPE_FIELD_PRECEDENCE", "RuleHit", "Slot", "read_posting"]
-
-
-class Slot(StrEnum):
-    """The single place a value lands, and the unit a conflict is judged in.
-
-    A kind can hold two independent slots: a posting may state how much
-    experience it wants in one sentence and how badly it wants it in another,
-    and those two statements do not compete. Conflicts are resolved slot by
-    slot, so "minimum 3 years" beside "experience preferred" keeps both,
-    while "fully remote" beside "fully on-site" keeps neither.
-    """
-
-    OPPORTUNITY_TYPE = "OPPORTUNITY_TYPE"
-    #: Multi-valued: a posting may accept several levels, and two levels are
-    #: two answers rather than a contradiction. Never conflict-resolved.
-    EDUCATION = "EDUCATION"
-    EXPERIENCE_BOUNDS = "EXPERIENCE_BOUNDS"
-    EXPERIENCE_OBLIGATION = "EXPERIENCE_OBLIGATION"
-    DURATION = "DURATION"
-    START = "START"
-    WORK_MODE = "WORK_MODE"
-    VISA_SPONSORSHIP = "VISA_SPONSORSHIP"
-    WORK_AUTHORIZATION = "WORK_AUTHORIZATION"
-    CONVENTION = "CONVENTION"
 
 
 @dataclass(frozen=True)
@@ -713,14 +689,38 @@ def _phrase_hits(
             )
 
 
-def read_posting(source: OpportunitySource) -> tuple[tuple[RuleHit, ...], tuple[str, ...]]:
-    """Run every rule over one posting. Returns the hits and the locations.
+def _location_hits(source: OpportunitySource) -> Iterator[RuleHit]:
+    """The places the collected fields named, each with its own evidence.
 
-    The locations are the collected `location` and `country` fields, trimmed
-    and deduplicated and nothing else: no geocoding, no country deduced from a
-    city, no city deduced from a country, and no expansion of a region into
-    the places inside it.
+    A projected location is a value like any other, so it is explainable like
+    any other: the rule says which collected field it came from, and the
+    evidence quotes it. Without a hit here, `opportunity_constraint_locations`
+    would be the one projection a reader could not trace back to anything.
+
+    Nothing is geocoded, no country is deduced from a city, no city from a
+    country, and no region is expanded into the places inside it. Each rule
+    reads one field and copies what it found, trimmed.
     """
+    for value, source_field, rule_id in (
+        (source.location, SourceField.LOCATION, "LOCATION_COLLECTED_FIELD_V1"),
+        (source.country, SourceField.COUNTRY, "COUNTRY_COLLECTED_FIELD_V1"),
+    ):
+        text = normalize_field(value)
+        if not text:
+            continue
+        yield RuleHit(
+            slot=Slot.LOCATION,
+            kind=ConstraintKind.LOCATION,
+            value=text,
+            value_key=text,
+            rule_id=rule_id,
+            source_field=source_field,
+            fragment=text,
+        )
+
+
+def read_posting(source: OpportunitySource) -> tuple[RuleHit, ...]:
+    """Run every rule over one posting, and return everything they found."""
     title = normalize_field(source.canonical_title)
     description = normalize_description(source.description)
     parts = segments(description)
@@ -759,11 +759,5 @@ def read_posting(source: OpportunitySource) -> tuple[tuple[RuleHit, ...], tuple[
             "CONVENTION_REQUIRED_V1",
         )
     )
-    locations = tuple(
-        value
-        for value in (
-            normalize_field(source.location), normalize_field(source.country)
-        )
-        if value
-    )
-    return tuple(hits), locations
+    hits.extend(_location_hits(source))
+    return tuple(hits)
