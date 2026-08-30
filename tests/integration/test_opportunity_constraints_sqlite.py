@@ -1,0 +1,576 @@
+"""Migration 0012 and the Phase 3.5A projection, on disposable SQLite databases.
+
+Every database here is created under `tmp_path` and thrown away. Every posting
+is invented; no real listing, company or description takes part. **The
+operational `.data/` database is never opened**, no count taken from it appears
+anywhere below, and nothing in this file writes to any database a person uses:
+the fixtures decide what exists.
+
+The projection is derived data, so most of these tests are about what it may
+**not** do: mutate the postings it reads, keep a reading whose source changed,
+leave half a reading behind after a failure, invent a value the posting did not
+state, or grow a column that compares a posting to a person.
+"""
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from services.collector.database.connection import connect_database
+from services.collector.database.migrations import (
+    DEFAULT_MIGRATIONS_DIRECTORY,
+    apply_migrations,
+    discover_migrations,
+)
+from services.collector.extractors.opportunity_constraints.extractor import (
+    extract_opportunity_constraints,
+    source_fingerprint,
+)
+from services.collector.extractors.opportunity_constraints.models import (
+    EXTRACTOR_VERSION,
+    ConstraintKind,
+    ConventionRequirement,
+    EducationLevel,
+    OpportunitySource,
+    OpportunityType,
+    VisaSponsorship,
+    WorkAuthorization,
+    WorkMode,
+)
+from services.collector.extractors.opportunity_constraints.repository import (
+    OpportunityConstraintRepositoryError,
+    read_opportunity_constraints,
+    store_opportunity_constraints,
+    stored_signature,
+)
+from services.collector.extractors.opportunity_constraints.service import (
+    OpportunityConstraintServiceError,
+    extract_one_opportunity,
+    load_opportunity_source,
+    synchronize_opportunity_constraints,
+)
+
+REPOSITORY_SOURCE = Path(
+    "services/collector/extractors/opportunity_constraints/repository.py"
+)
+MIGRATION = Path("migrations/0012_opportunity_constraints.sql")
+
+BEFORE_THIS_SLICE = (
+    "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009",
+    "0010", "0011",
+)
+
+#: The six tables `0012` adds.
+CONSTRAINT_TABLES = (
+    "opportunity_constraints",
+    "opportunity_constraint_locations",
+    "opportunity_education_requirements",
+    "opportunity_constraint_evidence",
+    "opportunity_constraint_conflicts",
+    "opportunity_skill_requirements",
+)
+
+# TEST ONLY postings, invented for these tests.
+RICH_TITLE = "PFE Data Engineer"
+RICH_DESCRIPTION = (
+    "&lt;ul&gt;&lt;li&gt;Minimum 3 years of experience required&lt;/li&gt;"
+    "&lt;li&gt;Education: Bac+5 minimum&lt;/li&gt;"
+    "&lt;li&gt;Visa sponsorship available&lt;/li&gt;"
+    "&lt;li&gt;You must be authorized to work in France&lt;/li&gt;"
+    "&lt;li&gt;Convention de stage obligatoire&lt;/li&gt;"
+    "&lt;li&gt;Duration: 6 months, starting February 2027&lt;/li&gt;"
+    "&lt;li&gt;This is a hybrid role&lt;/li&gt;&lt;/ul&gt;"
+)
+SILENT_TITLE = "Senior Data Scientist"
+SILENT_DESCRIPTION = "We build good products with a great team in our office."
+CONFLICTING_DESCRIPTION = (
+    "This is a fully remote position. However this role is fully on-site."
+)
+
+
+@pytest.fixture
+def migrated(tmp_path):
+    connection = connect_database(tmp_path / "constraints.db")
+    apply_migrations(connection)
+    yield connection
+    connection.close()
+
+
+def insert_opportunity(
+    connection, *, title=SILENT_TITLE, description=SILENT_DESCRIPTION,
+    location=None, country=None, remote_type=None, status="new", is_active=1,
+) -> int:
+    row = connection.execute(
+        """INSERT INTO opportunities (
+               canonical_title, organization, location, country, remote_type,
+               description, discovered_at, first_seen_at, last_seen_at,
+               source_url, status, is_active
+           ) VALUES (?, 'TEST ONLY Org', ?, ?, ?, ?, 't', 't', 't',
+                     'https://example.invalid/1', ?, ?)
+           RETURNING id""",
+        (title, location, country, remote_type, description, status, is_active),
+    ).fetchone()
+    connection.commit()
+    return int(row[0])
+
+
+@pytest.fixture
+def rich_opportunity(migrated) -> int:
+    return insert_opportunity(
+        migrated, title=RICH_TITLE, description=RICH_DESCRIPTION,
+        location="Casablanca", country="Morocco",
+    )
+
+
+def source_of(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _tables(connection) -> set[str]:
+    return {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+
+
+def _columns(connection, table: str) -> list[str]:
+    return [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+
+
+def _counts(connection) -> tuple[int, ...]:
+    return tuple(
+        int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in CONSTRAINT_TABLES
+    )
+
+
+def _opportunity_rows(connection) -> list[tuple]:
+    return connection.execute(
+        "SELECT id, canonical_title, organization, location, country, remote_type, "
+        "description, opportunity_type, employment_type, deadline, status, "
+        "is_active, relevance_score, eligibility_score, match_score, "
+        "priority_score, created_at, updated_at FROM opportunities ORDER BY id"
+    ).fetchall()
+
+
+# --------------------------------------------------------------------------
+# Migration 0012
+# --------------------------------------------------------------------------
+
+
+def test_migration_0012_is_discovered_after_the_earlier_ones() -> None:
+    versions = [
+        migration.version
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY)
+    ]
+    assert versions[: len(BEFORE_THIS_SLICE)] == list(BEFORE_THIS_SLICE)
+    assert versions[len(BEFORE_THIS_SLICE)] == "0012"
+
+
+def test_migration_0012_creates_the_six_tables(migrated) -> None:
+    assert set(CONSTRAINT_TABLES) <= _tables(migrated)
+
+
+@pytest.mark.parametrize("table", CONSTRAINT_TABLES)
+def test_no_constraint_table_is_seeded(migrated, table) -> None:
+    """Applying `0012` states nothing about any posting."""
+    assert int(migrated.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) == 0
+
+
+def test_migration_0012_alters_no_existing_table() -> None:
+    body = source_of(MIGRATION).upper()
+    assert "ALTER TABLE" not in body
+    assert "DROP" not in body
+
+
+def test_no_constraint_table_carries_a_verdict_or_a_number_to_compare() -> None:
+    """A constraint is a property of the posting. A decision is Phase 3.6."""
+    forbidden = {
+        "confidence", "score", "match_score", "priority_score",
+        "eligibility_score", "eligible", "rank", "ranking", "weight",
+        "profile_id", "recommendation",
+    }
+    for table in CONSTRAINT_TABLES:
+        connection = connect_database(":memory:")
+        try:
+            apply_migrations(connection)
+            assert forbidden.isdisjoint(_columns(connection, table)), table
+        finally:
+            connection.close()
+
+
+def test_every_projection_row_hangs_off_its_posting(migrated) -> None:
+    keys = {
+        (row[2], row[3], row[4], row[6])
+        for row in migrated.execute("PRAGMA foreign_key_list(opportunity_constraints)")
+    }
+    assert ("opportunities", "opportunity_id", "id", "CASCADE") in keys
+
+
+def test_deleting_a_posting_deletes_its_whole_projection(migrated, rich_opportunity) -> None:
+    migrated.execute("PRAGMA foreign_keys = ON")
+    extract_one_opportunity(migrated, rich_opportunity)
+    assert _counts(migrated)[0] == 1
+
+    migrated.execute("DELETE FROM opportunities WHERE id = ?", (rich_opportunity,))
+    migrated.commit()
+
+    assert _counts(migrated) == (0, 0, 0, 0, 0, 0)
+
+
+def test_the_start_precision_check_refuses_a_row_that_lacks_its_parts(
+    migrated, rich_opportunity
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_constraints (opportunity_id, start_precision, "
+            "start_month, extractor_version, source_fingerprint, extracted_at) "
+            "VALUES (?, 'DATE', 2, ?, ?, 't')",
+            (rich_opportunity, EXTRACTOR_VERSION, "0" * 64),
+        )
+
+
+def test_the_scalar_checks_refuse_a_value_outside_a_registry(
+    migrated, rich_opportunity
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_constraints (opportunity_id, visa_sponsorship, "
+            "extractor_version, source_fingerprint, extracted_at) "
+            "VALUES (?, 'MAYBE', ?, ?, 't')",
+            (rich_opportunity, EXTRACTOR_VERSION, "0" * 64),
+        )
+
+
+def test_unknown_is_never_stored_as_a_word(migrated, rich_opportunity) -> None:
+    """`NULL` is the single spelling of "not asserted" in the database."""
+    with pytest.raises(sqlite3.IntegrityError):
+        migrated.execute(
+            "INSERT INTO opportunity_constraints (opportunity_id, convention_requirement, "
+            "extractor_version, source_fingerprint, extracted_at) "
+            "VALUES (?, 'UNKNOWN', ?, ?, 't')",
+            (rich_opportunity, EXTRACTOR_VERSION, "0" * 64),
+        )
+
+
+# --------------------------------------------------------------------------
+# The reserved skills link
+# --------------------------------------------------------------------------
+
+
+def test_the_skill_link_points_at_the_shared_vocabulary(migrated) -> None:
+    """One catalogue, so 3.5B extends `skills` instead of starting a rival."""
+    keys = {
+        (row[2], row[3], row[4])
+        for row in migrated.execute(
+            "PRAGMA foreign_key_list(opportunity_skill_requirements)"
+        )
+    }
+    assert ("skills", "skill_id", "id") in keys
+
+
+def test_phase_35a_writes_no_skill_requirement(migrated, rich_opportunity) -> None:
+    """Extraction is 3.5B. A naive one would fill this with a stack listing."""
+    synchronize_opportunity_constraints(migrated)
+
+    assert int(
+        migrated.execute("SELECT COUNT(*) FROM opportunity_skill_requirements").fetchone()[0]
+    ) == 0
+
+
+# --------------------------------------------------------------------------
+# Storing and reading back
+# --------------------------------------------------------------------------
+
+
+def test_a_rich_posting_is_projected_and_read_back_unchanged(
+    migrated, rich_opportunity
+) -> None:
+    reading, written = extract_one_opportunity(migrated, rich_opportunity)
+    stored = read_opportunity_constraints(migrated, rich_opportunity)
+
+    assert written
+    assert stored == reading
+    assert stored.opportunity_type is OpportunityType.PFE
+    assert stored.experience.min_months == 36
+    assert [item.level for item in stored.education] == [EducationLevel.BAC_PLUS_5]
+    assert stored.duration.min_months == 6
+    assert (stored.start.year, stored.start.month) == (2027, 2)
+    assert stored.locations == ("Casablanca", "Morocco")
+    assert stored.work_mode is WorkMode.HYBRID
+    assert stored.visa_sponsorship is VisaSponsorship.AVAILABLE
+    assert stored.work_authorization is WorkAuthorization.REQUIRED
+    assert stored.convention is ConventionRequirement.REQUIRED
+    assert stored.evidence
+
+
+def test_a_silent_posting_is_projected_with_nothing_asserted(migrated) -> None:
+    """A row exists, and every scalar in it is NULL. Absence is not FALSE."""
+    opportunity_id = insert_opportunity(migrated, location="Paris")
+    extract_one_opportunity(migrated, opportunity_id)
+
+    row = migrated.execute(
+        "SELECT opportunity_type, experience_min_months, duration_min_months, "
+        "start_precision, work_mode, visa_sponsorship, work_authorization, "
+        "convention_requirement FROM opportunity_constraints WHERE opportunity_id = ?",
+        (opportunity_id,),
+    ).fetchone()
+
+    assert list(row) == [None] * 8
+    stored = read_opportunity_constraints(migrated, opportunity_id)
+    assert stored.visa_sponsorship is VisaSponsorship.UNKNOWN
+    assert stored.work_authorization is WorkAuthorization.UNKNOWN
+    assert stored.convention is ConventionRequirement.UNKNOWN
+    # The address was collected, and it did not become an attendance policy.
+    assert stored.locations == ("Paris",)
+    assert stored.work_mode is None
+
+
+def test_a_contradiction_is_stored_as_a_conflict_and_no_value(migrated) -> None:
+    opportunity_id = insert_opportunity(migrated, description=CONFLICTING_DESCRIPTION)
+    extract_one_opportunity(migrated, opportunity_id)
+
+    row = migrated.execute(
+        "SELECT constraint_kind, conflicting_values_json, rule_ids_json "
+        "FROM opportunity_constraint_conflicts WHERE opportunity_id = ?",
+        (opportunity_id,),
+    ).fetchone()
+
+    assert row[0] == ConstraintKind.WORK_MODE.value
+    assert json.loads(row[1]) == ["ON_SITE", "REMOTE"]
+    assert len(json.loads(row[2])) == 2
+    assert migrated.execute(
+        "SELECT work_mode FROM opportunity_constraints WHERE opportunity_id = ?",
+        (opportunity_id,),
+    ).fetchone()[0] is None
+
+
+def test_evidence_rows_name_their_rule_and_stay_fragments(
+    migrated, rich_opportunity
+) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+
+    rows = migrated.execute(
+        "SELECT constraint_kind, source_field, rule_id, evidence_text "
+        "FROM opportunity_constraint_evidence WHERE opportunity_id = ? ORDER BY position",
+        (rich_opportunity,),
+    ).fetchall()
+
+    assert rows
+    for kind, source_field, rule_id, text in rows:
+        assert kind in {member.value for member in ConstraintKind}
+        assert rule_id.strip() and rule_id.endswith("_V1")
+        assert 0 < len(text) <= 200
+    # The whole description is never one of them.
+    assert all(len(row[3]) < len(RICH_DESCRIPTION) for row in rows)
+
+
+# --------------------------------------------------------------------------
+# Idempotence
+# --------------------------------------------------------------------------
+
+
+def test_a_second_synchronization_writes_nothing(migrated, rich_opportunity) -> None:
+    insert_opportunity(migrated, location="Paris")
+    first = synchronize_opportunity_constraints(migrated)
+    before = migrated.execute(
+        "SELECT opportunity_id, extracted_at, created_at FROM opportunity_constraints "
+        "ORDER BY opportunity_id"
+    ).fetchall()
+
+    second = synchronize_opportunity_constraints(migrated)
+
+    assert (first.created, first.unchanged) == (2, 0)
+    assert (second.created, second.replaced, second.unchanged) == (0, 0, 2)
+    assert not second.changed
+    # Same rows, timestamps included: nothing was rewritten.
+    assert migrated.execute(
+        "SELECT opportunity_id, extracted_at, created_at FROM opportunity_constraints "
+        "ORDER BY opportunity_id"
+    ).fetchall() == before
+
+
+def test_a_changed_description_is_re_extracted(migrated, rich_opportunity) -> None:
+    synchronize_opportunity_constraints(migrated)
+    before = stored_signature(migrated, rich_opportunity)
+
+    migrated.execute(
+        "UPDATE opportunities SET description = ? WHERE id = ?",
+        ("We do not sponsor visas for this role.", rich_opportunity),
+    )
+    migrated.commit()
+    summary = synchronize_opportunity_constraints(migrated)
+
+    assert summary.replaced == 1
+    assert stored_signature(migrated, rich_opportunity) != before
+    stored = read_opportunity_constraints(migrated, rich_opportunity)
+    assert stored.visa_sponsorship is VisaSponsorship.NOT_AVAILABLE
+    # The previous reading is gone whole, not layered under the new one.
+    assert stored.experience.min_months is None
+    assert stored.education == ()
+
+
+def test_a_new_extractor_version_re_extracts_identical_text(
+    migrated, rich_opportunity
+) -> None:
+    synchronize_opportunity_constraints(migrated)
+
+    summary = synchronize_opportunity_constraints(
+        migrated, extractor_version="opportunity-constraints-test-v2"
+    )
+
+    assert summary.replaced == 1
+    assert summary.unchanged == 0
+
+
+def test_the_fingerprint_stored_is_the_one_the_source_produces(
+    migrated, rich_opportunity
+) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+    source = load_opportunity_source(migrated, rich_opportunity)
+
+    assert stored_signature(migrated, rich_opportunity) == (
+        source_fingerprint(source),
+        EXTRACTOR_VERSION,
+    )
+
+
+# --------------------------------------------------------------------------
+# Transactions
+# --------------------------------------------------------------------------
+
+
+def test_a_failure_mid_write_leaves_the_previous_projection_intact(
+    migrated, rich_opportunity
+) -> None:
+    extract_one_opportunity(migrated, rich_opportunity)
+    before = read_opportunity_constraints(migrated, rich_opportunity)
+    counts = _counts(migrated)
+
+    def fail() -> None:
+        raise RuntimeError("interrupted between the delete and the insert")
+
+    source = load_opportunity_source(migrated, rich_opportunity)
+    replacement = extract_opportunity_constraints(source)
+    with pytest.raises(RuntimeError):
+        store_opportunity_constraints(migrated, replacement, after_delete=fail)
+
+    # The delete rolled back with the rest: the old reading is still whole.
+    assert read_opportunity_constraints(migrated, rich_opportunity) == before
+    assert _counts(migrated) == counts
+
+
+def test_storing_for_an_absent_posting_is_refused(migrated) -> None:
+    reading = extract_opportunity_constraints(
+        OpportunitySource(9999, description="A role.")
+    )
+
+    with pytest.raises(OpportunityConstraintRepositoryError):
+        store_opportunity_constraints(migrated, reading)
+    assert _counts(migrated) == (0, 0, 0, 0, 0, 0)
+
+
+def test_synchronizing_before_the_migration_is_refused(tmp_path) -> None:
+    connection = connect_database(tmp_path / "partial.db")
+    try:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
+            if migration.version == "0012":
+                continue
+            connection.executescript(migration.path.read_text(encoding="utf-8"))
+        with pytest.raises(OpportunityConstraintServiceError):
+            synchronize_opportunity_constraints(connection)
+    finally:
+        connection.close()
+
+
+# --------------------------------------------------------------------------
+# The postings are the source, and they are not touched
+# --------------------------------------------------------------------------
+
+
+def test_synchronizing_mutates_no_posting(migrated, rich_opportunity) -> None:
+    insert_opportunity(migrated, location="Paris")
+    before = _opportunity_rows(migrated)
+
+    synchronize_opportunity_constraints(migrated)
+
+    assert _opportunity_rows(migrated) == before
+
+
+def test_the_repository_writes_to_no_source_table() -> None:
+    source = source_of(REPOSITORY_SOURCE)
+    for table in ("opportunities", "opportunity_sources", "opportunity_qualifications"):
+        for verb in ("INSERT INTO", "UPDATE", "DELETE FROM"):
+            assert f"{verb} {table}" not in source
+
+
+def test_the_legacy_score_columns_stay_untouched(migrated, rich_opportunity) -> None:
+    """`0001` left `eligibility_score` and `match_score` on `opportunities`.
+
+    Phase 3.5A does not compute them, does not read them and does not write
+    them: a constraint is what a posting asks for, not a verdict about anybody.
+    """
+    synchronize_opportunity_constraints(migrated)
+
+    row = migrated.execute(
+        "SELECT relevance_score, eligibility_score, match_score, priority_score, "
+        "interview_potential_score FROM opportunities WHERE id = ?",
+        (rich_opportunity,),
+    ).fetchone()
+    assert list(row) == [None] * 5
+
+
+def test_an_inactive_or_merged_posting_is_not_projected(migrated) -> None:
+    inactive = insert_opportunity(migrated, is_active=0)
+    merged = insert_opportunity(migrated, status="merged_duplicate")
+
+    summary = synchronize_opportunity_constraints(migrated)
+
+    assert summary.total == 0
+    assert read_opportunity_constraints(migrated, inactive) is None
+    assert read_opportunity_constraints(migrated, merged) is None
+    with pytest.raises(OpportunityConstraintServiceError):
+        extract_one_opportunity(migrated, inactive)
+
+
+def test_the_qualification_type_is_read_when_the_classifier_stored_one(
+    migrated,
+) -> None:
+    opportunity_id = insert_opportunity(
+        migrated, title="Data Role", description="A role in our team."
+    )
+    migrated.execute(
+        """INSERT INTO opportunity_qualifications (
+               opportunity_id, qualification, primary_domain, opportunity_type,
+               employment_type, listing_quality, matched_domains_json,
+               matched_title_signals_json, matched_description_signals_json,
+               matched_exclusion_signals_json, reasons_json, classifier_version,
+               input_fingerprint, classified_at
+           ) VALUES (?, 'CORE_TARGET', 'DATA_ENGINEERING', 'APPRENTICESHIP',
+                     'UNKNOWN', 'NORMAL_LISTING', '[]', '[]', '[]', '[]', '[]',
+                     'test-v1', ?, 't')""",
+        (opportunity_id, "0" * 64),
+    )
+    migrated.commit()
+
+    extract_one_opportunity(migrated, opportunity_id)
+    stored = read_opportunity_constraints(migrated, opportunity_id)
+
+    assert stored.opportunity_type is OpportunityType.ALTERNANCE
+
+
+def test_the_summary_counts_and_never_quotes(migrated, rich_opportunity) -> None:
+    insert_opportunity(migrated, description=CONFLICTING_DESCRIPTION)
+
+    summary = synchronize_opportunity_constraints(migrated).as_dict()
+    rendered = " ".join(str(value) for value in summary.values())
+
+    assert summary["total_opportunities"] == 2
+    assert summary["known_visa_sponsorship"] == 1
+    assert summary["conflicts"] == 1
+    for fragment in ("Casablanca", "sponsorship", "Convention", "remote", RICH_TITLE):
+        assert fragment not in rendered

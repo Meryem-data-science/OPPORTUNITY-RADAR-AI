@@ -32,6 +32,7 @@ def test_live_greenhouse_agent_is_idempotent(tmp_path):
             "0009",
             "0010",
             "0011",
+            "0012",
         ]
     finally:
         connection.close()

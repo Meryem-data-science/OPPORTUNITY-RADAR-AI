@@ -20,6 +20,7 @@ def test_file_database_is_ready_after_migrations(tmp_path) -> None:
             "0009",
             "0010",
             "0011",
+            "0012",
         ]
 
     assert database.is_file()
@@ -48,4 +49,5 @@ def test_file_database_is_ready_after_migrations(tmp_path) -> None:
         ("0009",),
         ("0010",),
         ("0011",),
+        ("0012",),
     ]

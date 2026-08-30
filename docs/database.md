@@ -1067,7 +1067,8 @@ picking the most recent one.
 
 ### Not implemented by `0011`
 
-No opportunity constraint is parsed or stored, no eligibility result, no
+Opportunity constraints are `0012`, below — they describe postings, not
+people, and nothing joins the two. No eligibility result, no
 `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no comparison of a profile's location or
 date against an offer's, no matching, no `match_score`, no TF-IDF, no cosine
 similarity, no ranking, no recommendation and no notification. This is the
@@ -1260,3 +1261,96 @@ and no network call is made. Validated settings are still loaded first, as for
 any request, so a configured remote URL and token are read from the environment
 like any other setting; source health never uses them to open or contact
 anything, and they reach neither the response nor the logs.
+
+## Opportunity constraints
+
+Migration `0012` adds the Phase 3.5A projection of **what a posting itself
+requires**, and nothing else: six tables, no column on any existing table, no
+seeded row.
+
+It is the offer side, and it stops there. Nothing in these tables mentions a
+person, a profile, a fit or a verdict, and no column here is meant to hold one
+later: comparing a posting to somebody is Phase 3.6, ranking is Phase 4, and
+neither exists.
+
+```text
+opportunities
+    +-> opportunity_constraints            (one row per posting read)
+          +-> opportunity_constraint_locations
+          +-> opportunity_education_requirements
+          +-> opportunity_constraint_evidence
+          +-> opportunity_constraint_conflicts
+          +-> opportunity_skill_requirements   (reserved for 3.5B, always empty)
+```
+
+`opportunities` is the source and is never written: no row is updated, no
+column added, and a reading whose source text changed is deleted and rebuilt
+rather than patched.
+
+### NULL is UNKNOWN, and UNKNOWN is never FALSE
+
+Every scalar in `opportunity_constraints` is nullable, and `NULL` means one
+thing everywhere: no closed rule found an explicit statement. The Python enums
+carry an `UNKNOWN` member so the extractor's output is total; the repository
+maps that member to `NULL` on the way in and back on the way out, so the
+database has a single spelling of "not asserted" and each `CHECK` enumerates
+only affirmative values — `visa_sponsorship` accepts `AVAILABLE` and
+`NOT_AVAILABLE`, and the literal string `UNKNOWN` is refused by SQLite.
+
+`visa_sponsorship IS NULL` therefore means **the posting was silent**, and
+silence is not a policy. The same holds throughout: a posting with an address
+has not required attendance, a posting written in English has not required
+English, a posting for an internship has not required a school agreement or
+stated a duration, and a posting in a given country has not refused to sponsor.
+
+### The tables
+
+| table | what it holds |
+| --- | --- |
+| `opportunity_constraints` | the scalars: `opportunity_type` (the Phase 3.4C registry, shared with the profile side), experience bounds in months and its obligation, duration bounds in months, `start_year`/`start_month`/`start_day` with a `start_precision` of `DATE`/`MONTH`/`YEAR`, `work_mode`, `visa_sponsorship`, `work_authorization`, `convention_requirement`, plus `extractor_version`, `source_fingerprint` and `extracted_at` |
+| `opportunity_constraint_locations` | the places the posting named, in order: the collected `location` and `country`, trimmed and exactly deduplicated. No geocoding, no country deduced from a city, no region expanded |
+| `opportunity_education_requirements` | every level named, with `requirement_mode` `MINIMUM` or `EXACT`. Several rows are several accepted levels, not a contradiction. `BAC_PLUS_5` and `MASTER` stay separate levels |
+| `opportunity_constraint_evidence` | why each value was asserted: the kind, the source field, the `rule_id`, and the **minimal fragment** matched, capped at 200 characters. A pointer into the posting, never a copy of it |
+| `opportunity_constraint_conflicts` | the readings that disagreed and were therefore not used, as canonical JSON arrays of the values and the rules |
+| `opportunity_skill_requirements` | **reserved for Phase 3.5B and always empty after a 3.5A run.** It exists now only to pin the offer side to the `skills` vocabulary `0008` created, so 3.5B extends one catalogue instead of starting a rival |
+
+Three separate claims are kept apart on purpose, and no rule turns one into
+another: `visa_sponsorship` is what the **employer** offers to do,
+`work_authorization` is what the **applicant** must already hold, and what a
+**person** needs lives in `profile_preferences.visa_sponsorship_required`, on
+the other side of the database entirely.
+
+### Contradictions
+
+When two strong readings of one posting disagree — "fully remote" three lines
+above "fully on-site" — the scalar stays `NULL` and a row lands in
+`opportunity_constraint_conflicts` naming the values and the rules. Choosing
+between them would turn a defect in the posting into a fact about it. The one
+documented exception is the opportunity type, where the title outranks the
+description exactly as the Phase 2 classifier already decides it: a posting
+titled "PFE" whose body says "internship" is one thing at two grains.
+
+### Idempotence
+
+`source_fingerprint` is a SHA-256 over canonical JSON of exactly the fields the
+extractor reads — title, description, location, country, `remote_type` and the
+qualification's `opportunity_type` — with no clock, no row id and no
+dict-ordering dependence. The same pair `(source_fingerprint,
+extractor_version)` means nothing is rewritten, not even a timestamp; an edited
+description recomputes; and a new `extractor_version` recomputes even when the
+text is identical. This is the pattern `0004` already uses for qualification.
+
+### Not implemented by `0012`
+
+No opportunity is compared to a profile. No eligibility result, no
+`ELIGIBLE`/`NOT_ELIGIBLE` verdict, no `match_score`, no TF-IDF, no cosine
+similarity, no ranking, no recommendation and no notification. There is no
+`confidence` and no `score` column: a closed rule either found explicit
+evidence or it did not, and a number between the two would only invite a
+threshold. Skill and language requirements are not extracted — see 3.5B. There
+is no HTTP endpoint and no remote write path over these tables.
+
+(`opportunities` does carry `relevance_score`, `eligibility_score`,
+`match_score`, `priority_score` and `interview_potential_score` from `0001`.
+They are Phase 1 leftovers; Phase 3.5A neither reads nor writes them, and a
+test asserts they stay `NULL`.)
