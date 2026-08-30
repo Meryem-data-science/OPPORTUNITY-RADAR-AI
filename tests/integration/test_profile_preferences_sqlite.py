@@ -1109,3 +1109,142 @@ def _count_rows(connection, table: str, profile_id: int) -> int:
             f"SELECT COUNT(*) FROM {table} WHERE profile_id = ?", (profile_id,)
         ).fetchone()[0]
     )
+
+
+# --------------------------------------------------------------------------
+# A proof identifies an event, not a value
+# --------------------------------------------------------------------------
+#
+# The identity of a *value* is its canonical JSON, and it is deterministic:
+# that is what tells a no-op from a correction. The identity of a *proof* is
+# something else — a person sat down and typed something on some occasion — and
+# two occasions are two proofs even when the words are identical. Conflating
+# the two would make going back to a previous answer, an ordinary thing to do,
+# leave two facts of one profile sharing one proof.
+
+
+def _provenance_keys(connection, profile_id: int) -> list[str]:
+    """Every proof recorded for this profile, oldest first, with its fact."""
+    return [
+        str(row[0])
+        for row in connection.execute(
+            "SELECT p.provenance_key FROM profile_fact_provenance AS p "
+            "JOIN profile_facts AS f ON f.id = p.fact_id "
+            "WHERE f.profile_id = ? ORDER BY p.id",
+            (profile_id,),
+        ).fetchall()
+    ]
+
+
+def test_returning_to_a_previous_value_records_a_third_distinct_proof(
+    migrated, profile_id
+) -> None:
+    """A -> B -> A is three statements, three facts and three proofs.
+
+    The first A and the last A are the same words on two different occasions.
+    A key derived from the words would be one key on two facts, which is the
+    state `AmbiguousFactEvidenceError` reports and which would then break
+    `ensure_profile_fact_proposal` for this profile.
+    """
+    first = set_profile_availability(migrated, profile_id, AVAILABILITY)
+    second = set_profile_availability(migrated, profile_id, OTHER_AVAILABILITY)
+    third = set_profile_availability(migrated, profile_id, AVAILABILITY)
+    synchronize_profile_preferences(migrated, profile_id)
+
+    assert (first.action, second.action, third.action) == (
+        ExplicitInputAction.CREATED,
+        ExplicitInputAction.CORRECTED,
+        ExplicitInputAction.CORRECTED,
+    )
+
+    facts = list_profile_facts(migrated, profile_id)
+    assert len(facts) == 3
+    by_id = {fact.id: fact for fact in facts}
+    assert by_id[first.fact_id].status.value == "CORRECTED"
+    assert by_id[second.fact_id].status.value == "CORRECTED"
+    assert by_id[third.fact_id].status.value == "ACCEPTED"
+    # The chain is intact and every value ever stated is still readable.
+    assert by_id[first.fact_id].replaced_by_fact_id == second.fact_id
+    assert by_id[second.fact_id].replaced_by_fact_id == third.fact_id
+    assert by_id[first.fact_id].value == encode_availability(AVAILABILITY)
+    assert by_id[third.fact_id].value == encode_availability(AVAILABILITY)
+    # Same words, and deliberately the same bytes: the value stays canonical.
+    assert by_id[first.fact_id].value == by_id[third.fact_id].value
+
+    keys = _provenance_keys(migrated, profile_id)
+    sources = {row[2] for row in _provenance_rows(migrated)}
+    assert len(keys) == 3
+    assert sources == {"USER_INPUT"}
+    # Three occasions, three proofs. This is the assertion the fix is about.
+    assert len(set(keys)) == 3
+
+    # The projection describes the last statement, and settles.
+    assert get_profile_availability(migrated, profile_id).fact_id == third.fact_id
+    assert get_profile_availability(migrated, profile_id).value == AVAILABILITY
+    again = synchronize_profile_preferences(migrated, profile_id)
+    assert (again.created, again.removed) == (0, 0)
+    assert not again.changed
+
+
+def test_no_two_facts_of_a_profile_ever_share_a_proof(migrated, profile_id) -> None:
+    """The invariant the whole facts package rests on, over a busy history."""
+    for statement in (AVAILABILITY, OTHER_AVAILABILITY, AVAILABILITY):
+        set_profile_availability(migrated, profile_id, statement)
+    for scope in (MobilityScope.OPEN, MobilityScope.RESTRICTED, MobilityScope.OPEN):
+        set_profile_mobility(
+            migrated,
+            profile_id,
+            MobilityPreference(
+                scope,
+                TEST_ONLY_LOCATIONS if scope is MobilityScope.RESTRICTED else (),
+            ),
+        )
+    set_profile_career_objectives(migrated, profile_id, OBJECTIVES)
+
+    shared = migrated.execute(
+        "SELECT p.provenance_key FROM profile_fact_provenance AS p "
+        "JOIN profile_facts AS f ON f.id = p.fact_id "
+        "WHERE f.profile_id = ? "
+        "GROUP BY p.provenance_key HAVING COUNT(DISTINCT p.fact_id) > 1",
+        (profile_id,),
+    ).fetchall()
+
+    assert shared == []
+    keys = _provenance_keys(migrated, profile_id)
+    assert len(set(keys)) == len(keys) == 7
+
+
+def test_a_proof_key_names_the_contract_and_the_domain_and_nothing_personal(
+    migrated, profile_id
+) -> None:
+    outcome = set_profile_career_objectives(migrated, profile_id, OBJECTIVES)
+    key = list_profile_fact_provenance(migrated, profile_id, outcome.fact_id)[
+        0
+    ].provenance_key
+
+    contract, domain, event = key.split(":")
+    assert contract == EXPLICIT_PROFILE_INPUT_VERSION
+    assert domain == "CAREER_OBJECTIVE"
+    # An opaque event id: 32 hex characters, and nothing recoverable from it.
+    assert len(event) == 32
+    assert set(event) <= set("0123456789abcdef")
+    for value in (*TEST_ONLY_OBJECTIVES, TEST_ONLY_EMAIL):
+        assert value not in key
+
+
+def test_restating_the_same_value_records_no_event_at_all(
+    migrated, profile_id
+) -> None:
+    """A no-op writes no fact, so it generates no proof and no event id."""
+    set_profile_availability(migrated, profile_id, AVAILABILITY)
+    facts_before = _fact_rows(migrated)
+    provenance_before = _provenance_rows(migrated)
+
+    outcome = set_profile_availability(migrated, profile_id, AVAILABILITY)
+
+    assert outcome.action is ExplicitInputAction.UNCHANGED
+    assert len(_fact_rows(migrated)) == len(facts_before) == 1
+    assert len(_provenance_rows(migrated)) == len(provenance_before) == 1
+    # Byte-identical rows: no new key, and no timestamp moved anywhere.
+    assert _fact_rows(migrated) == facts_before
+    assert _provenance_rows(migrated) == provenance_before

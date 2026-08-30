@@ -38,10 +38,10 @@ person typed is what gets recorded.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
+from uuid import uuid4
 
 from services.digital_twin.facts.models import (
     FactSourceType,
@@ -126,27 +126,43 @@ class ExplicitInputOutcome:
         }
 
 
-def _provenance(fact_type: ProfileFactType, canonical_value: str) -> ProvenanceInput:
-    """The `USER_INPUT` evidence for one explicit statement.
+def _provenance(fact_type: ProfileFactType) -> ProvenanceInput:
+    """The `USER_INPUT` evidence for one act of typing something.
 
-    The key is derived rather than left to the automatic one, for a reason that
-    matters at this scale: the automatic key for a bare `USER_INPUT` provenance
-    is a function of no fields at all, so every explicit statement of every
-    domain would resolve to the *same* key, and a profile that stated two of
-    them would have two facts sharing one proof — the exact state
-    `AmbiguousFactEvidenceError` is there to report. Naming the contract, the
-    domain and a digest of the canonical value keeps one proof for one
-    statement.
+    Two identities are at play in this package and they are **not** the same
+    one, which is the whole reason this function exists:
 
-    The digest is what goes into the key, never the text: a provenance key is
-    read by operators and printed in errors, and somebody's career objective is
-    not an identifier.
+    * the identity of a *value* is its canonical JSON. That is what tells
+      `UNCHANGED` from a correction, and it is fully deterministic — the same
+      statement always encodes to the same bytes;
+    * the identity of a *proof* is this key, and a proof is an **event**: a
+      person sat down and typed something on some occasion. Two occasions are
+      two proofs even when the person typed the same words both times.
+
+    Deriving the key from the canonical value conflated the two. A person who
+    said A, then B, then A again has made three statements, but the first and
+    third would have resolved to one key — leaving two facts of one profile
+    sharing a single proof, which is exactly the state
+    `AmbiguousFactEvidenceError` exists to report, and which would make
+    `ensure_profile_fact_proposal` and `ensure_profile_fact_provenance` raise
+    on that profile from then on. Going back to a previous answer is an
+    ordinary thing to do; it must not corrupt the evidence.
+
+    So the key names the contract and the domain, and identifies the event with
+    a fresh `uuid4`. It carries no personal content — not the text, not even a
+    digest of it: a provenance key is read by operators and printed in errors,
+    and somebody's career objective is not an identifier. Two different events
+    cannot collide, and nothing about the value can be recovered from the key.
+
+    This is called **only** where a fact is actually written, from the
+    `CREATED` and `CORRECTED` branches of `_record_singleton`. A no-op writes
+    no fact, so it generates no event and no key: restating what one already
+    said is not an occasion of record.
     """
-    digest = hashlib.sha256(canonical_value.encode("utf-8")).hexdigest()[:32]
     return ProvenanceInput(
         source_type=FactSourceType.USER_INPUT,
         provenance_key=(
-            f"{EXPLICIT_PROFILE_INPUT_VERSION}:{fact_type.value}:{digest}"
+            f"{EXPLICIT_PROFILE_INPUT_VERSION}:{fact_type.value}:{uuid4().hex}"
         ),
     )
 
@@ -182,7 +198,7 @@ def _record_singleton(
             profile_id=profile_id,
             fact_type=fact_type,
             value=canonical_value,
-            provenance=_provenance(fact_type, canonical_value),
+            provenance=_provenance(fact_type),
         )
         return ExplicitInputOutcome(
             profile_id=profile_id,
@@ -206,7 +222,7 @@ def _record_singleton(
         profile_id,
         current_id,
         value=canonical_value,
-        provenance=_provenance(fact_type, canonical_value),
+        provenance=_provenance(fact_type),
     )
     return ExplicitInputOutcome(
         profile_id=profile_id,
