@@ -135,7 +135,7 @@ def test_status_before_any_extraction_reports_nothing_read(
     assert summary["constraint_projected"] == "2"
     assert summary["requirements_extracted"] == "0"
     assert summary["not_extracted"] == "2"
-    assert summary["extractor_version"] == "opportunity-requirements-v2"
+    assert summary["extractor_version"] == "opportunity-requirements-v3"
 
 
 def test_sync_reads_the_postings_and_reports_counters(logger, database, capsys) -> None:
@@ -200,7 +200,7 @@ def test_extract_one_reads_a_single_posting(logger, database, capsys) -> None:
 
     assert summary["opportunity_id"] == "1"
     assert summary["written"] == "true"
-    assert summary["extractor_version"] == "opportunity-requirements-v2"
+    assert summary["extractor_version"] == "opportunity-requirements-v3"
     assert summary["required_skill_rows"] == "1"
 
 

@@ -18,9 +18,20 @@ fingerprint is over `RequirementSource`'s fields, a test pins the two together,
 and 3.5B's digest is deliberately **not** 3.5A's: the two phases read different
 inputs, so they answer "did the source change?" differently and correctly.
 
-Ambiguities from the skill rules and the language rules are concatenated and
-renumbered here, so one posting has one ambiguity sequence and
-`UNIQUE (opportunity_id, position)` in `0013` means what it says.
+Ambiguities from the skill rules and the language rules are concatenated,
+**deduplicated**, and renumbered here, so one posting has one ambiguity sequence
+and `UNIQUE (opportunity_id, position)` in `0013` means what it says.
+
+The deduplication is worth stating plainly, because it is the kind of thing that
+looks like hiding evidence and is not. An ambiguity row holds the refusal's
+kind, reason, rule, fragment and heading — and **not** the terms of the group it
+refused, deliberately, since storing them would be storing half a requirement.
+So when one sentence produces two refusals that agree on every one of those five
+fields, the second row carries nothing the first does not: it says "and this
+happened again, over the same words, for the same reason". The real corpus
+produced exactly that. Two refusals differing in any field — a different
+fragment, a different reason, a different heading — are two different facts and
+both survive.
 """
 
 from __future__ import annotations
@@ -35,6 +46,7 @@ from services.collector.extractors.opportunity_constraints.requirements.language
 from services.collector.extractors.opportunity_constraints.requirements.models import (
     REQUIREMENT_EXTRACTOR_VERSION,
     ExtractedRequirements,
+    RequirementAmbiguity,
     RequirementSource,
 )
 from services.collector.extractors.opportunity_constraints.requirements.sections import (
@@ -71,6 +83,32 @@ def requirement_source_fingerprint(source: RequirementSource) -> str:
     return hashlib.sha256(serialized).hexdigest()
 
 
+def _deduplicated(
+    ambiguities: tuple[RequirementAmbiguity, ...]
+) -> tuple[RequirementAmbiguity, ...]:
+    """Drop refusals identical to one already recorded, keeping the first.
+
+    The key is everything a row actually stores. Order is preserved, so the
+    surviving row is the one the posting produced first and the sequence stays
+    the reading order — nothing is sorted and nothing is merged.
+    """
+    seen: set[tuple[str, str, str, str, str | None]] = set()
+    kept: list[RequirementAmbiguity] = []
+    for ambiguity in ambiguities:
+        key = (
+            ambiguity.kind.value,
+            ambiguity.reason.value,
+            ambiguity.rule_id,
+            ambiguity.text,
+            ambiguity.context_heading_text,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(ambiguity)
+    return tuple(kept)
+
+
 def extract_opportunity_requirements(
     source: RequirementSource,
 ) -> ExtractedRequirements:
@@ -88,7 +126,9 @@ def extract_opportunity_requirements(
     languages, language_ambiguities = read_language_requirements(segments)
     ambiguities = tuple(
         replace(ambiguity, position=position)
-        for position, ambiguity in enumerate(skill_ambiguities + language_ambiguities)
+        for position, ambiguity in enumerate(
+            _deduplicated(skill_ambiguities + language_ambiguities)
+        )
     )
     return ExtractedRequirements(
         opportunity_id=source.opportunity_id,

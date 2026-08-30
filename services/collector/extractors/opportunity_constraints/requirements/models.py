@@ -63,7 +63,23 @@ from services.collector.extractors.opportunity_constraints.models import (
 #:   SQL is required" produced nothing at all, because one clause's cancelling
 #:   words deleted another clause's demand. Levels are now read over the clause
 #:   each term belongs to — see `signals.term_clauses`.
-REQUIREMENT_EXTRACTOR_VERSION = "opportunity-requirements-v2"
+#:
+#: `v3` is the first reading of the real corpus talking back. 373 postings
+#: produced 175 refusals, and inspecting them showed most were right — `Python
+#: or JavaScript`, `AWS, GCP, or Azure`, `English, Dutch or French` are choices
+#: and must stay refused — while three families were not:
+#:
+#: * **a bare `/` was treated as an `or` everywhere.** `AI/ML engineering`,
+#:   `AI/ML APIs` and `ML/LLM-powered system` are lexical compounds naming one
+#:   field, and reporting them as choices was wrong; so `Link` now separates
+#:   `SLASH` from `OR`, and a closed registry names the compounds. They are
+#:   still not turned into two obligations — see
+#:   `AmbiguityReason.COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`;
+#: * **`Bilingualism (English/French)` read as a choice**, because the
+#:   both-marker knew the adjective and not the noun;
+#: * **one sentence could store the same refusal twice**, once per run, and the
+#:   rows were byte-identical because the group's terms are not stored.
+REQUIREMENT_EXTRACTOR_VERSION = "opportunity-requirements-v3"
 
 #: The longest proficiency text stored. A level is a word or a code — `B2`,
 #: `Fluent`, `Professional proficiency` — and anything longer is a sentence
@@ -164,6 +180,11 @@ class AmbiguityReason(StrEnum):
 
     #: "Python or R required" — a choice, not two obligations.
     ALTERNATIVE_GROUP_UNSUPPORTED = "ALTERNATIVE_GROUP_UNSUPPORTED"
+    #: "AI/ML engineering required" — one field written with a slash. Not a
+    #: choice between the halves, and not two demands either: the posting used a
+    #: combined expression this version cannot represent without changing what
+    #: it says. See `COMPOUND_SKILL_EXPRESSIONS` in `skill_catalog.py`.
+    COMPOUND_SKILL_EXPRESSION_UNSUPPORTED = "COMPOUND_SKILL_EXPRESSION_UNSUPPORTED"
     #: "English B2 required" beside "English C1 required" — the language is
     #: still required; only the level is unknowable.
     CONFLICTING_LANGUAGE_PROFICIENCY = "CONFLICTING_LANGUAGE_PROFICIENCY"

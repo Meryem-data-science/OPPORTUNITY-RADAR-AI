@@ -1054,10 +1054,34 @@ down. A line that names a catalogue term is never read as a heading, because
 
 **An OR is never widened into an AND.** "Python or R required" is one
 requirement satisfiable two ways; storing it as two requirements would let
-Phase 3.6 demand both and reject somebody the posting would have accepted. v1
+Phase 3.6 demand both and reject somebody the posting would have accepted. It
 stores neither and writes a row in `opportunity_requirement_ambiguities`, so
 UNKNOWN is a decision on the record rather than a silence. `and` still gives
-two requirements, and `bilingual English/French` still gives two languages.
+two requirements.
+
+**A bare slash is neither.** The real corpus writes `AI/ML engineering`,
+`AI/ML APIs` and `ML/LLM-powered system`, and none of those offers to accept
+either half — reading them as choices reported an offer nobody made, and
+reading them as conjunctions would have invented two obligations out of one
+noun phrase. `Link` therefore separates `SLASH` from `OR`; a closed registry in
+`skill_catalog.py`, keyed by canonical skill key so `AI/ML` and `ML/AI` are one
+entry, names the compounds; and they are refused under their own reason,
+`COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`. Every unregistered slash —
+`Python/R`, `TensorFlow/PyTorch`, `C/C++` — stays refused as a choice, and
+`and/or` is a written `or` whatever punctuation surrounds it. There is
+deliberately no rule of the shape "two AI skills around a slash are one
+expression".
+
+`bilingual English/French` still gives two languages, and so does
+`Bilingualism (English/French)`: the marker knows the noun as well as the
+adjective, because that is how a real posting wrote it. An explicit `or` beats
+it.
+
+**Two identical refusals of one sentence are stored once.** An ambiguity row
+holds the kind, reason, rule, fragment and heading, and deliberately not the
+terms of the group it refused, so a second row agreeing on all five carries
+nothing the first does not. Anything differing in any field is two facts and
+both survive.
 
 **The vocabulary is the shared one and it is never seeded.** Skills resolve
 through the Phase 3.4A normalizer, so the offer side and the profile side
@@ -1100,9 +1124,11 @@ is not read as a standalone `C`.
 
 Idempotence is `source_fingerprint` plus `extractor_version`, over exactly the
 field 3.5B reads: the description, and nothing else. The version is its own,
-`opportunity-requirements-v2`, so a skill rule changing never recomputes a start
-date. `v2` is the two corrections above; every `v1` row is recomputed, because
-both change what a given description reads as. `opportunity_requirement_extraction_state` records that a posting **was
+`opportunity-requirements-v3`, so a skill rule changing never recomputes a start
+date. `v2` made token boundaries Unicode-aware and moved a level from the
+sentence to the clause; `v3` is the corpus talking back — slash semantics,
+bilingualism and refusal deduplication. Each changes what a given description
+reads as, so older rows are recomputed rather than trusted. `opportunity_requirement_extraction_state` records that a posting **was
 read**, which is what distinguishes "asks for nothing" from "never extracted".
 
 Phase 3.5B depends on Phase 3.5A: every row hangs off `opportunity_constraints`,

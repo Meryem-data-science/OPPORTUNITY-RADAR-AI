@@ -37,11 +37,13 @@ from dataclasses import dataclass
 from services.digital_twin.skills.normalizer import normalize_skill
 
 __all__ = [
+    "COMPOUND_SKILL_EXPRESSIONS",
     "SKILL_CATALOG",
     "SKILL_DEFINITIONS",
     "SkillCatalogError",
     "SkillDefinition",
     "SkillTerm",
+    "is_compound_expression",
 ]
 
 
@@ -245,3 +247,71 @@ def _resolve(definitions: tuple[SkillDefinition, ...]) -> tuple[SkillTerm, ...]:
 
 #: The catalogue, resolved once at import time.
 SKILL_CATALOG: tuple[SkillTerm, ...] = _resolve(SKILL_DEFINITIONS)
+
+
+#: The slashed expressions that name **one thing**, keyed by canonical skill key.
+#:
+#: A closed registry, and closed is the point. Running `v2` over the real corpus
+#: produced 163 skill alternative-group refusals, and reading them showed most
+#: were real choices worth refusing — `Python or JavaScript`, `AWS, GCP, or
+#: Azure`, `TensorFlow, PyTorch, or HuggingFace` — but a recurring family was
+#: not a choice at all:
+#:
+#:     AI/ML engineering        AI/ML APIs        AI/ML conferences
+#:     ML/LLM-powered system    AI/ML experience
+#:
+#: Nobody writing "AI/ML engineering" is offering to accept either half. It is
+#: one field written with a slash, the way "read/write" is one operation. So
+#: neither reading available in `v2` was right: refusing it as a choice reported
+#: an alternative the posting never offered, and accepting it as two
+#: requirements would have invented two obligations out of one noun phrase.
+#: `v3` names the situation instead — see `AmbiguityReason`.
+#:
+#: The registry is **frozensets of canonical keys**, so `AI/ML` and `ML/AI` are
+#: one entry and every alias that resolves to the same skill is covered without
+#: listing spellings. There is deliberately no rule of the shape "two Data/AI
+#: skills around a slash are a compound": that would quietly absorb
+#: `TensorFlow/PyTorch`, which *is* a choice. Growing this set is a decision
+#: with its own review, and it moves `REQUIREMENT_EXTRACTOR_VERSION`.
+_COMPOUND_EXPRESSION_NAMES: tuple[tuple[str, ...], ...] = (
+    ("Artificial Intelligence", "Machine Learning"),
+    ("Machine Learning", "Large Language Models"),
+)
+
+
+def _resolve_compounds(
+    names: tuple[tuple[str, ...], ...]
+) -> frozenset[frozenset[str]]:
+    """Resolve the registry to canonical keys, refusing a name nothing defines."""
+    known = {term.canonical_key for term in SKILL_CATALOG}
+    resolved: set[frozenset[str]] = set()
+    for group in names:
+        keys = frozenset(normalize_skill(name).canonical_key for name in group)
+        if len(keys) < 2:
+            raise SkillCatalogError(
+                f"a compound expression needs two distinct skills: {group!r}"
+            )
+        missing = keys - known
+        if missing:
+            raise SkillCatalogError(
+                f"compound expression {group!r} names skills the catalogue "
+                f"does not define: {sorted(missing)!r}"
+            )
+        resolved.add(keys)
+    return frozenset(resolved)
+
+
+#: The registry, resolved once at import time.
+COMPOUND_SKILL_EXPRESSIONS: frozenset[frozenset[str]] = _resolve_compounds(
+    _COMPOUND_EXPRESSION_NAMES
+)
+
+
+def is_compound_expression(keys) -> bool:
+    """Whether these canonical skill keys are one registered slashed expression.
+
+    Exact set membership, never a subset: `AI/ML/LLM` is three things around two
+    slashes and is not any of the pairs below, so it stays the conservative
+    reading rather than being partially recognised.
+    """
+    return frozenset(keys) in COMPOUND_SKILL_EXPRESSIONS

@@ -37,11 +37,13 @@ language.** "English B2 required" beside "English C1 required" leaves English
 `CONFLICTING_LANGUAGE_PROFICIENCY` ambiguity saying why. Picking B2 or C1 would
 be this package settling a contradiction in somebody's advertisement.
 
-One special case earns its own rule: **"bilingual X/Y" means both.** The slash
-in `Python/R` is a choice; the slash in "bilingual English/French" is not,
-because the word in front of it says the posting wants the two together.
-`or` still wins over it — "bilingual English or French" is a choice, however
-oddly phrased.
+One special case earns its own rule: **"bilingual X/Y" means both.** A bare
+slash between two languages says too little to store either — `English/French
+required` stays refused — but a posting that also wrote `bilingual`,
+`bilingue`, `bilingualism` or `bilinguisme` has said it wants the two together,
+and that is enough. An explicit `or` still wins over it: "bilingual English or
+French" is a choice, however oddly phrased. The marker is read in the **clause**
+that carries it, so a neighbouring clause cannot lend it to an unrelated pair.
 """
 
 from __future__ import annotations
@@ -103,7 +105,14 @@ _ATTRIBUTIVE_BEFORE = re.compile(
 )
 
 #: "Bilingual English/French" — the two together, not a choice between them.
-_BOTH_MARKER = re.compile(r"\b(?:bilingual|bilingue|trilingual|trilingue)\b", re.IGNORECASE)
+#:
+#: The nouns are here as well as the adjectives, and the corpus is why: a real
+#: posting writes "Bilingualism (English/French) is a significant asset", and a
+#: marker that knew only `bilingual` read it as a choice between the two
+#: languages. It is not a choice; it is one demand naming both.
+_BOTH_MARKER = re.compile(
+    r"\b(?:bi|tri)lingual(?:ism)?\b|\b(?:bi|tri)lingu(?:es?|isme)\b", re.IGNORECASE
+)
 #: An explicit `or` always beats the marker above.
 _EXPLICIT_OR = re.compile(r"\b(?:or|ou)\b", re.IGNORECASE)
 
@@ -191,7 +200,10 @@ def read_language_requirements(
             # "Bilingual X/Y" is read in the clause that carries it, so a
             # neighbouring clause cannot lend its marker to an unrelated pair.
             both = bool(_BOTH_MARKER.search(clause)) and not _EXPLICIT_OR.search(clause)
-            if run.alternative and not both:
+            # A slash is refused like a choice unless the clause said the
+            # posting wants both — there is no compound registry for languages,
+            # because "English/French" names no single language.
+            if (run.alternative or run.slashed) and not both:
                 refused.append(
                     RequirementAmbiguity(
                         position=len(refused),

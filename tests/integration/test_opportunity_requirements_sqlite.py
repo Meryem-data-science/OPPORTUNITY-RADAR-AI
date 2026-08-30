@@ -309,6 +309,12 @@ def test_the_skill_link_still_restricts_the_shared_vocabulary(
         (
             "INSERT INTO opportunity_requirement_ambiguities (opportunity_id, "
             "position, kind, reason, rule_id, evidence_text, extractor_version) "
+            "VALUES (?, 0, 'SKILL', 'COMPOUND_EXPRESSION', 'R', 'x', 'v')",
+            None,
+        ),
+        (
+            "INSERT INTO opportunity_requirement_ambiguities (opportunity_id, "
+            "position, kind, reason, rule_id, evidence_text, extractor_version) "
             "VALUES (?, 0, 'SOMETHING', 'ALTERNATIVE_GROUP_UNSUPPORTED', 'R', "
             "'x', 'v')",
             None,
@@ -568,15 +574,18 @@ def test_a_french_word_never_becomes_a_stored_requirement(migrated) -> None:
     assert int(migrated.execute("SELECT COUNT(*) FROM skills").fetchone()[0]) == 0
 
 
-def test_a_reading_stored_under_the_first_version_is_recomputed(
-    migrated, rich_opportunity
+@pytest.mark.parametrize(
+    "superseded", ("opportunity-requirements-v1", "opportunity-requirements-v2")
+)
+def test_a_reading_stored_under_an_earlier_version_is_recomputed(
+    migrated, rich_opportunity, superseded
 ) -> None:
-    """Both `v2` corrections change what a description reads as, so every `v1`
+    """Every correction so far changes what a description reads as, so an older
     row is replaced rather than trusted."""
     synchronize_opportunity_requirements(migrated)
     migrated.execute(
-        "UPDATE opportunity_requirement_extraction_state "
-        "SET extractor_version = 'opportunity-requirements-v1'"
+        "UPDATE opportunity_requirement_extraction_state SET extractor_version = ?",
+        (superseded,),
     )
     migrated.commit()
 
@@ -586,6 +595,117 @@ def test_a_reading_stored_under_the_first_version_is_recomputed(
     assert stored_requirement_signature(migrated, rich_opportunity)[1] == (
         REQUIREMENT_EXTRACTOR_VERSION
     )
+
+
+def test_the_reason_registry_accepts_the_compound_refusal(
+    migrated, rich_opportunity
+) -> None:
+    """`0013` is this phase's migration and is not merged, so it grew a member
+    rather than being patched by a `0014` nobody would want."""
+    migrated.execute(
+        "INSERT INTO opportunity_requirement_ambiguities (opportunity_id, "
+        "position, kind, reason, rule_id, evidence_text, extractor_version) "
+        "VALUES (?, 99, 'SKILL', 'COMPOUND_SKILL_EXPRESSION_UNSUPPORTED', "
+        "'RULE', 'AI/ML required', 'v')",
+        (rich_opportunity,),
+    )
+
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_requirement_ambiguities "
+            "WHERE reason = 'COMPOUND_SKILL_EXPRESSION_UNSUPPORTED'"
+        ).fetchone()[0]
+    ) == 1
+
+
+def test_a_compound_expression_is_projected_as_its_own_refusal(migrated) -> None:
+    """`AI/ML` stores neither half and is not reported as a choice."""
+    insert_opportunity(
+        migrated,
+        description="Strong AI/ML engineering experience is required. Python required.",
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    stored = dict(
+        migrated.execute(
+            "SELECT s.canonical_name, r.requirement "
+            "FROM opportunity_skill_requirements AS r "
+            "JOIN skills AS s ON s.id = r.skill_id"
+        )
+    )
+    reasons = [
+        row[0]
+        for row in migrated.execute(
+            "SELECT reason FROM opportunity_requirement_ambiguities ORDER BY position"
+        )
+    ]
+
+    assert stored == {"Python": "REQUIRED"}
+    assert reasons == ["COMPOUND_SKILL_EXPRESSION_UNSUPPORTED"]
+
+
+def test_bilingualism_is_projected_as_two_preferences(migrated) -> None:
+    insert_opportunity(
+        migrated,
+        description="Bilingualism (English/French) is a significant asset.",
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    stored = dict(
+        migrated.execute(
+            "SELECT language_name, requirement FROM opportunity_language_requirements"
+        )
+    )
+
+    assert stored == {"English": "PREFERRED", "French": "PREFERRED"}
+    assert int(
+        migrated.execute(
+            "SELECT COUNT(*) FROM opportunity_requirement_ambiguities"
+        ).fetchone()[0]
+    ) == 0
+
+
+def test_identical_refusals_are_stored_once_with_contiguous_positions(
+    migrated,
+) -> None:
+    insert_opportunity(
+        migrated,
+        description="Python or R required, and Java or Scala required.",
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    rows = migrated.execute(
+        "SELECT position, reason, evidence_text "
+        "FROM opportunity_requirement_ambiguities ORDER BY position"
+    ).fetchall()
+
+    assert len(rows) == 1
+    assert rows[0][0] == 0
+
+
+def test_positions_stay_contiguous_when_a_duplicate_is_dropped(migrated) -> None:
+    insert_opportunity(
+        migrated,
+        description=(
+            "AI/ML required, and AI/ML required. Python or R required. "
+            "English or French required."
+        ),
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    positions = [
+        row[0]
+        for row in migrated.execute(
+            "SELECT position FROM opportunity_requirement_ambiguities ORDER BY position"
+        )
+    ]
+
+    assert positions == list(range(len(positions)))
+    assert len(positions) == 3
 
 
 # --------------------------------------------------------------------------

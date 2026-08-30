@@ -1413,7 +1413,7 @@ was computed beside.
 | `opportunity_skill_requirement_evidence` | one mention: the minimal fragment (≤ 200 chars), the `rule_id`, the `source_field`, the heading it sat under, and `observed_requirement` — the level **that mention** stated, which may be weaker than the projected one |
 | `opportunity_language_requirements` | one language, `REQUIRED` or `PREFERRED`, with `proficiency_text` as the posting wrote it or `NULL`. `UNIQUE (opportunity_id, language_key)` |
 | `opportunity_language_requirement_evidence` | the same, plus `observed_proficiency_text`: the level *this* mention named |
-| `opportunity_requirement_ambiguities` | a demand the extractor understood and deliberately refused to store: `ALTERNATIVE_GROUP_UNSUPPORTED` or `CONFLICTING_LANGUAGE_PROFICIENCY`, with the fragment, the rule and the heading |
+| `opportunity_requirement_ambiguities` | a demand the extractor understood and deliberately refused to store: `ALTERNATIVE_GROUP_UNSUPPORTED`, `COMPOUND_SKILL_EXPRESSION_UNSUPPORTED` or `CONFLICTING_LANGUAGE_PROFICIENCY`, with the fragment, the rule and the heading. Deduplicated per posting on everything the row holds |
 | `opportunity_requirement_extraction_state` | that a posting **was read**, at which version, from which text: `source_fingerprint`, `extractor_version`, `extracted_at` |
 
 ### The vocabulary is shared and never seeded
@@ -1487,9 +1487,46 @@ have accepted with either. So neither is stored, and a row lands in
 this version cannot represent would be indistinguishable from a posting that
 never mentioned either technology.
 
-`and` still gives two requirements, and `bilingual English/French` still gives
-two languages: the word in front of the slash says the posting wants both. An
-explicit `or` beats it.
+`and` still gives two requirements.
+
+### A bare slash is not an `or`, and not an `and`
+
+Running the extractor over the real corpus produced 175 refusals, and most were
+right: `Python or JavaScript`, `AWS, GCP, or Azure`,
+`TensorFlow, PyTorch, or HuggingFace` and `English, Dutch or French` are choices
+and stay refused. One recurring family was not a choice at all —
+`AI/ML engineering`, `AI/ML APIs`, `ML/LLM-powered system`. Nobody writing those
+is offering to accept either half; it is one field written with a slash.
+
+Neither available reading was right, so a third exists. A closed registry —
+`COMPOUND_SKILL_EXPRESSIONS` in `requirements/skill_catalog.py`, keyed by
+**canonical skill key** so `AI/ML` and `ML/AI` are one entry and every alias is
+covered — names the slashed expressions that mean one thing. They are refused
+under `COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`: neither half is stored, and the
+row says the posting used a combined expression this version cannot represent.
+
+Everything else keeps the conservative reading. `Python/R`,
+`JavaScript/TypeScript`, `C/C++` and `TensorFlow/PyTorch` are refused as
+choices, `Python/Julia` is guarded even though the catalogue knows one half,
+and `and/or` is a written `or`. There is no rule of the shape "two AI skills
+around a slash are one expression", and nothing turns a slash into a
+conjunction.
+
+`bilingual English/French` still gives two languages, and so does
+`Bilingualism (English/French) is a significant asset` — the marker knows the
+nouns (`bilingualism`, `bilinguisme`) as well as the adjectives, because that is
+how the corpus wrote it. Without such a marker, `English/French required` stays
+refused; with an explicit `or`, so does `Bilingual English or French required`.
+
+### One refusal per thing refused
+
+An ambiguity row holds the kind, the reason, the rule, the fragment and the
+heading — and deliberately **not** the terms of the group it refused, since
+storing those would be storing half a requirement. So when one sentence produces
+two refusals agreeing on all five fields, the second carries nothing the first
+does not, and only the first is kept; positions are then renumbered from zero.
+Two refusals differing in any field — a different fragment, a different reason,
+a different kind — are two facts and both survive.
 
 ### Language proficiency is never translated
 
@@ -1527,10 +1564,12 @@ audit never finds a fragment claiming to have demanded something it did not.
 ### Idempotence
 
 `extractor_version` is `REQUIREMENT_EXTRACTOR_VERSION`
-(`opportunity-requirements-v2`), the version of the code that produced the row,
+(`opportunity-requirements-v3`), the version of the code that produced the row,
 and no caller can name another. `v2` made token boundaries Unicode-aware and
-moved a requirement's level from the sentence to the clause; both change what a
-given description reads as, so every `v1` row is recomputed rather than trusted. It is deliberately **not**
+moved a requirement's level from the sentence to the clause; `v3` separated the
+slash from the `or`, taught the bilingual marker its nouns, and deduplicated
+identical refusals. Each changes what a given description reads as, so an older
+row is recomputed rather than trusted. It is deliberately **not**
 `opportunity-constraints-v3`: 3.5A and 3.5B change for different reasons, and
 one shared label would make every skill fix recompute every start date.
 

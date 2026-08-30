@@ -229,18 +229,31 @@ CREATE INDEX idx_opportunity_language_requirement_evidence_requirement
 -- what an operator needs in order to decide whether v2 should learn to
 -- represent alternative groups.
 --
--- Two reasons, and no more than the code can actually raise:
+-- Three reasons, and no more than the code can actually raise:
 --
 -- * `ALTERNATIVE_GROUP_UNSUPPORTED` — the posting offered a choice ("Python or
 --   R", "one of Python, R or Julia", "English or French"). Storing each
 --   alternative as its own requirement would turn OR into AND: a later phase
 --   would look for somebody holding *all* of them, and reject a candidate the
 --   posting would have accepted with any one. So none of them is stored;
+-- * `COMPOUND_SKILL_EXPRESSION_UNSUPPORTED` — the posting wrote a slashed
+--   expression naming **one** thing: `AI/ML engineering`, `ML/LLM-powered
+--   system`. It is not a choice between the halves, so reporting it as one
+--   would describe an offer nobody made; and it is not two demands either, so
+--   storing both halves would invent two obligations out of one noun phrase.
+--   The registry of such expressions is closed and lives in
+--   `requirements/skill_catalog.py`; an unregistered slash — `Python/R`,
+--   `TensorFlow/PyTorch` — stays the conservative reading above;
 -- * `CONFLICTING_LANGUAGE_PROFICIENCY` — one posting demanded one language at
 --   two incompatible levels ("English B2 required" and "English C1 required").
 --   The language stays `REQUIRED`, because that part is not in dispute; only
 --   the level becomes UNKNOWN, because choosing B2 or C1 would be this
 --   extractor settling a contradiction in somebody's advertisement.
+--
+-- The rows are deduplicated per posting on everything they hold — kind, reason,
+-- rule, fragment and heading — because the group's terms are deliberately not
+-- stored, so two identical rows from two runs of one sentence would carry no
+-- information the first does not.
 --
 -- This is an audit trail, not a queue and not a lesser answer: nothing reads
 -- these rows to make a decision, and no phase downstream is allowed to treat
@@ -251,7 +264,9 @@ CREATE TABLE opportunity_requirement_ambiguities (
     position INTEGER NOT NULL CHECK (position >= 0),
     kind TEXT NOT NULL CHECK (kind IN ('SKILL', 'LANGUAGE')),
     reason TEXT NOT NULL CHECK (reason IN (
-        'ALTERNATIVE_GROUP_UNSUPPORTED', 'CONFLICTING_LANGUAGE_PROFICIENCY'
+        'ALTERNATIVE_GROUP_UNSUPPORTED',
+        'COMPOUND_SKILL_EXPRESSION_UNSUPPORTED',
+        'CONFLICTING_LANGUAGE_PROFICIENCY'
     )),
     rule_id TEXT NOT NULL CHECK (
         length(trim(rule_id)) > 0 AND rule_id = trim(rule_id)

@@ -160,6 +160,10 @@ _LOCAL_PREFERRED = tuple(
         r"\bis\s+(?:a\s+)?plus\b",
         r"\bare\s+(?:a\s+)?plus\b",
         r"\ba\s+(?:big\s+|strong\s+|major\s+)?plus\b",
+        # The copula is required on purpose: "asset management" is a domain,
+        # "is a significant asset" is a preference. The corpus writes both.
+        r"\b(?:is|are|would\s+be)\s+(?:an?\s+)?(?:significant\s+|strong\s+|real\s+|"
+        r"major\s+|considerable\s+|definite\s+|distinct\s+|clear\s+)?assets?\b",
         r"\bnice\s+to\s+have\b",
         r"\bnice-to-have\b",
         r"\bgood\s+to\s+have\b",
@@ -218,19 +222,37 @@ def clause_level(
 
 
 class Link(StrEnum):
-    """How a posting joined two terms it named next to each other."""
+    """How a posting joined two terms it named next to each other.
+
+    `OR` and `SLASH` are separate members, and the corpus is what separated
+    them. A written `or` says the posting will accept either term. A bare `/`
+    says far less than that: `AI/ML`, `ML/LLM` and `AI/ML engineering` are
+    lexical compounds naming one field, not offers to accept either half, and
+    `v2` read all of them as choices and refused perfectly ordinary sentences
+    over it. Reading them the other way round would be worse — `AI/ML` is not
+    two obligations either — so the two links exist to be handled differently,
+    and neither ever becomes an `AND`.
+    """
 
     #: "Python and SQL" — two demands.
     AND = "AND"
-    #: "Python or R", "Python/R", "and/or" — one demand, satisfied several ways.
+    #: "Python or R", "and/or", "|" — one demand, satisfied several ways.
     OR = "OR"
+    #: "AI/ML", "Python/R" — a bare slash, which says less than an `or`.
+    SLASH = "SLASH"
     #: A bare comma. Neither on its own; it inherits the run it belongs to.
     LIST = "LIST"
     #: Anything else, including ordinary words between the two terms.
     NONE = "NONE"
 
 
-_OR_GAP = re.compile(r"^(?:,\s*)?(?:or|ou|/|\||and\s*/\s*or|et\s*/\s*ou)$", re.IGNORECASE)
+#: `and/or` and `et/ou` are listed **before** the bare words, and they stay in
+#: the `OR` gap rather than falling through to `SLASH`: a posting writing
+#: `and/or` has said the word, whatever punctuation it wrapped it in.
+_OR_GAP = re.compile(
+    r"^(?:,\s*)?(?:and\s*/\s*or|et\s*/\s*ou|or|ou|\|)$", re.IGNORECASE
+)
+_SLASH_GAP = re.compile(r"^/$")
 _AND_GAP = re.compile(r"^(?:,\s*)?(?:and|et|&|\+)$", re.IGNORECASE)
 _LIST_GAP = re.compile(r"^,$")
 
@@ -246,6 +268,8 @@ def link_between(gap: str) -> Link:
     collapsed = " ".join(gap.split())
     if _OR_GAP.fullmatch(collapsed):
         return Link.OR
+    if _SLASH_GAP.fullmatch(collapsed):
+        return Link.SLASH
     if _AND_GAP.fullmatch(collapsed):
         return Link.AND
     if _LIST_GAP.fullmatch(collapsed):
@@ -261,23 +285,44 @@ _ALTERNATIVE_OPENER = re.compile(
 #: An `or` immediately after a run — "Python or Julia" where the catalogue does
 #: not know Julia. The choice is still a choice even when only one side of it is
 #: a term this package can name.
-_TRAILING_OR = re.compile(r"^\s*(?:,\s*)?(?:or|ou)\b|^\s*/\s*\w", re.IGNORECASE)
-_LEADING_OR = re.compile(r"(?:\bor|\bou)\s*$|\w\s*/\s*$", re.IGNORECASE)
+#:
+#: A bare slash is deliberately **not** in these: it has its own pair below, so
+#: that `AI/ML` is never classified by a rule whose name claims the posting
+#: wrote `or`.
+_TRAILING_OR = re.compile(
+    r"^\s*(?:,\s*)?(?:and\s*/\s*or|et\s*/\s*ou|or|ou)\b", re.IGNORECASE
+)
+_LEADING_OR = re.compile(
+    r"(?:\band\s*/\s*or|\bet\s*/\s*ou|\bor|\bou)\s*$", re.IGNORECASE
+)
+
+#: A bare slash immediately outside a run — "Python/Julia" where the catalogue
+#: does not know Julia. It is not an `or`, and it is not an `and` either, so the
+#: run is marked slashed and the caller decides what a slash means there.
+_TRAILING_SLASH = re.compile(r"^\s*/\s*\w")
+_LEADING_SLASH = re.compile(r"\w\s*/\s*$")
 
 
 @dataclass(frozen=True)
 class TermRun:
-    """A group of terms one sentence joined, and whether it is a choice.
+    """A group of terms one sentence joined, and how it joined them.
 
     `alternative` is true when the posting offered several ways to satisfy one
-    demand. A run of one term can be alternative too: "Python or Julia
-    required" names a choice whose other side is not in the catalogue, and
-    storing Python as a hard requirement would still be reading an OR as an
-    AND.
+    demand **in words**. A run of one term can be alternative too: "Python or
+    Julia required" names a choice whose other side is not in the catalogue, and
+    storing Python as a hard requirement would still be reading an OR as an AND.
+
+    `slashed` is true when the only thing joining the terms was a bare `/`. That
+    is reported separately because a slash is genuinely less informative than an
+    `or`: `AI/ML` names one field, `Python/R` probably names a choice, and the
+    caller — not this module — holds the closed registry that tells them apart.
+    An explicit `or` anywhere in the run wins, so a run is never both.
     """
 
     indexes: tuple[int, ...]
     alternative: bool
+    #: Defaulted so a caller that only cares about choices still reads clearly.
+    slashed: bool = False
 
 
 def term_runs(
@@ -296,6 +341,12 @@ def term_runs(
     between technologies this catalogue knows — "one of Python, R or Julia"
     ends in a term that is not in it, and the choice is a choice regardless.
 
+    A run is **slashed** when a bare `/` joined it — inside, or immediately
+    outside, so that `Python/Julia` stays as guarded as `Python or Julia` even
+    though the catalogue knows only one half. Slashed is not a choice and not a
+    conjunction; it is "the posting used a slash", and what a slash means is the
+    caller's closed decision.
+
     "Python, SQL and Spark" is therefore three requirements — the comma joins
     the first two into a run with no `or` in it, so its members stand alone
     anyway — while "Python, R or Julia" is one refused choice.
@@ -304,27 +355,41 @@ def term_runs(
         return ()
     runs: list[list[int]] = [[0]]
     has_or: list[bool] = [False]
+    has_slash: list[bool] = [False]
     for index in range(1, len(spans)):
         link = link_between(text[spans[index - 1][1] : spans[index][0]])
-        if link in (Link.OR, Link.LIST):
+        if link in (Link.OR, Link.SLASH, Link.LIST):
             runs[-1].append(index)
             has_or[-1] = has_or[-1] or link is Link.OR
+            has_slash[-1] = has_slash[-1] or link is Link.SLASH
             continue
         runs.append([index])
         has_or.append(False)
+        has_slash.append(False)
 
     opened = bool(_ALTERNATIVE_OPENER.search(text))
     grouped: list[TermRun] = []
-    for members, flag in zip(runs, has_or, strict=True):
+    for members, or_flag, slash_flag in zip(runs, has_or, has_slash, strict=True):
         before = text[: spans[members[0]][0]]
         after = text[spans[members[-1]][1] :]
         alternative = (
             opened
-            or flag
+            or or_flag
             or bool(_LEADING_OR.search(before))
             or bool(_TRAILING_OR.search(after))
         )
-        grouped.append(TermRun(indexes=tuple(members), alternative=alternative))
+        slashed = slash_flag or bool(
+            _LEADING_SLASH.search(before) or _TRAILING_SLASH.search(after)
+        )
+        grouped.append(
+            TermRun(
+                indexes=tuple(members),
+                alternative=alternative,
+                # A written `or` outranks punctuation: "AI/ML or Python" is a
+                # choice, whatever the slash was doing inside it.
+                slashed=slashed and not alternative,
+            )
+        )
     return tuple(grouped)
 
 

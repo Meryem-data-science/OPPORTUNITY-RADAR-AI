@@ -162,9 +162,12 @@ Phase 3 has started, and only these six slices of it exist:
   requirement**: "our stack includes Python", "you will build pipelines using
   Python" and "no prior Python experience is required" each produce nothing. **An
   `or` is not an `and`**: "Python or R required" is one requirement satisfiable
-  two ways, so v1 stores neither and records the refusal, because turning it
+  two ways, so it stores neither and records the refusal, because turning it
   into two obligations would let a later phase reject somebody the posting would
-  have accepted. Skills resolve through the Phase 3.4A normalizer into the same
+  have accepted. **A bare slash is neither**: `AI/ML engineering` names one
+  field, so a closed registry refuses it under its own reason instead of
+  reporting a choice nobody offered — while `Python/R` and `TensorFlow/PyTorch`
+  stay refused as choices. Skills resolve through the Phase 3.4A normalizer into the same
   `skills` vocabulary the profile side uses — **nothing is seeded**, a row
   appears only when a real posting requires that term — and matching is on
   **Unicode-aware** token boundaries, so `PostgreSQL` never yields `SQL`,

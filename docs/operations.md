@@ -1056,6 +1056,18 @@ French prose is not a technology either: token boundaries are Unicode-aware, so
 `Réseaux`, `Régression`, `Réalisation` and `Câblage` never produce the `R` or
 `C` skills, in composed or decomposed spelling.
 
+A slash is not an `or` either. `AI/ML engineering` and `ML/LLM-powered system`
+name one field, so they are refused under their own reason,
+`COMPOUND_SKILL_EXPRESSION_UNSUPPORTED`, rather than reported as a choice the
+posting never offered — and neither half is stored. The registry of such
+expressions is closed; `Python/R`, `C/C++` and `TensorFlow/PyTorch` stay refused
+as choices. `Bilingualism (English/French)` names both languages, like
+`Bilingual English/French`.
+
+Identical refusals of one sentence are stored once: the row holds no terms, so a
+second copy would carry nothing. Expect `ambiguity_rows` to stay substantial —
+real postings really do offer choices, and refusing them is the point.
+
 An `or` is not an `and`: "Python or R required" stores neither, and writes a
 row in `opportunity_requirement_ambiguities` instead — so an operator can see
 that the extractor understood an explicit demand and refused to corrupt it,
@@ -1076,7 +1088,7 @@ requires any more is left in place, because it is vocabulary and not a claim
 about anybody.
 
 **Idempotence.** `source_fingerprint` is over the description and nothing else,
-and `extractor_version` is `opportunity-requirements-v2`. A second `sync` writes
+and `extractor_version` is `opportunity-requirements-v3`. A second `sync` writes
 nothing and reports `changed=false`, including for a posting that requires
 nothing — `opportunity_requirement_extraction_state` records that it was read.
 An edited description recomputes; a new extractor version recomputes even when

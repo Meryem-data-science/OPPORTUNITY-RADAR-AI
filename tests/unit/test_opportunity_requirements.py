@@ -67,7 +67,10 @@ from services.collector.extractors.opportunity_constraints.requirements.signals 
     term_runs,
 )
 from services.collector.extractors.opportunity_constraints.requirements.skill_catalog import (
+    COMPOUND_SKILL_EXPRESSIONS,
     SKILL_CATALOG,
+    SkillCatalogError,
+    is_compound_expression,
 )
 from services.collector.extractors.opportunity_constraints.requirements.skills import (
     read_skill_requirements,
@@ -111,7 +114,7 @@ def test_the_requirement_version_is_its_own_contract() -> None:
         EXTRACTOR_VERSION,
     )
 
-    assert REQUIREMENT_EXTRACTOR_VERSION == "opportunity-requirements-v2"
+    assert REQUIREMENT_EXTRACTOR_VERSION == "opportunity-requirements-v3"
     assert REQUIREMENT_EXTRACTOR_VERSION != EXTRACTOR_VERSION
 
 
@@ -407,7 +410,7 @@ def test_a_cancelling_sentence_beats_its_section() -> None:
         (" et ", Link.AND),
         (" or ", Link.OR),
         (" ou ", Link.OR),
-        ("/", Link.OR),
+        ("/", Link.SLASH),
         (", or ", Link.OR),
         (",", Link.LIST),
         (" which we use daily, and ", Link.NONE),
@@ -739,7 +742,7 @@ def test_an_ambiguity_quotes_a_fragment_and_names_its_rule() -> None:
 
     assert ambiguity.text == "Python or R"
     assert ambiguity.context_heading_text == "Requirements"
-    assert ambiguity.rule_id == "SKILL_ALTERNATIVE_GROUP_V1"
+    assert ambiguity.rule_id == "SKILL_ALTERNATIVE_GROUP_V2"
 
 
 def test_a_silent_posting_records_nothing_at_all() -> None:
@@ -945,6 +948,312 @@ def test_the_local_rules_say_they_are_clause_local() -> None:
     # A heading meant the same thing before and means it now.
     assert signals.SECTION_REQUIRED_RULE_ID.endswith("_V1")
     assert signals.SECTION_PREFERRED_RULE_ID.endswith("_V1")
+
+
+# --------------------------------------------------------------------------
+# A slash is not an `or`
+#
+# `v2` classified every bare `/` as an alternative. Over 373 real postings that
+# refused `AI/ML engineering`, `AI/ML APIs` and `ML/LLM-powered system` as
+# choices the employer never offered. `v3` separates the two links, keeps a
+# closed registry of the compounds, and still stores neither half of either.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "gap, expected",
+    (
+        (" or ", Link.OR),
+        (" ou ", Link.OR),
+        (" and/or ", Link.OR),
+        (" et/ou ", Link.OR),
+        ("|", Link.OR),
+        ("/", Link.SLASH),
+        (" / ", Link.SLASH),
+        (" and ", Link.AND),
+        (",", Link.LIST),
+    ),
+)
+def test_a_bare_slash_is_its_own_connector(gap: str, expected) -> None:
+    assert link_between(gap) is expected
+
+
+@pytest.mark.parametrize(
+    "sentence", ("AI/ML required.", "ML/AI required.", "ML/LLM required.",
+                 "LLM/ML required.")
+)
+def test_a_registered_compound_stores_neither_half(sentence: str) -> None:
+    reading = read(sentence)
+
+    assert reading.skills == ()
+    assert [item.reason for item in reading.ambiguities] == [
+        AmbiguityReason.COMPOUND_SKILL_EXPRESSION_UNSUPPORTED
+    ]
+    assert reading.ambiguities[0].rule_id == "SKILL_COMPOUND_EXPRESSION_UNSUPPORTED_V1"
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    (
+        "Strong AI/ML engineering experience is required.",
+        "Experience building ML/LLM-powered systems is required.",
+        "AI/ML APIs required.",
+    ),
+)
+def test_a_compound_is_recognised_inside_a_longer_phrase(sentence: str) -> None:
+    reading = read(sentence)
+
+    assert reading.skills == ()
+    assert [item.reason.value for item in reading.ambiguities] == [
+        "COMPOUND_SKILL_EXPRESSION_UNSUPPORTED"
+    ]
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    (
+        "Python/R required.",
+        "JavaScript/TypeScript required.",
+        "C/C++ required.",
+        "TensorFlow/PyTorch required.",
+    ),
+)
+def test_an_unregistered_slash_stays_the_conservative_reading(sentence: str) -> None:
+    """A slash nobody registered is still never read as a conjunction."""
+    reading = read(sentence)
+
+    assert reading.skills == ()
+    assert [item.reason for item in reading.ambiguities] == [
+        AmbiguityReason.ALTERNATIVE_GROUP_UNSUPPORTED
+    ]
+
+
+@pytest.mark.parametrize(
+    "sentence", ("Python and/or R required.", "Python et/ou R required.")
+)
+def test_and_or_is_an_alternative_and_not_a_slash(sentence: str) -> None:
+    """The posting wrote the word, whatever punctuation it wrapped it in."""
+    reading = read(sentence)
+
+    assert reading.skills == ()
+    assert [item.reason for item in reading.ambiguities] == [
+        AmbiguityReason.ALTERNATIVE_GROUP_UNSUPPORTED
+    ]
+
+
+def test_a_written_or_beats_a_slash_inside_one_run() -> None:
+    assert reasons_of("AI/ML or Python required.") == ["ALTERNATIVE_GROUP_UNSUPPORTED"]
+
+
+def test_a_slash_whose_other_side_is_unknown_is_still_guarded() -> None:
+    """`Python/Julia` must not become a hard Python requirement."""
+    assert skills_of("Python/Julia required.") == {}
+    assert reasons_of("Python/Julia required.") == ["ALTERNATIVE_GROUP_UNSUPPORTED"]
+
+
+def test_a_compound_does_not_silence_the_rest_of_the_sentence() -> None:
+    reading = read("AI/ML and Python required.")
+
+    assert {item.canonical_name: item.requirement.value for item in reading.skills} == {
+        "Python": "REQUIRED"
+    }
+    assert [item.reason.value for item in reading.ambiguities] == [
+        "COMPOUND_SKILL_EXPRESSION_UNSUPPORTED"
+    ]
+
+
+def test_a_compound_under_a_required_heading_refuses_and_keeps_the_neighbour() -> None:
+    reading = read(
+        "Required Qualifications\n- AI/ML experience plus Python required"
+    )
+
+    assert {item.canonical_name for item in reading.skills} == {"Python"}
+    assert [item.reason.value for item in reading.ambiguities] == [
+        "COMPOUND_SKILL_EXPRESSION_UNSUPPORTED"
+    ]
+
+
+def test_a_compound_clause_that_demands_nothing_refuses_nothing() -> None:
+    """Clause-local reading, unchanged: a clause with no marker made no demand,
+    so there is no demand to refuse — the same rule that keeps `Our stack
+    includes Python or R` out of the ambiguity table."""
+    reading = read("AI/ML experience plus Python required.")
+
+    assert {item.canonical_name for item in reading.skills} == {"Python"}
+    assert reading.ambiguities == ()
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    (
+        "Python or JavaScript required.",
+        "AWS, GCP, or Azure required.",
+        "TensorFlow, PyTorch, or HuggingFace required.",
+        "Databricks, Snowflake or similar required.",
+    ),
+)
+def test_a_real_choice_is_still_refused(sentence: str) -> None:
+    """The corpus is full of these and every one of them must stay a refusal."""
+    reading = read(sentence)
+
+    assert reading.skills == ()
+    assert [item.reason for item in reading.ambiguities] == [
+        AmbiguityReason.ALTERNATIVE_GROUP_UNSUPPORTED
+    ]
+
+
+def test_a_conjunction_is_still_two_requirements() -> None:
+    assert skills_of("Python and SQL required.") == {
+        "Python": "REQUIRED",
+        "SQL": "REQUIRED",
+    }
+
+
+def test_the_compound_registry_is_closed_and_keyed_by_canonical_skill() -> None:
+    known = {term.canonical_key for term in SKILL_CATALOG}
+    for group in COMPOUND_SKILL_EXPRESSIONS:
+        assert len(group) >= 2
+        assert group <= known
+    assert is_compound_expression({"artificial intelligence", "machine learning"})
+    assert is_compound_expression({"machine learning", "artificial intelligence"})
+    assert not is_compound_expression({"python", "r"})
+    # Exact membership, never a subset: three terms are not any registered pair.
+    assert not is_compound_expression(
+        {"artificial intelligence", "machine learning", "large language models"}
+    )
+
+
+def test_the_compound_registry_refuses_a_skill_the_catalogue_lacks() -> None:
+    from services.collector.extractors.opportunity_constraints.requirements import (
+        skill_catalog,
+    )
+
+    with pytest.raises(SkillCatalogError):
+        skill_catalog._resolve_compounds((("Python", "TEST ONLY not a skill"),))
+
+
+def test_the_alternative_rule_says_its_responsibility_narrowed() -> None:
+    from services.collector.extractors.opportunity_constraints.requirements import (
+        skills as skill_rules,
+    )
+
+    assert skill_rules.ALTERNATIVE_GROUP_RULE_ID == "SKILL_ALTERNATIVE_GROUP_V2"
+    assert (
+        skill_rules.COMPOUND_EXPRESSION_RULE_ID
+        == "SKILL_COMPOUND_EXPRESSION_UNSUPPORTED_V1"
+    )
+
+
+# --------------------------------------------------------------------------
+# Bilingualism
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    (
+        "Bilingualism (English/French) is a significant asset.",
+        "Bilingualism (English/French) is an asset.",
+        "Bilinguisme (anglais/français) est un atout.",
+    ),
+)
+def test_bilingualism_names_both_languages_as_a_preference(sentence: str) -> None:
+    """The noun, not only the adjective. A real posting writes the noun."""
+    reading = read(sentence)
+
+    assert {item.language_name: item.requirement.value for item in reading.languages} == {
+        "English": "PREFERRED",
+        "French": "PREFERRED",
+    }
+    assert reading.ambiguities == ()
+
+
+def test_bilingual_still_names_both_languages_as_a_demand() -> None:
+    assert languages_of("Bilingual English/French required.") == {
+        "English": ("REQUIRED", None),
+        "French": ("REQUIRED", None),
+    }
+
+
+def test_a_slashed_pair_without_the_marker_stays_refused() -> None:
+    reading = read("English/French required.")
+
+    assert reading.languages == ()
+    assert [item.reason for item in reading.ambiguities] == [
+        AmbiguityReason.ALTERNATIVE_GROUP_UNSUPPORTED
+    ]
+
+
+def test_a_written_or_still_beats_the_bilingual_marker() -> None:
+    assert languages_of("Bilingual English or French required.") == {}
+    assert reasons_of("Bilingual English or French required.") == [
+        "ALTERNATIVE_GROUP_UNSUPPORTED"
+    ]
+
+
+def test_a_language_choice_is_still_refused() -> None:
+    assert languages_of("English, Dutch or French required.") == {}
+    assert reasons_of("English, Dutch or French required.") == [
+        "ALTERNATIVE_GROUP_UNSUPPORTED"
+    ]
+
+
+def test_asset_needs_its_copula_to_read_as_a_preference() -> None:
+    """`asset management` is a domain; `is an asset` is a preference."""
+    assert skills_of("Python is an asset.") == {"Python": "PREFERRED"}
+    assert skills_of("Asset management experience with Python.") == {}
+
+
+# --------------------------------------------------------------------------
+# Identical refusals are recorded once
+# --------------------------------------------------------------------------
+
+
+def test_two_identical_refusals_of_one_sentence_are_stored_once() -> None:
+    """The row holds no terms, so a second identical row carries nothing."""
+    reading = read("Python or R required, and Java or Scala required.")
+
+    assert reading.skills == ()
+    assert len(reading.ambiguities) == 1
+    assert reading.ambiguities[0].position == 0
+
+
+def test_two_refusals_with_different_words_are_both_kept() -> None:
+    reading = read("Python or R required. Java or Scala required.")
+
+    assert len(reading.ambiguities) == 2
+    assert [item.position for item in reading.ambiguities] == [0, 1]
+    assert len({item.text for item in reading.ambiguities}) == 2
+
+
+def test_two_refusals_with_different_reasons_are_both_kept() -> None:
+    reading = read("AI/ML required. Python or R required.")
+
+    assert {item.reason.value for item in reading.ambiguities} == {
+        "COMPOUND_SKILL_EXPRESSION_UNSUPPORTED",
+        "ALTERNATIVE_GROUP_UNSUPPORTED",
+    }
+    assert [item.position for item in reading.ambiguities] == [0, 1]
+
+
+def test_a_skill_refusal_and_a_language_refusal_are_both_kept() -> None:
+    reading = read("Python or R required. English or French required.")
+
+    assert [item.kind.value for item in reading.ambiguities] == ["SKILL", "LANGUAGE"]
+    assert [item.position for item in reading.ambiguities] == [0, 1]
+
+
+def test_deduplication_keeps_the_first_occurrence_and_renumbers_from_zero() -> None:
+    reading = read(
+        "AI/ML required, and AI/ML required. Python or R required."
+    )
+
+    assert [item.position for item in reading.ambiguities] == list(
+        range(len(reading.ambiguities))
+    )
+    assert reading.ambiguities[0].reason is (
+        AmbiguityReason.COMPOUND_SKILL_EXPRESSION_UNSUPPORTED
+    )
 
 
 # --------------------------------------------------------------------------
