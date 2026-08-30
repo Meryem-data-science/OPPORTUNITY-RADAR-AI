@@ -217,7 +217,7 @@ def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
         fact = accepted(connection, existing.profile_id, STRUCTURED_EXPERIENCE)
 
-        assert apply_migrations(connection) == ["0009"]
+        assert apply_migrations(connection) == ["0009", "0010"]
 
         assert {"profile_experiences", "profile_projects"} <= _tables(connection)
         # The facts that existed before the upgrade are untouched by it.
@@ -234,15 +234,20 @@ def test_0009_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0009",)
+    assert ("0009",) in recorded
     assert _counts(migrated) == (0, 0)
 
 
-def test_0009_is_the_only_migration_this_slice_adds() -> None:
+def test_0009_is_the_one_migration_this_slice_added() -> None:
+    """Phase 3.4B1 owns exactly `0009`, wherever the list has grown to since.
+
+    `0010` belongs to the Phase 3.4B2 projection of education, certification
+    and language facts, and is asserted by its own test module.
+    """
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
-    assert names[-1] == "0009_structured_profile_experiences_projects.sql"
-    assert len(names) == 9
+    assert names[8] == "0009_structured_profile_experiences_projects.sql"
+    assert [name for name in names if name.startswith("0009")] == [names[8]]
 
 
 def test_0009_alters_no_existing_table() -> None:
@@ -585,12 +590,24 @@ def test_a_second_synchronization_changes_nothing(migrated, profile_id):
     assert outcome.as_dict() == {
         "accepted_experience_facts": 2,
         "accepted_project_facts": 1,
+        "accepted_education_facts": 0,
+        "accepted_certification_facts": 0,
+        "accepted_language_facts": 0,
         "experience_rows": 2,
         "project_rows": 1,
+        "education_rows": 0,
+        "certification_rows": 0,
+        "language_rows": 0,
         "structured_experiences": 1,
         "unparsed_experiences": 1,
         "structured_projects": 1,
         "unparsed_projects": 0,
+        "structured_educations": 0,
+        "unparsed_educations": 0,
+        "structured_certifications": 0,
+        "unparsed_certifications": 0,
+        "structured_languages": 0,
+        "unparsed_languages": 0,
         "created": 0,
         "removed": 0,
         "structurer_version": STRUCTURED_PROFILE_VERSION,

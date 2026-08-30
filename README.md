@@ -85,6 +85,33 @@ Phase 3 has started, and only these six slices of it exist:
   projected, never dropped. No employer is deduced from a sentence, no role
   from a technology, no seniority from the word "stage", no duration, no
   calendar date from a school year and no skill from a project description.
+- **Phase 3.4B2** — the same projection, extended to the **verified**
+  education, certification and language facts. It reads
+  `fact_type IN ('EDUCATION', 'CERTIFICATION', 'LANGUAGE') AND status =
+  'ACCEPTED'` and adds `profile_educations`, `profile_certifications` and
+  `profile_languages`. **Punctuation proves that segments exist; it never
+  proves what they are about**, so a pipe-delimited diploma line is read as a
+  school and a programme only when **each of the two roles carries its own
+  exclusive proof** in a closed, tiny registry — one segment marked as an
+  institution (`université`, `école`, `institut`, `faculté`, `college`, …) and
+  not as a programme, the other marked as a programme (`master`, `licence`,
+  `diplôme`, `degree`, `ingénieur`, …) and not as an institution. Never by
+  position, and whether the line holds two segments or three. One marker is
+  never enough: `University Diploma in AI | Sorbonne` would be read backwards
+  by a rule that trusted it, so both fields stay `NULL` there. When the proofs
+  are missing, only the explicit period is kept and both stay `NULL`; when they
+  are there and the line carries no date, `period_text` stays `NULL` rather
+  than a year being looked for inside the words. A language line keeps its
+  level verbatim after at most one list marker is removed, so `• Anglais : C1`
+  stores `Anglais`, never `• Anglais`. A certification is read only from explicit labels
+  (`Certification : … | Délivré par : …`), never from a sentence, and a stated
+  intention ("préparation à", "objectif") is never turned into a credential. A
+  language level is read only when it is a whole form of a closed registry
+  (`A1`…`C2`, `débutant`, `courant`, `fluent`, `bilingue`, …) and is stored
+  **verbatim**: "courant" never becomes `C1`, "fluent" never becomes `C2`, and
+  no CEFR level is computed from anything. No `Bac+N` is derived from the word
+  "Master", no issuer, obtention date or expiry date is invented, and no
+  language is deduced from a project written in English.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is

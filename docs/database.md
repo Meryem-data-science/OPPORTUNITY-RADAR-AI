@@ -178,10 +178,12 @@ its own: there is no import log, no second registry and no `cv_versions`. See
 [operations.md](operations.md#cv-review-phase-33b).
 
 `0008` adds the Phase 3.4A skill projection described in
-[Normalized profile skills](#normalized-profile-skills) below, and `0009` the
+[Normalized profile skills](#normalized-profile-skills) below, `0009` the
 Phase 3.4B1 structured projection described in
-[Structured profile experiences and projects](#structured-profile-experiences-and-projects).
-Neither adds a column to `profiles`, `profile_facts` or
+[Structured profile experiences and projects](#structured-profile-experiences-and-projects),
+and `0010` the Phase 3.4B2 extension described in
+[Structured profile education, certifications and languages](#structured-profile-education-certifications-and-languages).
+None of the three adds a column to `profiles`, `profile_facts` or
 `profile_fact_provenance`, and the migrations stop there.
 
 ## Profile facts and their provenance
@@ -518,9 +520,10 @@ current proof. See [operations.md](operations.md#profile-skills-phase-34a).
 
 ### Not implemented by `0008`
 
-No administrable alias table, no structured project, experience, education,
-certification, language, preference, availability, mobility or career
-objective; no opportunity constraint, no eligibility rule, no skill extraction
+No administrable alias table, no preference, availability, mobility or career
+objective — the structured project, experience, education, certification and
+language tables belong to `0009` and `0010`, described below; no opportunity
+constraint, no eligibility rule, no skill extraction
 from an offer, no TF-IDF, no cosine similarity, no matching, no `match_score`,
 no ranking, no recommendation, no notification, no CV adaptation and no
 auto-apply. There is no HTTP endpoint and no remote write path over these
@@ -532,15 +535,21 @@ Migration `0009` adds the Phase 3.4B1 projection of **verified** experience and
 project facts, and nothing else: two tables, one composite index on
 `profile_facts`, no column on any existing table, no seeded row.
 
-`profile_facts` stays the source of truth:
+`profile_facts` stays the source of truth, for this projection and for the
+Phase 3.4B2 one that `0010` adds:
 
 ```text
 profile_facts  (the only place a claim is decided)
     |
-    +-> profile_experiences
-    |
-    +-> profile_projects
+    +-> profile_skills          (0008)
+    +-> profile_experiences     (0009)
+    +-> profile_projects        (0009)
+    +-> profile_educations      (0010)
+    +-> profile_certifications  (0010)
+    +-> profile_languages       (0010)
 ```
+
+**A `NULL` is worth more than an invented value** — in every one of them.
 
 Every row below is derived from a fact whose status is already `ACCEPTED`, and
 the projection reads
@@ -679,14 +688,251 @@ transaction:
 A second run on unchanged facts writes nothing, keeps every id and timestamp,
 and reports `changed=false`. A fact corrected or rejected after a run stops
 being projected at the next run, and its `ACCEPTED` replacement takes its
-place. See [operations.md](operations.md#structured-profile-entries-phase-34b1).
+place. See [operations.md](operations.md#structured-profile-entries-phase-34b1-and-34b2).
 
 ### Not implemented by `0009`
 
-No structured education, certification or language; no availability, mobility,
-preference or career objective; no eligibility rule, no opportunity constraint,
-no skill inferred from an experience or a project, no skill level, no matching,
-no `match_score`, no TF-IDF, no cosine similarity, no ranking, no
+No availability, mobility, preference or career objective; no eligibility rule,
+no opportunity constraint, no skill inferred from an experience or a project,
+no skill level, no matching, no `match_score`, no TF-IDF, no cosine similarity,
+no ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. Structured education, certifications and languages are `0010`,
+below. There is no HTTP endpoint and no remote write path over these tables.
+
+## Structured profile education, certifications and languages
+
+Migration `0010` adds the Phase 3.4B2 projection of **verified** education,
+certification and language facts, and nothing else: three tables, three
+indexes, no column on any existing table, no seeded row. It creates no index on
+`profile_facts`: the composite identity its foreign keys need is
+`idx_profile_facts_id_profile`, which `0009` already created and this migration
+reuses.
+
+Every row is derived from a fact whose status is already `ACCEPTED`, and the
+projection reads
+`fact_type IN ('EDUCATION', 'CERTIFICATION', 'LANGUAGE') AND status =
+'ACCEPTED'` and nothing else.
+
+**A `NULL` is worth more than an invented value.** Every fragment column is
+nullable, and a fragment is written only when the document itself delimited it
+with punctuation it wrote *and* a closed registry could say what the fragment
+is. No diploma is deduced from an institution and no institution from a
+diploma, no `Bac+N` or study level from the word "Master", no calendar date
+from a school year, no certification is assumed obtained, no issuer, obtention
+date or expiry date is invented, no language is deduced from a text written in
+one, and no CEFR level is computed from "courant" or "fluent". There is no
+`verified`, `confidence`, `score`, `seniority`, `match_score` or
+`inferred_level` column, for the same reason there is none in `0007`, `0008` or
+`0009`.
+
+No row of these tables is ever updated by the projection, so none carries
+`updated_at`: reconciliation inserts what is missing, deletes what has stopped
+being justified, and replaces — delete then insert — a row the current rules
+would write differently.
+
+### `profile_educations`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, part of the composite key below |
+| `institution_text` | nullable; non-blank and already trimmed when present |
+| `program_text` | nullable; same rule |
+| `period_text` | nullable; same rule. The fragment the document wrote, never a computed date |
+| `description_text` | nullable; same rule. The remaining lines of the fact, as written |
+| `structurer_version` | `NOT NULL`, non-empty and already trimmed |
+| `structuring_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+### `profile_certifications`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, part of the composite key below |
+| `certification_text` | nullable; non-blank and already trimmed when present |
+| `issuer_text` | nullable; same rule |
+| `period_text` | nullable; same rule |
+| `description_text` | nullable; same rule |
+| `structurer_version` | `NOT NULL`, non-empty and already trimmed |
+| `structuring_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+There is no `obtained`, `obtained_at`, `expires_at` or `credential_id` column: a
+CV line naming a certification does not state that it was obtained, when, or
+when it lapses.
+
+### `profile_languages`
+
+| column | rule |
+| --- | --- |
+| `id` | `INTEGER PRIMARY KEY` |
+| `profile_id` | `NOT NULL`, `FOREIGN KEY → profiles(id) ON DELETE CASCADE` |
+| `fact_id` | `NOT NULL UNIQUE`, part of the composite key below |
+| `language_text` | nullable; non-blank and already trimmed when present |
+| `proficiency_text` | nullable; same rule. The wording the document used, verbatim |
+| `structurer_version` | `NOT NULL`, non-empty and already trimmed |
+| `structuring_rule_id` | `NOT NULL`, non-empty and already trimmed |
+| `created_at` | `NOT NULL DEFAULT CURRENT_TIMESTAMP` |
+
+`proficiency_text` is deliberately **not** a CEFR column: it has no enumeration
+and no check constraining it to `A1..C2`, because storing "courant" as `C1`
+would be a translation nobody made.
+
+Like `0009`, all three carry `UNIQUE(fact_id)` — global, not per profile — and
+a **composite** foreign key,
+`FOREIGN KEY (fact_id, profile_id) REFERENCES profile_facts(id, profile_id)`,
+so a projection may not point at another profile's fact. Indexes:
+`idx_profile_educations_profile`, `idx_profile_certifications_profile`,
+`idx_profile_languages_profile`.
+
+No table duplicates `profile_fact_provenance`. Each records only what the
+projection itself decided — which structurer version, which structuring rule —
+and points at the fact for everything else:
+
+```text
+profile_education     → profile_fact → profile_fact_provenance
+profile_certification → profile_fact → profile_fact_provenance
+profile_language      → profile_fact → profile_fact_provenance
+```
+
+There is no `source_type`, `cv_sha256`, `parser_version`, `extractor_version`
+or `provenance_key` column here.
+
+### The Phase 3.4B2 structuring rules
+
+`STRUCTURED_PROFILE_VERSION` stays `structured-profile-v1`. Adding fact types
+is backward-compatible by construction: `EXPERIENCE_PIPE_HEADER_V1`,
+`PROJECT_BULLET_COLON_V1` and `UNPARSED_V1` read exactly what they read before,
+so the rows they produced were produced exactly as `structured-profile-v1` says
+they were, and no existing row is rewritten. The version moves the day one of
+those readings changes.
+
+**Punctuation proves that segments exist; it never proves what they are
+about.** A CV writes `role | employer | dates` in that order; it writes a
+diploma and a school in either, so the education rules never read a segment by
+its position.
+
+All three education rules start from an explicit pipe header — no opening list
+marker, `|`-separated segments that all carry text once trimmed — and all three
+tell a school from a programme the same way, from **two** closed registries:
+
+| registry | entries |
+| --- | --- |
+| `INSTITUTION_MARKERS` | `université`, `universite`, `university`, `école`, `ecole`, `school`, `institut`, `institute`, `faculté`, `faculte`, `faculty`, `college`, `collège`, `collége` |
+| `PROGRAM_MARKERS` | `master`, `mastère`, `mastere`, `bachelor`, `licence`, `diplôme`, `diplome`, `diploma`, `degree`, `ingénieur`, `ingenieur`, `ingénieure`, `ingenieure`, `doctorat`, `doctorate` |
+
+Both are matched on **whole words**, folded for comparison only. There is no
+stemming, no plural folding, no prefix match and no fuzzy comparison:
+`Universitaire`, `Universités`, `Masterclass` and `Licences` prove nothing. The
+two registries do not overlap, and a test asserts it.
+
+**Each role needs its own exclusive proof.** A pair of segments is named only
+when one is marked as an institution and **not** as a programme, and the other
+is marked as a programme and **not** as an institution. One marker is never
+enough, because a marker on one segment proves nothing about the other:
+`University Diploma in AI | Sorbonne` carries `university` on the segment that
+is the *programme* — it carries `diploma` too — while the school carries no
+marker at all, so a rule trusting the institution marker alone would store the
+two fields the wrong way round. A segment proving both roles at once proves
+neither, and two segments proving the same role prove nothing. The
+marked-as-institution segment is then `institution_text` and the other
+`program_text`, whichever order they appear in.
+
+The minimum number of segments is **two** here, unlike the three the experience
+rule requires. That rule needs three because it reads segments by position;
+these read none by position, so two written segments carry — or fail to carry —
+exactly the same proofs as three.
+
+`EDUCATION_PIPE_EXPLICIT_V1` applies when the header holds **exactly one**
+explicit period, exactly two segments remain besides it, and those two carry
+the exclusive proofs above. The remaining lines are `description_text`.
+
+`EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` applies when the header holds
+**exactly two** segments, **neither** of them an explicit period, and those two
+carry the same proofs. `period_text` stays `NULL`: a header with no date is a header
+with no date, and no year is looked for inside the words. Both segments must be
+free of an explicit period — in `Université Exemple | 2020 - 2022` the unmarked
+segment is a date, and reading it as a programme would be an invention, so that
+fact stays unparsed.
+
+`EDUCATION_PIPE_PERIOD_ONLY_V1` applies when a single period is certain and
+that distinction is not — a role with no proof, a segment proving both roles at
+once, both segments proving the same role, or more than two segments remaining.
+`period_text` is the fragment verbatim,
+`description_text` the remaining lines, and `institution_text` and
+`program_text` stay `NULL`. The certain part is preserved without the uncertain
+part being invented.
+
+`EDUCATION_UNPARSED_V1` is everything else, with every fragment `NULL`: no pipe
+header, an empty segment, a line opened by a list marker, several explicit
+periods, a two-segment header holding a date, a dateless two-segment header
+whose two roles are not both exclusively proven, and any dateless header of
+three segments or more — where the third segment would have no honest home.
+
+`CERTIFICATION_EXPLICIT_V1` applies when the fact states no intention — no
+whole word of the closed registry `préparation`, `preparation`, `préparer`,
+`preparer`, `objectif`, `objectifs`, `objective`, `goal`, `prévu`, `prevu`,
+`prévue`, `prevue`, `planned`, `futur`, `future` appears anywhere in it — and
+when every `|`-separated segment of the first line (after at most one list
+marker) is readable: either a whole explicit period, or an explicit
+`label: value` whose label is a closed registry entry. The certification labels
+are `certification`, `certificat`, `certificate`; the issuer labels are
+`délivré par`, `délivrée par`, `delivre par`, `delivree par`, `émis par`,
+`emis par`, `issued by`, `issuer`, `organisme`, `éditeur`, `editeur`. The
+certification label must appear exactly once and no label or period may repeat.
+An issuer nobody wrote stays `NULL`; a period nobody wrote stays `NULL`.
+
+`CERTIFICATION_UNPARSED_V1` is everything else, with every fragment `NULL` —
+including every stated intention, so "Préparation à la certification X" and
+"Objectif : certification X" never become a held credential.
+
+`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when the fact is a single line
+which, once at most **one** list marker has been removed, carries one explicit
+separator — a trailing parenthesis, a `:` that is not a URL scheme, a `|`, or a
+dash the document spaced on both sides — and everything on its right is a
+**whole** form of the closed proficiency registry:
+`a1`, `a2`, `b1`, `b2`, `c1`, `c2`, `débutant`, `debutant`, `intermédiaire`,
+`intermediaire`, `avancé`, `avance`, `courant`, `fluent`, `native`, `natif`,
+`bilingual`, `bilingue`. Case is folded to **compare** and never to store:
+`language_text` and `proficiency_text` are both kept exactly as typed, so
+`courant` stays `courant` and `C1` stays `C1`.
+
+The list marker is removed with the same conservative helper the project rule
+uses, and exactly one is removed. A CV writes its languages as a bulleted list
+as often as not and the Phase 3.2B extractor keeps a bullet block's source
+text, so `• Anglais : C1` reaches the structurer with its marker; that marker
+is punctuation the list wrote, not part of the language's name, and
+`language_text` would otherwise hold the layout. A second marker is content and
+stays where the document put it.
+
+`LANGUAGE_UNPARSED_V1` is everything else, with both fragments `NULL`: no
+separator, a dash the document did not space, a right side the registry does
+not hold whole, an empty side, or a fact spanning several lines — which this
+table has no column to keep.
+
+There is no stemming, no fuzzy comparison, no edit distance, no similarity, no
+embedding, no LLM and no API call anywhere in these rules, and no clock: the
+same fact value always produces the same reading.
+
+### Synchronizing
+
+The same `synchronize_structured_profile_entries(connection, profile_id)`, the
+same single `BEGIN IMMEDIATE` transaction, now covering five fact types and
+five tables. Every accepted fact of every projected type is projected exactly
+once, so `education_rows` equals `accepted_education_facts`,
+`certification_rows` equals `accepted_certification_facts` and `language_rows`
+equals `accepted_language_facts`. `skills`, `profile_skills` and
+`profile_skill_evidence` are never written: no skill is inferred from a
+diploma, a certification or a language.
+
+### Not implemented by `0010`
+
+No availability, mobility, preference or career objective; no eligibility rule,
+no opportunity constraint, no skill inference, no study level, no CEFR
+computation, no `match_score`, no TF-IDF, no cosine similarity, no ranking, no
 recommendation, no notification, no CV adaptation and no auto-apply. There is
 no HTTP endpoint and no remote write path over these tables.
 

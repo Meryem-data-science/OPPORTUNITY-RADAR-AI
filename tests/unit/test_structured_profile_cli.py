@@ -148,6 +148,63 @@ def test_sync_projects_the_accepted_facts_and_reports_counters(
     assert rows_of(database) == (2, 2)
 
 
+#: Invented education, certification and language wordings, for the Phase 3.4B2
+#: counters. They must never leave the database either.
+TEST_ONLY_B2_FACTS = (
+    (ProfileFactType.EDUCATION, "Master 2 Data Science | Université de Test | 2020 - 2022"),
+    (ProfileFactType.EDUCATION, "Diplômée en 2022 après deux ans d'études"),
+    (ProfileFactType.CERTIFICATION, "Certification : Test Cloud | 2023"),
+    (ProfileFactType.LANGUAGE, "Anglais : C1"),
+    (ProfileFactType.LANGUAGE, "Anglais lu, écrit et parlé"),
+)
+
+#: Every fragment the Phase 3.4B2 rows could hold, so no test has to guess
+#: which one a leak would expose.
+TEST_ONLY_B2_FRAGMENTS = (
+    "Université de Test",
+    "Master 2 Data Science",
+    "2020 - 2022",
+    "Test Cloud",
+    "Anglais",
+    "C1",
+)
+
+
+def test_sync_reports_the_education_certification_and_language_counters(
+    silence_logging, monkeypatch, tmp_path, capsys
+) -> None:
+    """The three Phase 3.4B2 types are counted, and none of them is printed."""
+    path = tmp_path / "structured-b2.db"
+    _seed(path, facts=TEST_ONLY_B2_FACTS)
+    monkeypatch.setenv("DATABASE_BACKEND", "sqlite")
+    monkeypatch.setenv("SQLITE_DATABASE_PATH", str(path))
+
+    exit_code = cli.main(
+        [cli.SYNC_COMMAND, "--email", TEST_ONLY_EMAIL], prompt=refuse_prompt
+    )
+    output = capsys.readouterr().out
+    summary = summary_of(output)
+
+    assert exit_code == 0
+    assert summary["accepted_education_facts"] == "2"
+    assert summary["accepted_certification_facts"] == "1"
+    assert summary["accepted_language_facts"] == "2"
+    assert summary["education_rows"] == "2"
+    assert summary["certification_rows"] == "1"
+    assert summary["language_rows"] == "2"
+    assert summary["structured_educations"] == "1"
+    assert summary["unparsed_educations"] == "1"
+    assert summary["structured_certifications"] == "1"
+    assert summary["unparsed_certifications"] == "0"
+    assert summary["structured_languages"] == "1"
+    assert summary["unparsed_languages"] == "1"
+    assert summary["created"] == "5"
+    assert summary["changed"] == "true"
+    for fragment in TEST_ONLY_B2_FRAGMENTS:
+        assert fragment not in output, fragment
+    assert TEST_ONLY_LOCAL_PART not in output
+
+
 def test_a_second_run_reports_no_change(silence_logging, database, capsys) -> None:
     cli.main([cli.SYNC_COMMAND, "--email", TEST_ONLY_EMAIL])
     capsys.readouterr()
@@ -213,12 +270,24 @@ def test_structured_events_carry_counters_and_never_a_value(database, capsys) ->
     assert succeeded["context"]["summary"] == {
         "accepted_experience_facts": 2,
         "accepted_project_facts": 2,
+        "accepted_education_facts": 0,
+        "accepted_certification_facts": 0,
+        "accepted_language_facts": 0,
         "experience_rows": 2,
         "project_rows": 2,
+        "education_rows": 0,
+        "certification_rows": 0,
+        "language_rows": 0,
         "structured_experiences": 1,
         "unparsed_experiences": 1,
         "structured_projects": 1,
         "unparsed_projects": 1,
+        "structured_educations": 0,
+        "unparsed_educations": 0,
+        "structured_certifications": 0,
+        "unparsed_certifications": 0,
+        "structured_languages": 0,
+        "unparsed_languages": 0,
         "created": 4,
         "removed": 0,
         "structurer_version": "structured-profile-v1",

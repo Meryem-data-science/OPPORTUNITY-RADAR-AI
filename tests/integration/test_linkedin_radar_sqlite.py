@@ -21,6 +21,7 @@ def test_linkedin_email_to_radar_to_sqlite_is_idempotent(tmp_path):
             "0007",
             "0008",
             "0009",
+            "0010",
         ]
     finally:
         connection.close()

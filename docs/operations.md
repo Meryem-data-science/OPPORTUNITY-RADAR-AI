@@ -576,20 +576,20 @@ database you name explicitly.
 The failures it can report are a refused backend and a missing profile, each
 with exit code 1.
 
-What this slice does **not** do: no administrable alias table, no structured
-education, certification, language, preference, availability, mobility or
-career objective; no opportunity constraint, no eligibility rule, no skill
-extraction from an offer, no TF-IDF, no cosine similarity, no matching, no
-match score, no ranking, no recommendation, no notification, no CV adaptation
-and no auto-apply. Structured experiences and projects are the separate
-Phase 3.4B1 projection below, which this command never runs and never reads.
+What this slice does **not** do: no administrable alias table, no preference,
+availability, mobility or career objective; no opportunity constraint, no
+eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
+similarity, no matching, no match score, no ranking, no recommendation, no
+notification, no CV adaptation and no auto-apply. Structured experiences,
+projects, education, certifications and languages are the separate Phase 3.4B
+projection below, which this command never runs and never reads.
 It opens no network connection and calls no model, and there is no web
 interface or HTTP endpoint for any of it.
 
-## Structured profile entries (Phase 3.4B1)
+## Structured profile entries (Phase 3.4B1 and 3.4B2)
 
-Migration `0009` is applied by the ordinary explicit command, like every other
-one:
+Migrations `0009` and `0010` are applied by the ordinary explicit command, like
+every other one:
 
 ```bash
 export DATABASE_BACKEND=sqlite
@@ -597,10 +597,13 @@ export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
 python -m services.collector.cli.migrate_configured --apply
 ```
 
-It creates `profile_experiences` and `profile_projects` and inserts no row.
+`0009` creates `profile_experiences` and `profile_projects`; `0010` creates
+`profile_educations`, `profile_certifications` and `profile_languages`. Neither
+inserts a row.
 
-Project the accepted experience and project facts of one existing profile onto
-structured rows:
+Project the accepted experience, project, education, certification and language
+facts of one existing profile onto structured rows — one command, one
+transaction, five tables, so a run never leaves a profile half-projected:
 
 ```bash
 python -m services.digital_twin.structured_profile.cli sync
@@ -615,25 +618,47 @@ anything.
 
 **It decides nothing.** Every fact it reads was already accepted by a person in
 the [CV review](#cv-review-phase-33b); a fact nobody accepted is invisible to
-it. It reads `fact_type IN ('EXPERIENCE', 'PROJECT') AND status = 'ACCEPTED'`
-and nothing else, so a `PROPOSED`, `REJECTED` or `CORRECTED` fact and an
-`ACCEPTED` fact of any other type never reach a row, and it never writes to
-`profile_facts` or `profile_fact_provenance`.
+it. It reads
+`fact_type IN ('EXPERIENCE', 'PROJECT', 'EDUCATION', 'CERTIFICATION',
+'LANGUAGE') AND status = 'ACCEPTED'` and nothing else, so a `PROPOSED`,
+`REJECTED` or `CORRECTED` fact and an `ACCEPTED` fact of any other type never
+reach a row, and it never writes to `profile_facts` or
+`profile_fact_provenance`.
 
 **Nothing is invented, and a `NULL` is worth more than a guess.** A fragment is
 written only where the document itself delimited it: a pipe header for an
-experience, a colon after an optional list marker for a project, a period only
-in a closed set of explicit temporal forms. Where the wording is not
-unambiguous the fragment stays `NULL` and the row records `UNPARSED_V1` — the
-accepted fact is still projected, never dropped. No employer is deduced from a
-sentence, no role from a technology, no seniority from the word "stage", no
-duration, no calendar date from a school year, no skill from a project
-description, and no level of any kind.
+experience or a diploma, a colon after an optional list marker for a project,
+an explicit label for a certification, an explicit separator for a language,
+and a period only in a closed set of explicit temporal forms. Where the wording
+is not unambiguous the fragment stays `NULL` and the row records the type's
+`*_UNPARSED_V1` rule — the accepted fact is still projected, never dropped.
+
+Punctuation proves that segments exist; it never proves what they are about. So
+a pipe-delimited diploma line becomes a school and a programme only when each
+of the two roles carries its own exclusive proof in a closed registry — one
+segment marked as an institution and not as a programme, the other marked as a
+programme and not as an institution. Never by position, and whether the line
+carries two segments or three. One marker is not enough: in
+`University Diploma in AI | Sorbonne` the marked segment is the programme, so
+both fields stay `NULL` rather than being filled the wrong way round. When both
+proofs are there and no date was written, the row records
+`EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and `period_text` stays `NULL`; when a
+date is certain but a proof is missing, only the period is kept, with
+`EDUCATION_PIPE_PERIOD_ONLY_V1` on the row. A language line has at most one
+list marker removed before it is read, so `• Anglais : C1` stores `Anglais`
+and never `• Anglais`. No employer is deduced
+from a sentence, no role from a technology, no seniority from the word "stage",
+no duration, no calendar date from a school year, no skill from a project
+description, no diploma from a school, no `Bac+N` from the word "Master", no
+obtained certification from a stated intention such as "préparation à" or
+"objectif", no issuer, no obtention or expiry date, no language from a text
+written in one, no CEFR level from "courant" or "fluent", and no level of any
+kind.
 
 **It never touches the skills.** `profile_skills` and `profile_skill_evidence`
 are left exactly where the [skill projection](#profile-skills-phase-34a) put
 them; this command imports no skill module and infers no skill from an
-experience or a project.
+experience, a project, a diploma, a certification or a language.
 
 Re-running is expected and is the normal way to apply a decision. The run is a
 reconciliation, not an append: rows the current rules would write identically
@@ -646,29 +671,34 @@ The output is counters, rule tallies and a version, and it names **no value**:
 
 | key | meaning |
 | --- | --- |
-| `accepted_experience_facts` / `accepted_project_facts` | how many `ACCEPTED` facts of each type the run read |
-| `experience_rows` / `project_rows` | how many rows each table holds afterwards; always equal to the counts above |
+| `accepted_experience_facts` / `accepted_project_facts` / `accepted_education_facts` / `accepted_certification_facts` / `accepted_language_facts` | how many `ACCEPTED` facts of each type the run read |
+| `experience_rows` / `project_rows` / `education_rows` / `certification_rows` / `language_rows` | how many rows each table holds afterwards; always equal to the counts above |
 | `structured_experiences` / `unparsed_experiences` | how many experience rows a closed rule named, and how many stayed `UNPARSED_V1` |
 | `structured_projects` / `unparsed_projects` | the same tally for projects |
+| `structured_educations` / `unparsed_educations` | the same tally for education. `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and `EDUCATION_PIPE_PERIOD_ONLY_V1` both count as structured: each named a fragment |
+| `structured_certifications` / `unparsed_certifications` | the same tally for certifications |
+| `structured_languages` / `unparsed_languages` | the same tally for languages |
 | `created` / `removed` | rows added / dropped, a replacement counting as one of each |
 | `structurer_version` | `structured-profile-v1` |
 | `changed` | `false` when the run found the projection already correct |
 
 An `unparsed` count is a property of how the document was written, never a
-judgement about the person and never a score.
+judgement about the person and never a score: a diploma nobody typed with pipes
+is exactly as real as one that was.
 
-Like the skill command, this one prints no role, organization, period, title or
-description at all — not on stdout, not in the structured log, not in an error
-message — and it has no flag that would print one. Reading the projection back
-is a Python call against a database you name explicitly.
+Like the skill command, this one prints no role, organization, period, title,
+description, institution, programme, certification, language or level at all —
+not on stdout, not in the structured log, not in an error message — and it has
+no flag that would print one. Reading the projection back is a Python call
+against a database you name explicitly.
 
 The failures it can report are a refused backend, a missing profile and an
 unmigrated database, each with exit code 1.
 
-What this slice does **not** do: no structured education, certification or
-language; no availability, mobility, preference or career objective; no
-eligibility rule, no opportunity constraint, no skill inference, no skill
-level, no matching, no match score, no TF-IDF, no cosine similarity, no
-ranking, no recommendation, no notification, no CV adaptation and no
-auto-apply. It opens no network connection and calls no model, and there is no
-web interface or HTTP endpoint for any of it.
+What this slice does **not** do: no availability, mobility, preference or
+career objective; no eligibility rule, no opportunity constraint, no skill
+inference, no skill level, no study level, no CEFR computation, no matching, no
+match score, no TF-IDF, no cosine similarity, no ranking, no recommendation, no
+notification, no CV adaptation and no auto-apply. It opens no network
+connection and calls no model, and there is no web interface or HTTP endpoint
+for any of it.
