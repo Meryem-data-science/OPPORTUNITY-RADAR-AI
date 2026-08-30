@@ -22,8 +22,13 @@ exactly one of three outcomes:
   chain of everything the person ever said stays readable.
 
 A fifth possibility is refused rather than resolved: a domain already holding
-two `ACCEPTED` facts. See `AmbiguousExplicitInputError` — choosing between two
-things somebody said is not this module's decision to make.
+two facts the person stated. See `AmbiguousExplicitInputError` — choosing
+between two things somebody said is not this module's decision to make.
+
+"Stated" has one definition, and it lives in `repository.find_stated_fact`:
+`ACCEPTED`, of that type, **and carrying `USER_INPUT` provenance**. Both this
+module and the projection ask through it, so what a `set_*` call decides
+against is exactly what the rows will describe.
 
 Nothing here infers anything. There is no code path that reads a CV, a skill,
 an experience, an address, a nationality or the clock, and the callers below
@@ -45,7 +50,6 @@ from services.digital_twin.facts.models import (
 )
 from services.digital_twin.facts.repository import (
     correct_profile_fact,
-    list_verified_profile_facts,
     record_verified_user_input_fact,
 )
 from services.digital_twin.preferences.codec import (
@@ -61,7 +65,7 @@ from services.digital_twin.preferences.models import (
     MobilityPreference,
     OpportunityPreferences,
 )
-from services.digital_twin.preferences.repository import AmbiguousExplicitInputError
+from services.digital_twin.preferences.repository import find_stated_fact
 
 __all__ = [
     "ExplicitInputAction",
@@ -155,20 +159,24 @@ def _record_singleton(
 ) -> ExplicitInputOutcome:
     """Create, no-op or correct the one fact of this type for this profile.
 
-    The read is `list_verified_profile_facts`, so only `ACCEPTED` facts count:
-    a `PROPOSED`, `REJECTED` or `CORRECTED` fact of the same type is history or
-    somebody else's business, and neither blocks a first statement nor is
-    mistaken for the current one.
+    The read is `find_stated_fact`, the same one the projection uses, so the
+    write side and the rows can never disagree about which fact is the person's
+    current statement. It counts only `ACCEPTED` facts carrying `USER_INPUT`
+    provenance, which has two consequences worth stating:
+
+    * a `PROPOSED`, `REJECTED` or `CORRECTED` fact of the same type is history
+      or somebody else's business. It neither blocks a first statement nor is
+      mistaken for the current one;
+    * an `ACCEPTED` fact of the same type evidenced only by a CV, a GitHub page
+      or other accepted evidence is **not** this person's statement either, so
+      it is not corrected in place. Correcting it would rewrite what a document
+      was read as saying in order to record what somebody typed, and those are
+      two different claims. The person's first statement is a fact of its own.
+
+    Two stated facts raise rather than resolve — see `find_stated_fact`.
     """
-    accepted = list_verified_profile_facts(
-        connection, profile_id, fact_type=fact_type
-    )
-    if len(accepted) > 1:
-        raise AmbiguousExplicitInputError(
-            f"profile {profile_id} holds {len(accepted)} accepted "
-            f"{fact_type.value} facts; a person states one"
-        )
-    if not accepted:
+    stated = find_stated_fact(connection, profile_id, fact_type)
+    if stated is None:
         fact = record_verified_user_input_fact(
             connection,
             profile_id=profile_id,
@@ -182,8 +190,8 @@ def _record_singleton(
             action=ExplicitInputAction.CREATED,
             fact_id=fact.id,
         )
-    current = accepted[0]
-    if current.value == canonical_value:
+    current_id, current_value = stated
+    if current_value == canonical_value:
         # Byte-identical because both sides are canonical. Restating what one
         # already said is not a correction, and recording it as one would fill
         # somebody's history with changes they never made.
@@ -191,12 +199,12 @@ def _record_singleton(
             profile_id=profile_id,
             fact_type=fact_type.value,
             action=ExplicitInputAction.UNCHANGED,
-            fact_id=current.id,
+            fact_id=current_id,
         )
     correction = correct_profile_fact(
         connection,
         profile_id,
-        current.id,
+        current_id,
         value=canonical_value,
         provenance=_provenance(fact_type, canonical_value),
     )

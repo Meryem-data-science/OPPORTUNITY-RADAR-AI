@@ -959,8 +959,22 @@ which `0009` already created and this migration reuses.
 Every row is derived from a fact whose status is already `ACCEPTED`, and the
 projection reads
 `fact_type IN ('AVAILABILITY', 'MOBILITY', 'PREFERENCE', 'CAREER_OBJECTIVE')
-AND status = 'ACCEPTED'` and nothing else. On top of that, every fact these
-tables project carries `USER_INPUT` provenance:
+AND status = 'ACCEPTED'` and nothing else. **And, unlike every earlier
+projection, acceptance alone is not enough**: the same statement requires the
+fact to carry `USER_INPUT` provenance, with
+
+```sql
+AND EXISTS (
+        SELECT 1 FROM profile_fact_provenance AS p
+         WHERE p.fact_id = f.id AND p.source_type = 'USER_INPUT'
+    )
+```
+
+so an `ACCEPTED` `PREFERENCE`, `AVAILABILITY`, `MOBILITY` or
+`CAREER_OBJECTIVE` fact evidenced only by a `CV`, a `GITHUB` page or an
+`OTHER_ACCEPTED_EVIDENCE` derivation is never projected. `EXISTS` rather than a
+join: a fact carrying several `USER_INPUT` proofs is projected once, not once
+per proof.
 
 ```text
 explicit user input (a person types it)

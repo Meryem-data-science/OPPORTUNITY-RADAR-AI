@@ -18,13 +18,21 @@ set of preferences and one set of career objectives, and restating any of them
 corrects the previous statement rather than adding a second one. That is why
 `profile_id` is the primary key of each table.
 
-Five rules are enforced here rather than trusted to callers:
+Six rules are enforced here rather than trusted to callers:
 
 * the only facts read are `status = 'ACCEPTED'` facts of those four types, each
   filtered by its own literal SQL statement below. A `PROPOSED`, `REJECTED` or
   `CORRECTED` fact, and an `ACCEPTED` fact of any other type, cannot reach a
   projected row, and no caller can widen the filter because no caller supplies
   it;
+* **and the fact must carry `USER_INPUT` provenance**, checked by an `EXISTS`
+  in the same statement. Acceptance alone is not enough here, unlike in Phases
+  3.4A and 3.4B: those project what a document said about a past that
+  happened, and a human accepting the reading is the whole question. These four
+  are things a person says about what they want, so a `CV`, a `GITHUB` or an
+  `OTHER_ACCEPTED_EVIDENCE` proof is not weaker evidence for them — it is the
+  wrong kind of evidence entirely, and a fact resting only on it is somebody's
+  document talking, not them;
 * **two accepted facts of one singleton type is refused, out loud.** Picking
   the most recent one would silently decide which of somebody's two statements
   counts, and the newest row is not the truest one — it is merely the newest.
@@ -68,6 +76,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.digital_twin.facts.models import ProfileFactType
 from services.digital_twin.preferences.codec import (
     canonical_json,
     decode_availability,
@@ -104,30 +113,53 @@ class AmbiguousExplicitInputError(ProfilePreferenceError):
     """
 
 
-#: The one reading this projection is built on, written out once per type. The
-#: fact type and `ACCEPTED` are literals inside each statement rather than
-#: parameters, so widening either of them means editing this file — which a
-#: test then catches.
-_ACCEPTED_AVAILABILITY_FACTS = (
-    "SELECT id, value FROM profile_facts "
-    "WHERE profile_id = ? AND fact_type = 'AVAILABILITY' AND status = 'ACCEPTED' "
-    "ORDER BY id"
+#: The one reading this projection is built on, written out once per type.
+#:
+#: Three conditions, all of them literals inside the statement rather than
+#: parameters, so widening any of them means editing this file — which a test
+#: then catches:
+#:
+#: * the fact belongs to this profile;
+#: * it is `ACCEPTED` and of that exact type;
+#: * **and at least one of its provenance rows is `USER_INPUT`.**
+#:
+#: The third is what makes the contract a database rule rather than a habit.
+#: These four domains are things a person states about themselves, so a CV, a
+#: GitHub page or a derivation from other accepted evidence is not evidence for
+#: them — not weak evidence, not evidence to be confirmed later: the wrong kind
+#: entirely. A document can say somebody worked remotely; it cannot say they
+#: want to. Without this clause an `ACCEPTED` `PREFERENCE` fact carrying only
+#: `CV` provenance would be projected as if the person had stated it, and the
+#: projection would attribute to them a preference nobody expressed.
+#:
+#: `EXISTS` rather than a join, so a fact carrying several `USER_INPUT` proofs
+#: — one per correction, say — is returned once and not once per proof. A join
+#: would need `DISTINCT` to say the same thing, and a `DISTINCT` that is load-
+#: bearing is easy to drop by accident.
+_USER_INPUT_EVIDENCE = (
+    "AND EXISTS ("
+    "SELECT 1 FROM profile_fact_provenance AS p "
+    "WHERE p.fact_id = f.id AND p.source_type = 'USER_INPUT'"
+    ") "
 )
-_ACCEPTED_MOBILITY_FACTS = (
-    "SELECT id, value FROM profile_facts "
-    "WHERE profile_id = ? AND fact_type = 'MOBILITY' AND status = 'ACCEPTED' "
-    "ORDER BY id"
-)
-_ACCEPTED_PREFERENCE_FACTS = (
-    "SELECT id, value FROM profile_facts "
-    "WHERE profile_id = ? AND fact_type = 'PREFERENCE' AND status = 'ACCEPTED' "
-    "ORDER BY id"
-)
-_ACCEPTED_CAREER_OBJECTIVE_FACTS = (
-    "SELECT id, value FROM profile_facts "
-    "WHERE profile_id = ? AND fact_type = 'CAREER_OBJECTIVE' AND status = 'ACCEPTED' "
-    "ORDER BY id"
-)
+
+
+def _accepted_user_input_facts(fact_type: str) -> str:
+    """The statement reading one domain's stated facts, oldest id first."""
+    return (
+        "SELECT f.id, f.value FROM profile_facts AS f "
+        "WHERE f.profile_id = ? "
+        f"AND f.fact_type = '{fact_type}' "
+        "AND f.status = 'ACCEPTED' "
+        f"{_USER_INPUT_EVIDENCE}"
+        "ORDER BY f.id"
+    )
+
+
+_ACCEPTED_AVAILABILITY_FACTS = _accepted_user_input_facts("AVAILABILITY")
+_ACCEPTED_MOBILITY_FACTS = _accepted_user_input_facts("MOBILITY")
+_ACCEPTED_PREFERENCE_FACTS = _accepted_user_input_facts("PREFERENCE")
+_ACCEPTED_CAREER_OBJECTIVE_FACTS = _accepted_user_input_facts("CAREER_OBJECTIVE")
 
 
 def _availability_columns(value: AvailabilityPreference) -> tuple[object, ...]:
@@ -369,26 +401,63 @@ def _require_profile(connection: sqlite3.Connection, profile_id: int) -> None:
         raise ProfilePreferenceNotFoundError("profile does not exist")
 
 
-def _read(
-    connection: sqlite3.Connection, projection: _Projection, profile_id: int
-) -> tuple[int, Any] | None:
-    """The one accepted fact of this type for this profile, decoded, or None.
+def _projection_for(fact_type: str) -> _Projection:
+    """The projection describing one domain, by its fact type."""
+    for projection in _PROJECTIONS:
+        if projection.fact_type == fact_type:
+            return projection
+    raise ProfilePreferenceError(f"{fact_type} is not a Phase 3.4C domain")
 
-    Two accepted facts is refused rather than resolved — see
-    `AmbiguousExplicitInputError`. `normalized_value` is deliberately not
-    consulted: the canonical form *is* `value` for these four types, and a
-    second input the decoder could disagree with would be one too many.
+
+def find_stated_fact(
+    connection: sqlite3.Connection, profile_id: int, fact_type: ProfileFactType | str
+) -> tuple[int, str] | None:
+    """The one fact this person **stated** for that domain, as `(id, value)`.
+
+    "Stated" is the whole definition, and it lives here so that there is only
+    one of it: `ACCEPTED`, of that type, belonging to this profile, and
+    carrying at least one `USER_INPUT` provenance row. The projection and the
+    write side both ask this question through this function, so the rows can
+    never describe a different set of facts than the one `set_*` is deciding
+    against.
+
+    `None` when the person stated nothing — which is UNKNOWN, and which an
+    `ACCEPTED` fact of the same type evidenced only by a CV, a GitHub page or
+    other accepted evidence does **not** change: that is a document's claim,
+    not theirs.
+
+    Two stated facts is refused rather than resolved — see
+    `AmbiguousExplicitInputError`.
     """
+    stored_type = (
+        fact_type.value if isinstance(fact_type, ProfileFactType) else str(fact_type)
+    )
+    projection = _projection_for(stored_type)
     rows = connection.execute(projection.facts_sql, (profile_id,)).fetchall()
     if not rows:
         return None
     if len(rows) > 1:
         raise AmbiguousExplicitInputError(
             f"profile {profile_id} holds {len(rows)} accepted "
-            f"{projection.fact_type} facts; a person states one"
+            f"{stored_type} facts stated by the person; a person states one"
         )
-    fact_id, value = rows[0]
-    return int(fact_id), projection.decode(str(value))
+    return int(rows[0][0]), str(rows[0][1])
+
+
+def _read(
+    connection: sqlite3.Connection, projection: _Projection, profile_id: int
+) -> tuple[int, Any] | None:
+    """The one stated fact of this type for this profile, decoded, or None.
+
+    `normalized_value` is deliberately not consulted: the canonical form *is*
+    `value` for these four types, and a second input the decoder could disagree
+    with would be one too many.
+    """
+    stated = find_stated_fact(connection, profile_id, projection.fact_type)
+    if stated is None:
+        return None
+    fact_id, value = stated
+    return fact_id, projection.decode(value)
 
 
 def _existing_row(

@@ -34,6 +34,7 @@ from services.digital_twin.facts.models import (
 from services.digital_twin.facts.repository import (
     ProfileFactError,
     accept_profile_fact,
+    add_profile_fact_provenance,
     correct_profile_fact,
     list_profile_facts,
     list_profile_fact_provenance,
@@ -64,6 +65,7 @@ from services.digital_twin.preferences.models import (
 from services.digital_twin.preferences.repository import (
     _PROJECTIONS,
     AmbiguousExplicitInputError,
+    find_stated_fact,
     ProfilePreferenceNotFoundError,
     get_profile_availability,
     get_profile_career_objectives,
@@ -759,13 +761,25 @@ def test_the_repository_reads_only_accepted_facts_of_the_four_types() -> None:
         assert "status = 'ACCEPTED'" in projection.facts_sql
         assert f"fact_type = '{projection.fact_type}'" in projection.facts_sql
         assert "profile_id = ?" in projection.facts_sql
+        # Acceptance alone is not enough: the person must have stated it.
+        assert "profile_fact_provenance" in projection.facts_sql
+        assert "source_type = 'USER_INPUT'" in projection.facts_sql
+        assert "EXISTS (" in projection.facts_sql
     assert len(set(statements)) == len(statements)
 
 
 def test_the_repository_selects_facts_from_nowhere_else() -> None:
     source = source_of(REPOSITORY_SOURCE)
-    # Every statement reading `profile_facts` is one of the four above.
-    assert source.count("FROM profile_facts") == len(_PROJECTIONS)
+    # One builder writes all four statements, so `profile_facts` is read from
+    # exactly one place in the module and the filter cannot be weakened for one
+    # domain and not the others.
+    assert source.count("FROM profile_facts") == 1
+    assert all(
+        projection.facts_sql.startswith("SELECT f.id, f.value FROM profile_facts AS f")
+        for projection in _PROJECTIONS
+    )
+    # And `profile_fact_provenance` is read only to prove the person spoke.
+    assert source.count("FROM profile_fact_provenance") == 1
 
 
 def test_the_repository_names_no_neighbouring_projection() -> None:
@@ -876,3 +890,222 @@ def test_the_synchronization_summary_carries_no_value(migrated, stated) -> None:
         *TEST_ONLY_OBJECTIVES, "2030-01-15",
     ):
         assert value not in rendered
+
+
+# --------------------------------------------------------------------------
+# Acceptance is not enough: the person must have stated it
+# --------------------------------------------------------------------------
+#
+# These four domains are not readings of a document, so a fact resting only on
+# a CV, a GitHub page or a derivation from other accepted evidence is not weak
+# evidence for them — it is the wrong kind entirely. Every test below is run
+# over all four domains, because a guarantee that holds for `PREFERENCE` and
+# not for `MOBILITY` is not a guarantee.
+
+#: Each domain, with a valid canonical value for it. The setters take these
+#: apart; the tests that write a fact directly use the encoded value.
+DOMAINS = (
+    (ProfileFactType.AVAILABILITY, encode_availability(AVAILABILITY),
+     get_profile_availability, set_profile_availability, AVAILABILITY),
+    (ProfileFactType.MOBILITY, encode_mobility(MOBILITY),
+     get_profile_mobility, set_profile_mobility, MOBILITY),
+    (ProfileFactType.PREFERENCE, encode_preferences(PREFERENCES),
+     get_profile_preferences, set_profile_preferences, PREFERENCES),
+    (ProfileFactType.CAREER_OBJECTIVE, encode_career_objectives(OBJECTIVES),
+     get_profile_career_objectives, set_profile_career_objectives, OBJECTIVES),
+)
+
+#: The three source types that are **not** a person speaking.
+NON_STATED_SOURCES = (
+    FactSourceType.CV,
+    FactSourceType.GITHUB,
+    FactSourceType.OTHER_ACCEPTED_EVIDENCE,
+)
+
+_evidence_counter = 0
+
+
+def _proof(source_type: FactSourceType) -> ProvenanceInput:
+    """A distinct synthetic proof, so no two facts share one by accident."""
+    global _evidence_counter
+    _evidence_counter += 1
+    return ProvenanceInput(
+        source_type=source_type,
+        provenance_key=f"TEST-ONLY-EVIDENCE-{_evidence_counter}",
+    )
+
+
+def accepted_with(connection, profile_id, fact_type, value, source_type):
+    """One `ACCEPTED` fact of that type, evidenced only by that source type."""
+    fact = propose_profile_fact(
+        connection,
+        profile_id=profile_id,
+        fact_type=fact_type,
+        value=value,
+        provenance=_proof(source_type),
+    )
+    return accept_profile_fact(connection, profile_id, fact.id)
+
+
+@pytest.mark.parametrize(
+    "fact_type,value,read,_setter,expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_a_stated_fact_is_projected(
+    migrated, profile_id, fact_type, value, read, _setter, expected
+) -> None:
+    record_verified_user_input_fact(
+        migrated, profile_id=profile_id, fact_type=fact_type, value=value
+    )
+    synchronize_profile_preferences(migrated, profile_id)
+
+    assert read(migrated, profile_id).value == expected
+
+
+@pytest.mark.parametrize("source_type", NON_STATED_SOURCES)
+@pytest.mark.parametrize(
+    "fact_type,value,read,_setter,_expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_an_accepted_fact_nobody_stated_is_never_projected(
+    migrated, profile_id, fact_type, value, read, _setter, _expected, source_type
+) -> None:
+    """A CV, a GitHub page and a derivation are all the wrong kind of evidence.
+
+    The fact is `ACCEPTED` and its value is perfectly well-formed, so the only
+    thing keeping it out of the projection is the provenance clause. Without
+    that clause a document would be attributing a preference to somebody who
+    never expressed one.
+    """
+    accepted_with(migrated, profile_id, fact_type, value, source_type)
+
+    outcome = synchronize_profile_preferences(migrated, profile_id)
+
+    assert read(migrated, profile_id) is None
+    assert outcome.created == 0
+    assert not outcome.changed
+    assert _counts(migrated, C_TABLES) == (0, 0, 0, 0)
+    # It is UNKNOWN, exactly as if the fact did not exist at all.
+    assert find_stated_fact(migrated, profile_id, fact_type) is None
+
+
+@pytest.mark.parametrize("source_type", NON_STATED_SOURCES)
+@pytest.mark.parametrize(
+    "fact_type,value,read,setter,expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_an_unstated_accepted_fact_is_not_corrected_by_a_first_statement(
+    migrated, profile_id, fact_type, value, read, setter, expected, source_type
+) -> None:
+    """The person's first statement is a fact of its own, not a correction.
+
+    Correcting the document's fact would rewrite what it was read as saying in
+    order to record what somebody typed, and those are two different claims.
+    """
+    document = accepted_with(migrated, profile_id, fact_type, value, source_type)
+
+    outcome = setter(migrated, profile_id, expected)
+    synchronize_profile_preferences(migrated, profile_id)
+
+    assert outcome.action is ExplicitInputAction.CREATED
+    assert outcome.fact_id != document.id
+    # The document's fact is untouched: still ACCEPTED, still unreplaced.
+    unchanged = {fact.id: fact for fact in list_profile_facts(migrated, profile_id)}
+    assert unchanged[document.id].status.value == "ACCEPTED"
+    assert unchanged[document.id].replaced_by_fact_id is None
+    # And the projection describes the statement, not the document.
+    assert read(migrated, profile_id).fact_id == outcome.fact_id
+
+
+@pytest.mark.parametrize(
+    "fact_type,value,read,setter,expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_several_proofs_including_user_input_project_exactly_one_row(
+    migrated, profile_id, fact_type, value, read, setter, expected
+) -> None:
+    """`EXISTS`, not a join: extra proofs corroborate, they do not duplicate."""
+    outcome = setter(migrated, profile_id, expected)
+    for source_type in (*NON_STATED_SOURCES, FactSourceType.USER_INPUT):
+        add_profile_fact_provenance(
+            migrated,
+            profile_id=profile_id,
+            fact_id=outcome.fact_id,
+            provenance=_proof(source_type),
+        )
+    assert len(list_profile_fact_provenance(migrated, profile_id, outcome.fact_id)) == 5
+
+    synchronize_profile_preferences(migrated, profile_id)
+
+    projection = _projection_of(fact_type)
+    assert _count_rows(migrated, projection.table, profile_id) == 1
+    assert read(migrated, profile_id).value == expected
+    assert find_stated_fact(migrated, profile_id, fact_type) == (outcome.fact_id, value)
+
+
+@pytest.mark.parametrize(
+    "fact_type,value,_read,_setter,_expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_two_stated_facts_of_one_domain_are_refused_and_rolled_back(
+    migrated, stated, fact_type, value, _read, _setter, _expected
+) -> None:
+    before = {table: _rows(migrated, table) for table in C_TABLES}
+    # A second stated fact, recorded through the facts package directly: the
+    # service refuses to create this state, so only a bypass can produce it.
+    record_verified_user_input_fact(
+        migrated,
+        profile_id=stated,
+        fact_type=fact_type,
+        value=value,
+        provenance=_proof(FactSourceType.USER_INPUT),
+    )
+
+    with pytest.raises(AmbiguousExplicitInputError):
+        synchronize_profile_preferences(migrated, stated)
+
+    # The whole run rolled back, the other three domains included, and nothing
+    # was chosen between the two statements.
+    assert {table: _rows(migrated, table) for table in C_TABLES} == before
+
+
+@pytest.mark.parametrize("source_type", NON_STATED_SOURCES)
+@pytest.mark.parametrize(
+    "fact_type,value,_read,_setter,_expected",
+    DOMAINS,
+    ids=[domain[0].value for domain in DOMAINS],
+)
+def test_an_unstated_accepted_fact_never_makes_a_domain_ambiguous(
+    migrated, stated, fact_type, value, _read, _setter, _expected, source_type
+) -> None:
+    """One statement plus one document is one statement, not a conflict.
+
+    The domain is ambiguous when the *person* said two things, not when a
+    document happens to carry an accepted fact of the same type.
+    """
+    accepted_with(migrated, stated, fact_type, value, source_type)
+
+    outcome = synchronize_profile_preferences(migrated, stated)
+
+    assert not outcome.changed
+    assert find_stated_fact(migrated, stated, fact_type) is not None
+
+
+def _projection_of(fact_type):
+    for projection in _PROJECTIONS:
+        if projection.fact_type == fact_type.value:
+            return projection
+    raise AssertionError(f"no projection for {fact_type}")
+
+
+def _count_rows(connection, table: str, profile_id: int) -> int:
+    return int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE profile_id = ?", (profile_id,)
+        ).fetchone()[0]
+    )

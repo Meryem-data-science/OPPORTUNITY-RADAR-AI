@@ -116,10 +116,16 @@ Phase 3 has started, and only these six slices of it exist:
   objectives a person **states about themselves**. Nothing in this slice comes
   from a CV, and nothing in it can: it reads
   `fact_type IN ('AVAILABILITY', 'MOBILITY', 'PREFERENCE', 'CAREER_OBJECTIVE')
-  AND status = 'ACCEPTED'` and projects each onto its own singleton row in
+  AND status = 'ACCEPTED'` **and requires the fact to carry `USER_INPUT`
+  provenance**, then projects each onto its own singleton row in
   `profile_availability`, `profile_mobility`, `profile_preferences` and
-  `profile_career_objectives`. Every one of those facts carries `USER_INPUT`
-  provenance — the person typed it — and holds **canonical JSON**, so the same
+  `profile_career_objectives`. Acceptance alone is not enough here, unlike in
+  3.4A and 3.4B: those project what a document said about a past that
+  happened, so a human accepting the reading is the whole question, whereas
+  these four are things a person says about what they want — a `CV`, `GITHUB`
+  or `OTHER_ACCEPTED_EVIDENCE` proof is not weaker evidence for them, it is the
+  wrong kind entirely, and a fact resting only on it is never projected. Each
+  value holds **canonical JSON**, so the same
   statement always has the same bytes and restating it is a no-op rather than a
   correction. **An absent statement is `UNKNOWN`, and `UNKNOWN` has no row**:
   no seeded row, no default row, no "unknown" row, and never a `FALSE`. No

@@ -835,6 +835,17 @@ profile_facts  (ACCEPTED, with USER_INPUT provenance)
     no accepted fact  →  no row  →  UNKNOWN
 ```
 
+The reading is `fact_type` and `status = 'ACCEPTED'` **and** an `EXISTS` over
+`profile_fact_provenance` requiring `source_type = 'USER_INPUT'`, all three
+written into the SQL rather than passed in. Acceptance alone is not the
+contract here: a `CV`, `GITHUB` or `OTHER_ACCEPTED_EVIDENCE` proof is the wrong
+kind of evidence for a statement about what somebody wants, so an `ACCEPTED`
+fact resting only on one is invisible to the projection — and to the write
+side, which asks the same question through the same function, so the rows can
+never describe a different set of facts than a `set_*` call decides against.
+`EXISTS` rather than a join, so a fact carrying several `USER_INPUT` proofs is
+projected once and not once per proof.
+
 The difference from 3.4B is where the claim comes from, and it is the whole
 point of the slice. `0009`/`0010` project what a **document** said about a past
 that already happened; `0011` projects what a **person** said about what they

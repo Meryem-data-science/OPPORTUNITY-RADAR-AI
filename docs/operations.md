@@ -818,7 +818,14 @@ created, a row whose fact was corrected or rejected is dropped, and a row the
 facts now decode differently is replaced whole. A second run on unchanged facts
 writes nothing and reports `changed=false`.
 
-**Two accepted facts of one domain stop the run.** A person has one
+**Only what the person stated is projected.** The projection reads facts that
+are `ACCEPTED`, of the right type, **and carry `USER_INPUT` provenance**. An
+`ACCEPTED` fact of one of these four types evidenced only by a CV, a GitHub
+page or a derivation from other accepted evidence is not a statement by the
+person, so it is never projected and never corrected in place — the person's
+first statement is a fact of its own.
+
+**Two stated facts of one domain stop the run.** A person has one
 availability, not two. If a domain ever holds two `ACCEPTED` facts the whole
 synchronization is refused and rolled back — the other three domains included —
 rather than the most recent one being picked: the newest statement is not the
