@@ -817,44 +817,60 @@ its position.
 
 All three education rules start from an explicit pipe header — no opening list
 marker, `|`-separated segments that all carry text once trimmed — and all three
-tell a school from a programme the same way: exactly one of the two answerable
-segments must name an institution by a **whole word** of the closed registry
-`université`, `universite`, `university`, `école`, `ecole`, `school`,
-`institut`, `institute`, `faculté`, `faculte`, `faculty`, `college`, `collège`,
-`collége`. The marked segment is `institution_text` and the other
-`program_text`, whichever order they appear in. There is no stemming, no plural
-folding, no prefix match and no fuzzy comparison: `Universitaire` and
-`Universités` name no institution.
+tell a school from a programme the same way, from **two** closed registries:
+
+| registry | entries |
+| --- | --- |
+| `INSTITUTION_MARKERS` | `université`, `universite`, `university`, `école`, `ecole`, `school`, `institut`, `institute`, `faculté`, `faculte`, `faculty`, `college`, `collège`, `collége` |
+| `PROGRAM_MARKERS` | `master`, `mastère`, `mastere`, `bachelor`, `licence`, `diplôme`, `diplome`, `diploma`, `degree`, `ingénieur`, `ingenieur`, `ingénieure`, `ingenieure`, `doctorat`, `doctorate` |
+
+Both are matched on **whole words**, folded for comparison only. There is no
+stemming, no plural folding, no prefix match and no fuzzy comparison:
+`Universitaire`, `Universités`, `Masterclass` and `Licences` prove nothing. The
+two registries do not overlap, and a test asserts it.
+
+**Each role needs its own exclusive proof.** A pair of segments is named only
+when one is marked as an institution and **not** as a programme, and the other
+is marked as a programme and **not** as an institution. One marker is never
+enough, because a marker on one segment proves nothing about the other:
+`University Diploma in AI | Sorbonne` carries `university` on the segment that
+is the *programme* — it carries `diploma` too — while the school carries no
+marker at all, so a rule trusting the institution marker alone would store the
+two fields the wrong way round. A segment proving both roles at once proves
+neither, and two segments proving the same role prove nothing. The
+marked-as-institution segment is then `institution_text` and the other
+`program_text`, whichever order they appear in.
 
 The minimum number of segments is **two** here, unlike the three the experience
 rule requires. That rule needs three because it reads segments by position;
-these read none by position, so two written segments are answerable — or not —
-on exactly the same evidence as three.
+these read none by position, so two written segments carry — or fail to carry —
+exactly the same proofs as three.
 
 `EDUCATION_PIPE_EXPLICIT_V1` applies when the header holds **exactly one**
-explicit period, exactly two segments remain besides it, and those two are
-answerable. The remaining lines are `description_text`.
+explicit period, exactly two segments remain besides it, and those two carry
+the exclusive proofs above. The remaining lines are `description_text`.
 
 `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` applies when the header holds
 **exactly two** segments, **neither** of them an explicit period, and those two
-are answerable. `period_text` stays `NULL`: a header with no date is a header
+carry the same proofs. `period_text` stays `NULL`: a header with no date is a header
 with no date, and no year is looked for inside the words. Both segments must be
 free of an explicit period — in `Université Exemple | 2020 - 2022` the unmarked
 segment is a date, and reading it as a programme would be an invention, so that
 fact stays unparsed.
 
 `EDUCATION_PIPE_PERIOD_ONLY_V1` applies when a single period is certain and
-that distinction is not — neither remaining segment carries a marker, both do,
-or more than two remain. `period_text` is the fragment verbatim,
+that distinction is not — a role with no proof, a segment proving both roles at
+once, both segments proving the same role, or more than two segments remaining.
+`period_text` is the fragment verbatim,
 `description_text` the remaining lines, and `institution_text` and
 `program_text` stay `NULL`. The certain part is preserved without the uncertain
 part being invented.
 
 `EDUCATION_UNPARSED_V1` is everything else, with every fragment `NULL`: no pipe
 header, an empty segment, a line opened by a list marker, several explicit
-periods, a two-segment header holding a date, a two-segment header the registry
-cannot answer, and any dateless header of three segments or more — where the
-third segment would have no honest home.
+periods, a two-segment header holding a date, a dateless two-segment header
+whose two roles are not both exclusively proven, and any dateless header of
+three segments or more — where the third segment would have no honest home.
 
 `CERTIFICATION_EXPLICIT_V1` applies when the fact states no intention — no
 whole word of the closed registry `préparation`, `preparation`, `préparer`,
@@ -873,15 +889,24 @@ An issuer nobody wrote stays `NULL`; a period nobody wrote stays `NULL`.
 including every stated intention, so "Préparation à la certification X" and
 "Objectif : certification X" never become a held credential.
 
-`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when the fact is a single line, that
-line carries one explicit separator — a trailing parenthesis, a `:` that is not
-a URL scheme, a `|`, or a dash the document spaced on both sides — and
-everything on its right is a **whole** form of the closed proficiency registry:
+`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when the fact is a single line
+which, once at most **one** list marker has been removed, carries one explicit
+separator — a trailing parenthesis, a `:` that is not a URL scheme, a `|`, or a
+dash the document spaced on both sides — and everything on its right is a
+**whole** form of the closed proficiency registry:
 `a1`, `a2`, `b1`, `b2`, `c1`, `c2`, `débutant`, `debutant`, `intermédiaire`,
 `intermediaire`, `avancé`, `avance`, `courant`, `fluent`, `native`, `natif`,
 `bilingual`, `bilingue`. Case is folded to **compare** and never to store:
 `language_text` and `proficiency_text` are both kept exactly as typed, so
 `courant` stays `courant` and `C1` stays `C1`.
+
+The list marker is removed with the same conservative helper the project rule
+uses, and exactly one is removed. A CV writes its languages as a bulleted list
+as often as not and the Phase 3.2B extractor keeps a bullet block's source
+text, so `• Anglais : C1` reaches the structurer with its marker; that marker
+is punctuation the list wrote, not part of the language's name, and
+`language_text` would otherwise hold the layout. A second marker is content and
+stays where the document put it.
 
 `LANGUAGE_UNPARSED_V1` is everything else, with both fragments `NULL`: no
 separator, a dash the document did not space, a right side the registry does

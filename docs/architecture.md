@@ -717,20 +717,31 @@ about.** That is the one idea this slice adds, and it is why education has its
 own rules rather than reusing the experience one. A CV writes
 `role | employer | dates` in that order and only that order; it writes a
 diploma and a school in either. So no education rule ever reads a segment by
-its position. Each of them asks the same closed registry of institution markers
-— `université`, `university`, `école`, `school`, `institut`, `institute`,
-`faculté`, `faculty`, `college` — which segment is the school, by whole word,
-with no stemming, no plural folding and no fuzzy comparison. Exactly one marked
-segment and exactly one unmarked one is the only case any of them reads; the
-marked one is the institution and the other the programme, whichever order they
-were written in.
+its position. Each of them asks **two** closed registries, by whole word, with
+no stemming, no plural folding and no fuzzy comparison: institution markers
+(`université`, `university`, `école`, `school`, `institut`, `institute`,
+`faculté`, `faculty`, `college`) and programme markers (`master`, `bachelor`,
+`licence`, `diplôme`, `diploma`, `degree`, `ingénieur`, `doctorat`).
+
+**Each role needs its own exclusive proof**: one segment marked as an
+institution and **not** as a programme, the other marked as a programme and
+**not** as an institution. One marker is not enough, because a marker on one
+segment proves nothing about the other. `University Diploma in AI | Sorbonne`
+is the case that shows it — the first segment carries `university` and is
+nevertheless the programme, since it carries `diploma` too, while the second
+carries no marker at all. A rule trusting the institution marker alone would
+store that inversion as a structured fact; requiring an exclusive proof of each
+role leaves both fields `NULL` instead. A segment proving both roles at once
+proves neither, and two segments proving the same role prove nothing. When the
+proofs are there, the marked-as-institution one is the institution and the
+other the programme, whichever order they were written in.
 
 Because the marker does the work, the number of segments does not have to be
 three. `EDUCATION_PIPE_EXPLICIT_V1` reads a header holding **one** explicit
-period plus exactly those two answerable segments.
+period plus exactly two segments carrying those proofs.
 `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` reads the shorter shape a CV writes
 just as often — **exactly two** segments, **neither** of them an explicit
-period, one of them marked — and leaves `period_text` `NULL`, because a header
+period, carrying the same proofs — and leaves `period_text` `NULL`, because a header
 with no date is a header with no date and no year is ever looked for inside the
 words. The experience rule still needs three segments, and for a reason that
 does not apply here: it reads by position, so two segments leave it nothing to
@@ -739,8 +750,9 @@ short rule honest — in `Université Exemple | 2020 - 2022` the unmarked segmen
 is a date, and calling it a programme would be exactly the invention this
 package refuses, so that fact stays unparsed.
 
-When a single period is certain and the distinction is not — neither segment
-carries a marker, both do, or a third segment remains — the reading stops
+When a single period is certain and the distinction is not — a role with no
+proof, a segment proving both roles at once, both segments proving the same
+role, or a third segment remaining — the reading stops
 halfway on purpose: `EDUCATION_PIPE_PERIOD_ONLY_V1` keeps the period verbatim
 and the following lines as the description, and leaves `institution_text` and
 `program_text` `NULL`. That is not partial credit: the period is *certain*, and
@@ -758,11 +770,18 @@ certification at all, anywhere in the fact. There is no `obtained`,
 `obtained_at` or `expires_at` column, so naming a certification never records
 holding one, no issuer is invented and no date is invented.
 
-`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when a single-line fact carries one
-explicit separator — a trailing parenthesis, a colon, a pipe, or a dash the
-document spaced on both sides — and everything on its right is a **whole** form
+`LANGUAGE_EXPLICIT_PROFICIENCY_V1` applies when a single-line fact, once at
+most **one** list marker has been removed, carries one explicit separator — a
+trailing parenthesis, a colon, a pipe, or a dash the document spaced on both
+sides — and everything on its right is a **whole** form
 of the closed proficiency registry (`A1`…`C2`, `débutant`, `intermédiaire`,
 `avancé`, `courant`, `fluent`, `native`, `natif`, `bilingue`, `bilingual`).
+A CV writes its languages as a bulleted list as often as not and the Phase 3.2B
+extractor keeps a bullet block's source text, so `• Anglais : C1` reaches the
+structurer with its marker; the marker is punctuation the list wrote, not part
+of the language's name, and storing `• Anglais` would be storing the layout.
+Exactly one is removed, never two.
+
 The registry decides *whether* the fragment is a level; it never translates
 one. `proficiency_text` is stored verbatim, so **"courant" stays "courant"**:
 there is no CEFR column, no mapping onto one, and no level derived from a

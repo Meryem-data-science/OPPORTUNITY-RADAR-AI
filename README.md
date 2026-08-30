@@ -91,12 +91,19 @@ Phase 3 has started, and only these six slices of it exist:
   'ACCEPTED'` and adds `profile_educations`, `profile_certifications` and
   `profile_languages`. **Punctuation proves that segments exist; it never
   proves what they are about**, so a pipe-delimited diploma line is read as a
-  school and a programme only when a closed, tiny marker registry
-  (`université`, `école`, `institut`, `faculté`, `college`, …) can tell the two
-  apart — never by position, and whether the line holds two segments or three.
-  When it cannot, only the explicit period is kept and both stay `NULL`; when
-  it can and the line carries no date, `period_text` stays `NULL` rather than a
-  year being looked for inside the words. A certification is read only from explicit labels
+  school and a programme only when **each of the two roles carries its own
+  exclusive proof** in a closed, tiny registry — one segment marked as an
+  institution (`université`, `école`, `institut`, `faculté`, `college`, …) and
+  not as a programme, the other marked as a programme (`master`, `licence`,
+  `diplôme`, `degree`, `ingénieur`, …) and not as an institution. Never by
+  position, and whether the line holds two segments or three. One marker is
+  never enough: `University Diploma in AI | Sorbonne` would be read backwards
+  by a rule that trusted it, so both fields stay `NULL` there. When the proofs
+  are missing, only the explicit period is kept and both stay `NULL`; when they
+  are there and the line carries no date, `period_text` stays `NULL` rather
+  than a year being looked for inside the words. A language line keeps its
+  level verbatim after at most one list marker is removed, so `• Anglais : C1`
+  stores `Anglais`, never `• Anglais`. A certification is read only from explicit labels
   (`Certification : … | Délivré par : …`), never from a sentence, and a stated
   intention ("préparation à", "objectif") is never turned into a credential. A
   language level is read only when it is a whole form of a closed registry

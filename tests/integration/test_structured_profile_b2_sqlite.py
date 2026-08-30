@@ -75,7 +75,9 @@ STRUCTURED_EDUCATION = (
     "Master 2 Data Science | Université de Test | 2020 - 2022\nMention"
 )
 PERIOD_ONLY_EDUCATION = "Master 2 Data Science | Promotion 2020 | 2020 - 2022"
-DATELESS_EDUCATION = "Programme fictif | Université Exemple"
+DATELESS_EDUCATION = "Master fictif | Université Exemple"
+INVERTING_EDUCATION = "University Diploma in AI | Sorbonne | 2024"
+BULLETED_LANGUAGE = "• Langue fictive : C1"
 FREE_EDUCATION = "Diplômée en 2022 après deux ans d'études"
 STRUCTURED_CERTIFICATION = (
     "Certification : Test Cloud | Délivré par : Organisme Test | 2023"
@@ -626,7 +628,7 @@ def test_a_dateless_two_segment_education_is_stored_without_a_period(
     assert row.fact_id == fact.id
     assert row.structuring_rule_id == "EDUCATION_PIPE_INSTITUTION_PROGRAM_V1"
     assert row.institution_text == "Université Exemple"
-    assert row.program_text == "Programme fictif"
+    assert row.program_text == "Master fictif"
     assert row.period_text is None
     assert row.description_text is None
     assert (outcome.structured_educations, outcome.unparsed_educations) == (1, 0)
@@ -635,7 +637,7 @@ def test_a_dateless_two_segment_education_is_stored_without_a_period(
 def test_a_dateless_education_the_registry_cannot_answer_stays_unparsed(
     migrated, profile_id
 ):
-    fact = accepted(migrated, profile_id, "Programme fictif | Autre programme")
+    fact = accepted(migrated, profile_id, "Sciences | Autre chose")
 
     outcome = synchronize_structured_profile_entries(migrated, profile_id)
     row = list_profile_educations(migrated, profile_id)[0]
@@ -681,6 +683,45 @@ def test_a_dateless_education_is_reconciled_like_any_other(migrated, profile_id)
     assert unchanged.changed is False
     assert list_profile_educations(migrated, profile_id) == () != before
     assert (after_rejection.created, after_rejection.removed) == (0, 1)
+
+
+def test_a_header_that_would_invert_the_two_fields_stores_neither(
+    migrated, profile_id
+):
+    """`University Diploma in AI | Sorbonne` is the marker-only rule's trap.
+
+    The first segment carries an institution marker and is the programme; the
+    second carries no marker and is the school. Storing the inversion would be
+    worse than storing nothing, so nothing but the certain period is stored.
+    """
+    fact = accepted(migrated, profile_id, INVERTING_EDUCATION)
+
+    outcome = synchronize_structured_profile_entries(migrated, profile_id)
+    row = list_profile_educations(migrated, profile_id)[0]
+
+    assert row.fact_id == fact.id
+    assert row.structuring_rule_id == "EDUCATION_PIPE_PERIOD_ONLY_V1"
+    assert row.institution_text is None
+    assert row.program_text is None
+    assert row.period_text == "2024"
+    assert (outcome.structured_educations, outcome.unparsed_educations) == (1, 0)
+
+
+def test_a_bulleted_language_fact_stores_no_list_marker(migrated, profile_id):
+    """The extractor keeps the source text of a bullet block; the layout is
+    not part of the language's name."""
+    fact = accepted(
+        migrated, profile_id, BULLETED_LANGUAGE, fact_type=ProfileFactType.LANGUAGE
+    )
+
+    synchronize_structured_profile_entries(migrated, profile_id)
+    row = list_profile_languages(migrated, profile_id)[0]
+
+    assert row.fact_id == fact.id
+    assert row.structuring_rule_id == "LANGUAGE_EXPLICIT_PROFICIENCY_V1"
+    assert row.language_text == "Langue fictive"
+    assert row.proficiency_text == "C1"
+    assert "•" not in str(row)
 
 
 def test_a_structured_certification_is_stored_fragment_by_fragment(

@@ -334,6 +334,30 @@ INSTITUTION_MARKERS: tuple[str, ...] = (
     "college", "collège", "collége",
 )
 
+#: The closed registry that proves a segment names a *programme*, and the whole
+#: of it. Same rules as `INSTITUTION_MARKERS`: whole words, folded for
+#: comparison only, no stemming, no plural folding, no fuzzy comparison.
+#:
+#: It exists because a marker on one segment proves nothing on its own. A
+#: segment reading `University Diploma in AI` carries `university`, and it is a
+#: programme; the school it belongs to may be written next to it with no marker
+#: at all. Requiring a **positive** proof of each of the two roles — and
+#: requiring each proof to be exclusive — is what stops the two fields being
+#: filled the wrong way round.
+#:
+#: It is deliberately tiny, and holds only words that name a credential rather
+#: than a subject: recognising every diploma in the world is not the goal, and
+#: a registry that grows by guesswork is a lexicon of hallucinations. A word
+#: absent from this tuple simply does not prove a programme, and the reading
+#: then declines.
+PROGRAM_MARKERS: tuple[str, ...] = (
+    "master", "mastère", "mastere",
+    "bachelor", "licence",
+    "diplôme", "diplome", "diploma", "degree",
+    "ingénieur", "ingenieur", "ingénieure", "ingenieure",
+    "doctorat", "doctorate",
+)
+
 #: The labels a document may use to name a certification, folded for
 #: comparison. Closed, and required: this rule reads a label the document
 #: wrote, never a position and never a guess about what a phrase is about.
@@ -411,6 +435,11 @@ def names_an_institution(segment: str) -> bool:
     return any(word in INSTITUTION_MARKERS for word in _words(segment))
 
 
+def names_a_program(segment: str) -> bool:
+    """Say whether one whole word of the segment is a closed programme marker."""
+    return any(word in PROGRAM_MARKERS for word in _words(segment))
+
+
 def states_an_intention(value: str) -> bool:
     """Say whether the fact states a plan rather than something already held."""
     return any(word in INTENTION_MARKERS for word in _words(value))
@@ -457,28 +486,37 @@ def _unparsed_education(source_value: str) -> StructuredEducation:
     )
 
 
-def _marked_institution(segments: list[str]) -> tuple[str, str] | None:
+def _institution_and_program(segments: list[str]) -> tuple[str, str] | None:
     """Split exactly two segments into `(institution, programme)`, or refuse.
 
-    The answer comes from the closed `INSTITUTION_MARKERS` registry and from
-    nothing else: exactly one of the two segments must name an institution by a
-    whole word, and then that one is the institution and the other is the
-    programme — whichever order the document wrote them in. No position, no
-    capitalisation, no length, no comma counting and no similarity to anything
-    takes part. Zero marked segments and two marked segments are both refusals:
-    the punctuation proved that two segments exist, and nothing proved what
-    either of them is about.
+    Every education rule goes through here, and the answer comes from the two
+    closed registries and from nothing else. No position, no capitalisation, no
+    length, no comma counting and no similarity to anything takes part.
+
+    Both roles need a **positive, exclusive** proof. One segment must name an
+    institution and **not** a programme; the other must name a programme and
+    **not** an institution. Everything else is a refusal.
+
+    A marker on one segment is not proof about the other one, which is the
+    whole reason this is not "the marked segment is the school". In
+    `University Diploma in AI | Sorbonne` the first segment carries
+    `university` and is nevertheless the programme — it carries `diploma` too —
+    while the second carries no marker at all. Reading the marker alone would
+    fill both fields the wrong way round and store an inversion as a structured
+    fact; requiring an exclusive proof of each role leaves both `None` instead.
+    A segment carrying markers of both roles proves neither, and a role nobody
+    wrote a marker for is not deduced from the other segment having one.
     """
     if len(segments) != 2:
         return None
-    marked = [
-        index
-        for index, segment in enumerate(segments)
-        if names_an_institution(segment)
+    roles = [
+        (names_an_institution(segment), names_a_program(segment))
+        for segment in segments
     ]
-    if len(marked) != 1:
-        return None
-    return segments[marked[0]], segments[1 - marked[0]]
+    for index, role in enumerate(roles):
+        if role == (True, False) and roles[1 - index] == (False, True):
+            return segments[index], segments[1 - index]
+    return None
 
 
 def structure_education(source_value: str) -> StructuredEducation:
@@ -486,19 +524,22 @@ def structure_education(source_value: str) -> StructuredEducation:
 
     All three start from an explicit pipe header — a first line not opened by a
     list marker, whose `|`-separated segments all carry text once trimmed — and
-    none of them ever reads a segment by its position. What separates them is
-    what the document proved.
+    none of them ever reads a segment by its position. Two segments are named
+    only when each of the two roles carries its own **exclusive** proof: one
+    segment marked as an institution and not as a programme, the other marked
+    as a programme and not as an institution. See `_institution_and_program`
+    for why one marker is never enough. What separates the rules is what else
+    the document proved.
 
     `EDUCATION_PIPE_EXPLICIT_V1` applies when the header holds **exactly one**
-    explicit period, exactly two segments remain beside it, and exactly one of
-    those two names an institution by a whole word of the closed
-    `INSTITUTION_MARKERS` registry. That one is the institution, the other the
-    programme. Zero periods is not this rule's shape; several is a header this
-    package cannot read without choosing, and choosing is inventing.
+    explicit period, exactly two segments remain beside it, and those two carry
+    the exclusive proofs above. Zero periods is not this rule's shape; several
+    is a header this package cannot read without choosing, and choosing is
+    inventing.
 
     `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` applies to the shorter shape a CV
     writes just as often: a header of **exactly two** segments, **neither** of
-    which is an explicit period, exactly one of which is marked. There is no
+    which is an explicit period, carrying the same exclusive proofs. There is no
     date to read, so `period_text` stays `None` — a header with no date is a
     header with no date, not a reason to decline the part that is certain, and
     not a reason to go looking for a year inside the words. Requiring both
@@ -508,9 +549,10 @@ def structure_education(source_value: str) -> StructuredEducation:
     so that fact stays unparsed.
 
     `EDUCATION_PIPE_PERIOD_ONLY_V1` applies whenever a single explicit period
-    is certain and the institution/programme distinction is not: neither
-    remaining segment carries a marker, both do, or there are more than two of
-    them. The period is kept verbatim, the following lines are kept as the
+    is certain and the institution/programme distinction is not: a role with no
+    proof, a segment proving both roles at once, both segments proving the same
+    role, or more than two segments remaining. The period is kept verbatim,
+    the following lines are kept as the
     description, and `institution_text` and `program_text` stay `None`. The
     certain part is preserved without the uncertain part being invented.
 
@@ -529,7 +571,7 @@ def structure_education(source_value: str) -> StructuredEducation:
 
     if not periods:
         # No date anywhere, so only the two-segment shape can say anything.
-        named = _marked_institution(segments)
+        named = _institution_and_program(segments)
         if named is None:
             return _unparsed_education(source_value)
         institution, program = named
@@ -553,7 +595,7 @@ def structure_education(source_value: str) -> StructuredEducation:
     others = [
         segment for index, segment in enumerate(segments) if index != periods[0]
     ]
-    named = _marked_institution(others)
+    named = _institution_and_program(others)
     institution, program = named if named is not None else (None, None)
     rule = (
         StructuringRule.EDUCATION_PIPE_EXPLICIT_V1
@@ -708,6 +750,15 @@ def structure_language(source_value: str) -> StructuredLanguage:
     registry. `language_text` is then the left side and `proficiency_text` the
     right side, both exactly as written and trimmed.
 
+    At most **one** list marker is removed first, with the same conservative
+    helper the project rule uses. A CV writes its languages as a bulleted list
+    as often as not, and the Phase 3.2B extractor keeps the source text of a
+    bullet block, so a fact can reach here reading `• Anglais : C1`. The
+    marker is punctuation the list wrote, not part of the language's name, and
+    storing `• Anglais` would be storing the layout. Exactly one is removed,
+    never two: a second marker is content, and it stays in `language_text`
+    where the document put it. Nothing else about the line is touched.
+
     The registry decides only whether the fragment is a level the document
     wrote. It never translates one: `courant` is stored as `courant`, `fluent`
     as `fluent`, and no CEFR level is computed from either. Case is folded for
@@ -723,7 +774,7 @@ def structure_language(source_value: str) -> StructuredLanguage:
     lines = _lines(source_value)
     if len(lines) != 1:
         return _unparsed_language(source_value)
-    split = _language_split(lines[0])
+    split = _language_split(_strip_one_bullet(lines[0]))
     if split is None or not is_explicit_proficiency(split[1]):
         return _unparsed_language(source_value)
     return StructuredLanguage(

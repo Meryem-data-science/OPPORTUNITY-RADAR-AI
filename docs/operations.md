@@ -634,13 +634,19 @@ is not unambiguous the fragment stays `NULL` and the row records the type's
 `*_UNPARSED_V1` rule — the accepted fact is still projected, never dropped.
 
 Punctuation proves that segments exist; it never proves what they are about. So
-a pipe-delimited diploma line becomes a school and a programme only when a
-closed marker registry can tell them apart — never by position, and whether the
-line carries two segments or three. When the marker can answer and no date was
-written, the row records `EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and
-`period_text` stays `NULL`; when a date is certain but the marker cannot
-answer, only the period is kept, with `EDUCATION_PIPE_PERIOD_ONLY_V1` on the
-row. No employer is deduced
+a pipe-delimited diploma line becomes a school and a programme only when each
+of the two roles carries its own exclusive proof in a closed registry — one
+segment marked as an institution and not as a programme, the other marked as a
+programme and not as an institution. Never by position, and whether the line
+carries two segments or three. One marker is not enough: in
+`University Diploma in AI | Sorbonne` the marked segment is the programme, so
+both fields stay `NULL` rather than being filled the wrong way round. When both
+proofs are there and no date was written, the row records
+`EDUCATION_PIPE_INSTITUTION_PROGRAM_V1` and `period_text` stays `NULL`; when a
+date is certain but a proof is missing, only the period is kept, with
+`EDUCATION_PIPE_PERIOD_ONLY_V1` on the row. A language line has at most one
+list marker removed before it is read, so `• Anglais : C1` stores `Anglais`
+and never `• Anglais`. No employer is deduced
 from a sentence, no role from a technology, no seniority from the word "stage",
 no duration, no calendar date from a school year, no skill from a project
 description, no diploma from a school, no `Bac+N` from the word "Master", no
