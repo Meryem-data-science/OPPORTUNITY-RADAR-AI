@@ -1,7 +1,7 @@
 """The sentence-level signals both the skill rules and the language rules read.
 
-Three questions are asked of every segment, always in this order, and the order
-is the contract:
+Three questions are asked of every **clause**, always in this order, and the
+order is the contract:
 
 1. **does the sentence cancel the demand?** "No prior Python experience is
    required", "training will be provided", "SQL is not required". A cancelled
@@ -19,22 +19,38 @@ is the contract:
    sentence with no local marker in a responsibilities or stack section states
    no requirement.
 
-If none of the three answers, the sentence states no requirement. That is the
-default and it is meant to be: v1 would rather record nothing than record a
-demand somebody has to disprove later.
+If none of the three answers, the clause states no requirement. That is the
+default and it is meant to be: this package would rather record nothing than
+record a demand somebody has to disprove later.
 
-**When one sentence carries both marks**, the weaker one wins. "Python is
-required and Spark is a plus" normally splits into two sentences before it
-reaches here; when it does not, `PREFERRED` is the claim this package can
-defend, and over-claiming is the failure mode that costs a real candidate a
-real opportunity in Phase 3.6.
+**A clause, and not the whole sentence.** This is what `v2` fixes and it was a
+real defect. One sentence can hold two demands of different strength:
+
+    Python required and Spark preferred.
+    Python preferred and SQL required.
+    No Python experience required, but SQL is required.
+
+Reading the markers over the whole sentence made the first two produce two
+`PREFERRED` rows, promoted nothing and demoted a real requirement; and it let
+one skill's cancelling clause delete a demand stated about another skill
+entirely. `term_clauses` below cuts the sentence at the connectors *between*
+terms, so each group of terms is scored against its own words.
+
+The cut is deliberately conservative: it happens only in the text **between**
+two matched terms, and only at a connector, so a subordinate clause with no
+term in it never splits anything. When one clause still carries both marks —
+"Python required and preferred", which nobody writes — the weaker one wins,
+because over-claiming is the failure mode that costs a real candidate a real
+opportunity in Phase 3.6.
 
 The fourth thing this module knows is **how a posting joins two terms**. `and`
 is a conjunction and gives two requirements; `or` is a choice and gives none,
 because storing both would turn the employer's alternative into two
 obligations. A bare comma is neither on its own: it inherits the run it belongs
 to, so "Python, SQL and Spark" is three demands while "Python, R or Julia" is
-one choice among three.
+one choice among three. Runs joined by a bare connector share one clause, which
+is exactly why "Python and SQL required" still yields two requirements: the
+marker sits at the end of a clause that both terms belong to.
 """
 
 from __future__ import annotations
@@ -50,26 +66,34 @@ from services.collector.extractors.opportunity_constraints.requirements.models i
 )
 
 __all__ = [
-    "Link",
-    "TermRun",
-    "term_runs",
     "CANCELLING_RULE_ID",
     "LOCAL_PREFERRED_RULE_ID",
     "LOCAL_REQUIRED_RULE_ID",
+    "Link",
     "SECTION_PREFERRED_RULE_ID",
     "SECTION_REQUIRED_RULE_ID",
+    "TermRun",
     "cancels_requirement",
+    "clause_level",
     "link_between",
-    "segment_level",
+    "term_clauses",
+    "term_runs",
 ]
 
 #: The rule ids stored on evidence, so an audit reads *why* a fragment was
 #: taken as a demand without re-running anything.
-LOCAL_REQUIRED_RULE_ID = "REQUIREMENT_LOCAL_REQUIRED_V1"
-LOCAL_PREFERRED_RULE_ID = "REQUIREMENT_LOCAL_PREFERRED_V1"
+#:
+#: The three local rules are `_V2` because their contract genuinely changed:
+#: they used to be scored over a whole sentence and are now scored over the
+#: clause the term belongs to. A stored `_V1` row was produced by a rule that
+#: could read a marker belonging to another skill, and leaving the id alone
+#: would have made the two indistinguishable. The two section rules are `_V1`
+#: still: a heading meant the same thing before and means it now.
+LOCAL_REQUIRED_RULE_ID = "REQUIREMENT_LOCAL_REQUIRED_V2"
+LOCAL_PREFERRED_RULE_ID = "REQUIREMENT_LOCAL_PREFERRED_V2"
 SECTION_REQUIRED_RULE_ID = "REQUIREMENT_SECTION_REQUIRED_V1"
 SECTION_PREFERRED_RULE_ID = "REQUIREMENT_SECTION_PREFERRED_V1"
-CANCELLING_RULE_ID = "REQUIREMENT_CANCELLED_V1"
+CANCELLING_RULE_ID = "REQUIREMENT_CANCELLED_V2"
 
 #: Sentences that state the absence of a demand, or promise to supply the
 #: skill. Each is anchored on words a posting actually writes; none of them
@@ -159,16 +183,20 @@ _LOCAL_PREFERRED = tuple(
 
 
 def cancels_requirement(text: str) -> bool:
-    """Whether the sentence states the absence of a demand, or promises to teach."""
+    """Whether the clause states the absence of a demand, or promises to teach."""
     return any(pattern.search(text) for pattern in _CANCELLING)
 
 
-def segment_level(
+def clause_level(
     text: str, context: SectionContext
 ) -> tuple[RequirementLevel, str] | None:
-    """The level this sentence states, and the rule that said so, or None.
+    """The level this clause states, and the rule that said so, or None.
 
-    `None` means "no requirement", which is the answer for every sentence that
+    `text` is one clause of one segment — the words `term_clauses` decided
+    belong to the terms being scored — never the whole posting and, since `v2`,
+    never the whole sentence when the sentence holds more than one demand.
+
+    `None` means "no requirement", which is the answer for every clause that
     neither carries a marker nor sits in a demanding section — the "our stack
     includes…" case, and the "you will build pipelines using…" case.
     """
@@ -298,3 +326,66 @@ def term_runs(
         )
         grouped.append(TermRun(indexes=tuple(members), alternative=alternative))
     return tuple(grouped)
+
+
+#: What separates two independent statements inside one sentence. Looked for
+#: **only in the text between two matched terms**, so a connector buried in a
+#: subordinate clause that mentions no technology never cuts anything.
+_CLAUSE_CONNECTOR = re.compile(
+    r"[,;:]|\b(?:and|but|or|while|whereas|though|although|yet|however|plus|"
+    r"et|mais|ou|mais\s+aussi|mais\s+[ée]galement|alors\s+que|tandis\s+que|"
+    r"cependant|toutefois)\b",
+    re.IGNORECASE,
+)
+
+
+def term_clauses(
+    spans: Sequence[tuple[int, int]], text: str, runs: Sequence[TermRun]
+) -> tuple[tuple[int, int], ...]:
+    """One `(start, end)` window per run: the words that run's level is read from.
+
+    Returns a tuple parallel to `runs`. A segment holding a single run gets the
+    whole segment, which is what makes every one-demand sentence read exactly as
+    it did before `v2`.
+
+    Two rules decide the windows, and both are conservative.
+
+    **Runs joined by a bare connector share one window.** `term_runs` already
+    split on `and` and on prose; a gap that `link_between` still recognises as a
+    connector — `and`, `or`, a bare comma — means the posting was listing, not
+    changing subject. So "Python and SQL required" is one clause and the trailing
+    marker reaches both terms, exactly as it must.
+
+    **Otherwise the gap is cut at its first connector.** "Python required and
+    Spark preferred" has prose between the two terms, so it is two clauses, and
+    the cut at `and` gives `Python required` its own words and
+    `Spark preferred` its own. With no connector in the gap at all the whole gap
+    stays with the clause on the left, because a marker trails the term it
+    qualifies far more often than it leads one.
+
+    Nothing here looks outside the sentence, and nothing invents a boundary
+    where a posting wrote none: the first window always starts at the beginning
+    of the segment and the last always ends at its end, so no words are lost.
+    """
+    if not runs:
+        return ()
+    boundaries: list[int] = []
+    groups: list[list[int]] = [[0]]
+    for index in range(1, len(runs)):
+        gap_start = spans[runs[index - 1].indexes[-1]][1]
+        gap_end = spans[runs[index].indexes[0]][0]
+        if link_between(text[gap_start:gap_end]) is not Link.NONE:
+            # A bare connector: still one list, still one clause.
+            groups[-1].append(index)
+            continue
+        groups.append([index])
+        found = _CLAUSE_CONNECTOR.search(text, gap_start, gap_end)
+        boundaries.append(gap_end if found is None else found.start())
+
+    windows: list[tuple[int, int]] = []
+    for position, members in enumerate(groups):
+        start = 0 if position == 0 else boundaries[position - 1]
+        end = len(text) if position == len(groups) - 1 else boundaries[position]
+        for _ in members:
+            windows.append((start, end))
+    return tuple(windows)

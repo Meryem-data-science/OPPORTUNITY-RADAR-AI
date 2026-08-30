@@ -1035,6 +1035,12 @@ that stated it, the rule that fired, the heading it sat under, and the level
 that mention stated. `REQUIRED` outranks `PREFERRED` when one posting says
 both, and the weaker mention survives as evidence.
 
+**Levels are read per clause.** "Python required and Spark preferred" stores one
+demand and one preference, and "No Python experience required, but SQL is
+required" stores SQL alone — one skill's cancelling words never delete another's
+demand. Terms joined by a bare connector still share one level, so "Python and
+SQL required" is two requirements.
+
 **What it refuses to extract, and this is the point.** A mention is not a
 requirement:
 
@@ -1045,6 +1051,10 @@ We use SQL across the company.                -> nothing
 Training in Python will be provided.          -> nothing
 No prior Python experience is required.       -> nothing
 ```
+
+French prose is not a technology either: token boundaries are Unicode-aware, so
+`Réseaux`, `Régression`, `Réalisation` and `Câblage` never produce the `R` or
+`C` skills, in composed or decomposed spelling.
 
 An `or` is not an `and`: "Python or R required" stores neither, and writes a
 row in `opportunity_requirement_ambiguities` instead — so an operator can see
@@ -1066,7 +1076,7 @@ requires any more is left in place, because it is vocabulary and not a claim
 about anybody.
 
 **Idempotence.** `source_fingerprint` is over the description and nothing else,
-and `extractor_version` is `opportunity-requirements-v1`. A second `sync` writes
+and `extractor_version` is `opportunity-requirements-v2`. A second `sync` writes
 nothing and reports `changed=false`, including for a posting that requires
 nothing — `opportunity_requirement_extraction_state` records that it was read.
 An edited description recomputes; a new extractor version recomputes even when

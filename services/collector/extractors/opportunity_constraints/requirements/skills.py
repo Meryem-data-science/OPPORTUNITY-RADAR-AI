@@ -1,10 +1,21 @@
 """The closed rules that read the skills a posting asks for.
 
-One sentence at a time, and the same four questions each time: does this
-sentence cancel a demand, does it state one locally, does its section state one,
-and did it join several technologies into a choice? `signals.py` answers the
-first three, `signals.term_runs` the fourth, and this module turns the answers
-into observations and then into requirements.
+One clause at a time, and the same four questions each time: does this clause
+cancel a demand, does it state one locally, does its section state one, and did
+it join several technologies into a choice? `signals.py` answers the first
+three, `signals.term_runs` the fourth, and this module turns the answers into
+observations and then into requirements.
+
+**A clause, not a sentence**, and that distinction is `v2`. One sentence can
+hold two demands of different strength — "Python required and Spark preferred",
+"Python preferred and SQL required" — and scoring the markers over the whole
+sentence collapsed both into one level, demoting a real requirement in the first
+case. Worse, one skill's cancelling clause deleted a demand about another:
+"No Python experience required, but SQL is required" produced nothing at all.
+`signals.term_clauses` cuts the sentence at the connectors between terms, so
+each technology is scored against its own words. Terms joined by a bare
+connector stay in one clause, which is why "Python and SQL required" is still
+two requirements.
 
 **What is deliberately not extracted.** A technology named in a sentence that
 demands nothing produces nothing:
@@ -21,7 +32,10 @@ the fourth a promise, the fifth the absence of a demand. A rule that read any
 of them as a requirement would produce a projection whose rows a human has to
 disprove one by one, which is worse than a projection that is silent.
 
-**REQUIRED beats PREFERRED, and the loser keeps its evidence.** A posting that
+**REQUIRED beats PREFERRED, and the loser keeps its evidence.** This is about
+one technology named **twice**, and it is a different question from the one
+above: two mentions of Python resolve to the stronger; two different
+technologies in one sentence keep their own levels. A posting that
 names Python under "Nice to have" and again under "Requirements" requires it.
 That is not a contradiction — nothing here produces one — but both mentions are
 things the posting said, so both become evidence, each carrying the level *it*
@@ -51,7 +65,8 @@ from services.collector.extractors.opportunity_constraints.requirements.models i
     stronger,
 )
 from services.collector.extractors.opportunity_constraints.requirements.signals import (
-    segment_level,
+    clause_level,
+    term_clauses,
     term_runs,
 )
 from services.collector.extractors.opportunity_constraints.requirements.skill_catalog import (
@@ -82,15 +97,22 @@ def read_skill_requirements(
     refused: list[RequirementAmbiguity] = []
 
     for segment in segments:
-        stated = segment_level(segment.text, segment.context)
-        if stated is None:
-            continue
-        level, rule_id = stated
         matches = SKILL_MATCHER.find(segment.text)
         if not matches:
             continue
+        spans = [(item.start, item.end) for item in matches]
+        runs = term_runs(spans, segment.text)
         fragment = shorten_evidence(segment.text, MAX_EVIDENCE_LENGTH)
-        for run in term_runs([(item.start, item.end) for item in matches], segment.text):
+        for run, (start, end) in zip(
+            runs, term_clauses(spans, segment.text, runs), strict=True
+        ):
+            stated = clause_level(segment.text[start:end], segment.context)
+            if stated is None:
+                # This clause demanded nothing — or cancelled its own demand.
+                # Neither is a refusal, so no ambiguity is recorded, and a
+                # neighbouring clause that *did* demand something is untouched.
+                continue
+            level, rule_id = stated
             if run.alternative:
                 refused.append(
                     RequirementAmbiguity(

@@ -47,7 +47,23 @@ from services.collector.extractors.opportunity_constraints.models import (
 #: It is deliberately independent of `EXTRACTOR_VERSION` in `..models`. 3.5A
 #: reads dates, durations and work modes; 3.5B reads technologies and
 #: languages; a fix to one is not a reason to rewrite the other's projection.
-REQUIREMENT_EXTRACTOR_VERSION = "opportunity-requirements-v1"
+#:
+#: `v2` fixes two readings that were wrong on real text, so every stored `v1`
+#: row is recomputed:
+#:
+#: * **token boundaries were ASCII-only.** `é` fell outside them, so the
+#:   one-letter alias `R` matched the start of `Réseaux`, `Régression` and
+#:   `Réalisation`, and `C` matched `Câblage` and `Cœur`. In a partly French
+#:   corpus that turned ordinary prose under a requirements heading into hard
+#:   requirements nobody wrote. Boundaries are now Unicode-aware and know about
+#:   combining marks — see `matcher.py`;
+#: * **a requirement's level was read over the whole sentence.** "Python
+#:   required and Spark preferred" made both preferred, "Python preferred and
+#:   SQL required" made both preferred, and "No Python experience required, but
+#:   SQL is required" produced nothing at all, because one clause's cancelling
+#:   words deleted another clause's demand. Levels are now read over the clause
+#:   each term belongs to — see `signals.term_clauses`.
+REQUIREMENT_EXTRACTOR_VERSION = "opportunity-requirements-v2"
 
 #: The longest proficiency text stored. A level is a word or a code — `B2`,
 #: `Fluent`, `Professional proficiency` — and anything longer is a sentence

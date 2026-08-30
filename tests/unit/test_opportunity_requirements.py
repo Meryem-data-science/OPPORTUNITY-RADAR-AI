@@ -14,6 +14,8 @@ own test, and each asserts an absence.
 
 from dataclasses import fields
 
+import unicodedata
+
 import pytest
 
 from services.collector.extractors.opportunity_constraints.models import (
@@ -59,8 +61,9 @@ from services.collector.extractors.opportunity_constraints.requirements.sections
 from services.collector.extractors.opportunity_constraints.requirements.signals import (
     Link,
     cancels_requirement,
+    clause_level,
     link_between,
-    segment_level,
+    term_clauses,
     term_runs,
 )
 from services.collector.extractors.opportunity_constraints.requirements.skill_catalog import (
@@ -108,7 +111,7 @@ def test_the_requirement_version_is_its_own_contract() -> None:
         EXTRACTOR_VERSION,
     )
 
-    assert REQUIREMENT_EXTRACTOR_VERSION == "opportunity-requirements-v1"
+    assert REQUIREMENT_EXTRACTOR_VERSION == "opportunity-requirements-v2"
     assert REQUIREMENT_EXTRACTOR_VERSION != EXTRACTOR_VERSION
 
 
@@ -390,7 +393,7 @@ def test_a_segment_keeps_the_heading_it_sat_under_verbatim() -> None:
 )
 def test_a_cancelling_sentence_states_no_demand(sentence: str) -> None:
     assert cancels_requirement(sentence)
-    assert segment_level(sentence, SectionContext.REQUIRED) is None
+    assert clause_level(sentence, SectionContext.REQUIRED) is None
 
 
 def test_a_cancelling_sentence_beats_its_section() -> None:
@@ -743,6 +746,205 @@ def test_a_silent_posting_records_nothing_at_all() -> None:
     reading = read("We build good products with a great team in our office.")
 
     assert (reading.skills, reading.languages, reading.ambiguities) == ((), (), ())
+
+
+# --------------------------------------------------------------------------
+# Unicode token boundaries
+#
+# The `v1` matcher bounded terms with `[A-Za-z0-9_+#&]`, which leaves every
+# accented letter *outside* the class. `é` therefore read as a word boundary
+# and the one-letter alias `R` matched the start of `Réseaux`. The corpus is
+# partly French, `R` is a real technology, and a false `R` under a requirements
+# heading is a hard requirement nobody wrote.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "word",
+    (
+        "Réseaux",
+        "Régression",
+        "Réalisation",
+        "Rédaction",
+        "Rétro-ingénierie",
+        "Résultats",
+    ),
+)
+def test_a_french_word_never_produces_the_r_skill(word: str) -> None:
+    assert keys_in(word) == []
+    assert keys_in(f"Requirements: {word} de neurones") == []
+
+
+@pytest.mark.parametrize("word", ("Câblage", "Cœur", "Contrôle", "Ça"))
+def test_a_french_word_never_produces_the_c_skill(word: str) -> None:
+    assert keys_in(word) == []
+
+
+@pytest.mark.parametrize(
+    "word", ("Réseaux", "Régression", "Réalisation", "Câblage", "Ça")
+)
+def test_a_decomposed_spelling_is_bounded_too(word: str) -> None:
+    """NFC is not the only form a posting can arrive in.
+
+    `Ça` may be one character or `C` followed by a combining cedilla, and a
+    boundary that only knew about letters would read the second as a standalone
+    `C`. Both forms are tested because a collector normalizes nothing.
+    """
+    assert keys_in(unicodedata.normalize("NFD", word)) == []
+    assert keys_in(unicodedata.normalize("NFC", word)) == []
+
+
+def test_a_unicode_letter_never_hides_a_real_requirement() -> None:
+    """The guard bounds terms; it does not swallow the ones a posting wrote."""
+    assert keys_in("Réseaux de neurones, R et Python") == ["r", "python"]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    (
+        ("R", ["r"]),
+        ("C", ["c"]),
+        ("R required.", ["r"]),
+        ("C required.", ["c"]),
+        ("C++", ["c++"]),
+        ("C#", ["c#"]),
+        ("R&D", []),
+        ("Google", []),
+        ("PostgreSQL", ["postgresql"]),
+        ("PySpark", ["pyspark"]),
+        ("C, C++ and C#", ["c", "c++", "c#"]),
+    ),
+)
+def test_the_historical_boundary_protections_survive(text: str, expected) -> None:
+    assert keys_in(text) == expected
+
+
+# --------------------------------------------------------------------------
+# One sentence, two demands of different strength
+#
+# `v1` scored the markers over the whole sentence, so two technologies in one
+# sentence were forced to share one level — and one clause's cancelling words
+# deleted another clause's demand entirely.
+# --------------------------------------------------------------------------
+
+
+def test_two_skills_in_one_sentence_keep_their_own_levels() -> None:
+    assert skills_of("Python required and Spark preferred.") == {
+        "Python": "REQUIRED",
+        "Apache Spark": "PREFERRED",
+    }
+
+
+def test_the_order_of_the_two_demands_does_not_change_them() -> None:
+    assert skills_of("Python preferred and SQL required.") == {
+        "Python": "PREFERRED",
+        "SQL": "REQUIRED",
+    }
+
+
+def test_a_cancelled_skill_does_not_cancel_its_neighbour() -> None:
+    """The clause about Python says nothing about SQL."""
+    assert skills_of("No Python experience required, but SQL is required.") == {
+        "SQL": "REQUIRED"
+    }
+
+
+def test_a_local_marker_does_not_reach_the_next_item_of_a_required_section() -> None:
+    assert skills_of("Required Qualifications\n- Python preferred and SQL") == {
+        "Python": "PREFERRED",
+        "SQL": "REQUIRED",
+    }
+
+
+def test_a_local_marker_does_not_reach_the_next_item_of_a_preferred_section() -> None:
+    assert skills_of("Preferred Qualifications\n- Python required\n- Spark") == {
+        "Python": "REQUIRED",
+        "Apache Spark": "PREFERRED",
+    }
+
+
+def test_two_languages_in_one_sentence_keep_their_own_levels() -> None:
+    assert languages_of("English required and French preferred.") == {
+        "English": ("REQUIRED", None),
+        "French": ("PREFERRED", None),
+    }
+
+
+def test_a_cancelled_language_does_not_cancel_its_neighbour() -> None:
+    assert languages_of("English not required but French required.") == {
+        "French": ("REQUIRED", None)
+    }
+
+
+def test_a_conjunction_still_shares_one_level_across_both_terms() -> None:
+    """The marker sits at the end of a clause both terms belong to."""
+    assert skills_of("Python and SQL required.") == {
+        "Python": "REQUIRED",
+        "SQL": "REQUIRED",
+    }
+    assert skills_of("Python and R preferred.") == {
+        "Python": "PREFERRED",
+        "R": "PREFERRED",
+    }
+    assert languages_of("English and French required.") == {
+        "English": ("REQUIRED", None),
+        "French": ("REQUIRED", None),
+    }
+
+
+def test_clause_splitting_does_not_break_an_alternative_group() -> None:
+    assert skills_of("Python or R required.") == {}
+    assert reasons_of("Python or R required.") == ["ALTERNATIVE_GROUP_UNSUPPORTED"]
+    assert languages_of("English or French required.") == {}
+    assert reasons_of("English or French required.") == [
+        "ALTERNATIVE_GROUP_UNSUPPORTED"
+    ]
+
+
+def test_a_sentence_with_one_demand_is_scored_over_the_whole_sentence() -> None:
+    """One run, one window: the clause split changes nothing here."""
+    text = "Must have experience with Python and SQL."
+    matches = SKILL_MATCHER.find(text)
+    spans = [(item.start, item.end) for item in matches]
+    runs = term_runs(spans, text)
+
+    assert term_clauses(spans, text, runs) == ((0, len(text)),) * len(runs)
+
+
+def test_a_clause_window_never_loses_the_edges_of_the_sentence() -> None:
+    text = "Python required and Spark preferred."
+    matches = SKILL_MATCHER.find(text)
+    spans = [(item.start, item.end) for item in matches]
+    windows = term_clauses(spans, text, term_runs(spans, text))
+
+    assert windows[0][0] == 0
+    assert windows[-1][1] == len(text)
+    assert "preferred" not in text[windows[0][0] : windows[0][1]]
+    assert "required" not in text[windows[-1][0] : windows[-1][1]]
+
+
+def test_each_mention_still_records_the_level_it_stated() -> None:
+    reading = read("Python required and Spark preferred.")
+    levels = {
+        item.canonical_name: item.evidence[0].observed_requirement.value
+        for item in reading.skills
+    }
+
+    assert levels == {"Python": "REQUIRED", "Apache Spark": "PREFERRED"}
+
+
+def test_the_local_rules_say_they_are_clause_local() -> None:
+    """A `_V1` id would describe a rule that could read a neighbour's marker."""
+    from services.collector.extractors.opportunity_constraints.requirements import (
+        signals,
+    )
+
+    assert signals.LOCAL_REQUIRED_RULE_ID.endswith("_V2")
+    assert signals.LOCAL_PREFERRED_RULE_ID.endswith("_V2")
+    assert signals.CANCELLING_RULE_ID.endswith("_V2")
+    # A heading meant the same thing before and means it now.
+    assert signals.SECTION_REQUIRED_RULE_ID.endswith("_V1")
+    assert signals.SECTION_PREFERRED_RULE_ID.endswith("_V1")
 
 
 # --------------------------------------------------------------------------

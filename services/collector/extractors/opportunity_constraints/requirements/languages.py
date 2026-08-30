@@ -1,8 +1,11 @@
 """The closed rules that read the languages a posting asks for.
 
 The skill rules and these share their shape — cancel, local marker, section,
-alternative group — and differ in three ways that all come from what a language
-requirement actually is.
+alternative group, each read over the **clause** a language belongs to rather
+than over the whole sentence, so "English required and French preferred" is one
+demand and one preference and "English not required but French required" leaves
+English alone without losing French — and differ in three ways that all come
+from what a language requirement actually is.
 
 **A language is mentioned far more often than it is required.** A posting is
 *written* in a language, sells to a market in one, ships documentation in one,
@@ -68,7 +71,8 @@ from services.collector.extractors.opportunity_constraints.requirements.models i
     stronger,
 )
 from services.collector.extractors.opportunity_constraints.requirements.signals import (
-    segment_level,
+    clause_level,
+    term_clauses,
     term_runs,
 )
 from services.collector.extractors.opportunity_constraints.text import shorten_evidence
@@ -166,10 +170,6 @@ def read_language_requirements(
     refused: list[RequirementAmbiguity] = []
 
     for segment in segments:
-        stated = segment_level(segment.text, segment.context)
-        if stated is None:
-            continue
-        level, rule_id = stated
         matches = [
             item
             for item in LANGUAGE_MATCHER.find(segment.text)
@@ -177,11 +177,20 @@ def read_language_requirements(
         ]
         if not matches:
             continue
+        spans = [(item.start, item.end) for item in matches]
+        runs = term_runs(spans, segment.text)
         fragment = shorten_evidence(segment.text, MAX_EVIDENCE_LENGTH)
-        both = bool(_BOTH_MARKER.search(segment.text)) and not _EXPLICIT_OR.search(
-            segment.text
-        )
-        for run in term_runs([(item.start, item.end) for item in matches], segment.text):
+        for run, (start, end) in zip(
+            runs, term_clauses(spans, segment.text, runs), strict=True
+        ):
+            clause = segment.text[start:end]
+            stated = clause_level(clause, segment.context)
+            if stated is None:
+                continue
+            level, rule_id = stated
+            # "Bilingual X/Y" is read in the clause that carries it, so a
+            # neighbouring clause cannot lend its marker to an unrelated pair.
+            both = bool(_BOTH_MARKER.search(clause)) and not _EXPLICIT_OR.search(clause)
             if run.alternative and not both:
                 refused.append(
                     RequirementAmbiguity(

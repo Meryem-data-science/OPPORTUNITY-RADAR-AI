@@ -1447,17 +1447,35 @@ Training in Python will be provided.          -> nothing
 No prior Python experience is required.       -> nothing
 ```
 
-Signals are read in a fixed order: a cancelling sentence, then a local marker,
+Signals are read in a fixed order: a cancelling clause, then a local marker,
 then the section, then nothing. So `Python preferred` under `Required
 Qualifications` is `PREFERRED`, and `Must have strong Python skills` is
 `REQUIRED` with no section at all. An unrecognised title-shaped line resets the
 context to neutral rather than letting a requirements heading leak downward.
 
-Matching is on token boundaries that know about `+`, `#` and `&`, and on
-longest-alias-first, non-overlapping spans: `PostgreSQL` never yields `SQL`,
-`PySpark` never yields `Spark`, `Google` never yields `Go`, and `C`, `C++` and
-`C#` are three technologies. One- and two-character aliases must be written as
-the catalogue writes them, so ordinary prose cannot produce `Go`, `C` or `R`.
+**The unit is the clause, not the sentence.** Two technologies in one sentence
+can carry two different levels, and one of them can be cancelled without
+touching the other:
+
+```text
+Python required and Spark preferred.                 -> Python REQUIRED, Spark PREFERRED
+Python preferred and SQL required.                   -> Python PREFERRED, SQL REQUIRED
+No Python experience required, but SQL is required.  -> SQL REQUIRED only
+```
+
+The cut happens only in the text **between** two matched terms and only at a
+connector, so terms joined by a bare connector stay in one clause: `Python and
+SQL required` is two requirements and `Python, SQL and Spark required` is three.
+This is a different question from one technology named twice, where `REQUIRED`
+still beats `PREFERRED`.
+
+Matching is on token boundaries that are **Unicode-aware** and that know about
+`+`, `#`, `&` and combining marks, and on longest-alias-first, non-overlapping
+spans: `PostgreSQL` never yields `SQL`, `PySpark` never yields `Spark`,
+`Google` never yields `Go`, `C`, `C++` and `C#` are three technologies, and
+`Réseaux`, `Régression`, `Réalisation` and `Câblage` yield nothing at all. One-
+and two-character aliases must be written as the catalogue writes them, so
+ordinary prose cannot produce `Go`, `C` or `R`.
 
 ### Alternatives are refused, on the record
 
@@ -1509,8 +1527,10 @@ audit never finds a fragment claiming to have demanded something it did not.
 ### Idempotence
 
 `extractor_version` is `REQUIREMENT_EXTRACTOR_VERSION`
-(`opportunity-requirements-v1`), the version of the code that produced the row,
-and no caller can name another. It is deliberately **not**
+(`opportunity-requirements-v2`), the version of the code that produced the row,
+and no caller can name another. `v2` made token boundaries Unicode-aware and
+moved a requirement's level from the sentence to the clause; both change what a
+given description reads as, so every `v1` row is recomputed rather than trusted. It is deliberately **not**
 `opportunity-constraints-v3`: 3.5A and 3.5B change for different reasons, and
 one shared label would make every skill fix recompute every start date.
 

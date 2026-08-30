@@ -519,6 +519,75 @@ def test_a_preferred_mention_of_a_required_skill_keeps_its_own_level(
     assert observed == ["PREFERRED", "REQUIRED"]
 
 
+def test_two_demands_of_one_sentence_are_projected_at_their_own_levels(
+    migrated,
+) -> None:
+    """The `v2` fix, all the way to the rows.
+
+    A posting writing "Python required and Spark preferred" states one demand
+    and one preference. `v1` scored the markers over the whole sentence and
+    stored two preferences, quietly demoting a real requirement.
+    """
+    insert_opportunity(
+        migrated,
+        description=(
+            "Python required and Spark preferred. "
+            "No Airflow experience required, but SQL is required."
+        ),
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    stored = dict(
+        migrated.execute(
+            "SELECT s.canonical_name, r.requirement "
+            "FROM opportunity_skill_requirements AS r "
+            "JOIN skills AS s ON s.id = r.skill_id"
+        )
+    )
+
+    assert stored == {
+        "Python": "REQUIRED",
+        "Apache Spark": "PREFERRED",
+        "SQL": "REQUIRED",
+    }
+
+
+def test_a_french_word_never_becomes_a_stored_requirement(migrated) -> None:
+    """`Réseaux` under a requirements heading is prose, not the language R."""
+    insert_opportunity(
+        migrated,
+        description="Required Qualifications\n- Réseaux de neurones et régression",
+    )
+    synchronize_opportunity_constraints(migrated)
+    synchronize_opportunity_requirements(migrated)
+
+    assert int(
+        migrated.execute("SELECT COUNT(*) FROM opportunity_skill_requirements").fetchone()[0]
+    ) == 0
+    assert int(migrated.execute("SELECT COUNT(*) FROM skills").fetchone()[0]) == 0
+
+
+def test_a_reading_stored_under_the_first_version_is_recomputed(
+    migrated, rich_opportunity
+) -> None:
+    """Both `v2` corrections change what a description reads as, so every `v1`
+    row is replaced rather than trusted."""
+    synchronize_opportunity_requirements(migrated)
+    migrated.execute(
+        "UPDATE opportunity_requirement_extraction_state "
+        "SET extractor_version = 'opportunity-requirements-v1'"
+    )
+    migrated.commit()
+
+    summary = synchronize_opportunity_requirements(migrated)
+
+    assert summary.replaced == 1
+    assert stored_requirement_signature(migrated, rich_opportunity)[1] == (
+        REQUIREMENT_EXTRACTOR_VERSION
+    )
+
+
 # --------------------------------------------------------------------------
 # The shared vocabulary
 # --------------------------------------------------------------------------

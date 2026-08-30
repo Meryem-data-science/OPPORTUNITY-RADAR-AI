@@ -1081,10 +1081,28 @@ fired, the heading it sat under — stored **separately**, never welded into a
 sentence nobody wrote — and the level *that mention* stated, which may be
 weaker than the projected one.
 
+**A level belongs to a clause, not to a sentence.** One sentence can hold two
+demands of different strength — "Python required and Spark preferred", "Python
+preferred and SQL required" — and one clause's cancelling words say nothing
+about the next clause's demand: "No Python experience required, but SQL is
+required" requires SQL. Signals are therefore scored over the clause each term
+belongs to, cut at the connectors *between* matched terms. Terms joined by a
+bare connector stay in one clause, so "Python and SQL required" is still two
+requirements and "Python or R required" is still one refused choice. Two
+mentions of the *same* technology are a different question, and there `REQUIRED`
+still beats `PREFERRED`.
+
+**Token boundaries are Unicode-aware**, which is load-bearing in a partly French
+corpus: an ASCII-only boundary leaves `é` outside the class, so the one-letter
+alias `R` matched the start of `Réseaux`, `Régression` and `Réalisation`, and
+`C` matched `Câblage`. Combining marks are boundaries too, so a decomposed `Ça`
+is not read as a standalone `C`.
+
 Idempotence is `source_fingerprint` plus `extractor_version`, over exactly the
 field 3.5B reads: the description, and nothing else. The version is its own,
-`opportunity-requirements-v1`, so a skill rule changing never recomputes a start
-date. `opportunity_requirement_extraction_state` records that a posting **was
+`opportunity-requirements-v2`, so a skill rule changing never recomputes a start
+date. `v2` is the two corrections above; every `v1` row is recomputed, because
+both change what a given description reads as. `opportunity_requirement_extraction_state` records that a posting **was
 read**, which is what distinguishes "asks for nothing" from "never extracted".
 
 Phase 3.5B depends on Phase 3.5A: every row hangs off `opportunity_constraints`,

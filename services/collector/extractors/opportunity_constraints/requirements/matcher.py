@@ -1,4 +1,4 @@
-"""Finding catalogue terms in a sentence without finding them where they are not.
+r"""Finding catalogue terms in a sentence without finding them where they are not.
 
 Substring search is the wrong tool for this and it fails in ways that are easy
 to demonstrate and hard to notice in production:
@@ -12,11 +12,32 @@ to demonstrate and hard to notice in production:
 
 So a match here has to satisfy three rules at once.
 
-**Token boundaries that know about punctuation.** A term may neither start nor
-end adjacent to a letter, a digit, `_`, `+`, `#` or `&`. `+` and `#` are in
-that set because they belong to the names `C++` and `C#`: `C` immediately
-followed by `+` is not the language `C`. `&` is there because `R&D` is not the
-language `R`. A trailing `.` or `,` is fine — a sentence has to end somewhere.
+**Token boundaries that know about punctuation, in every script.** A term may
+neither start nor end adjacent to a letter, a digit, `_`, a combining mark,
+`+`, `#` or `&`.
+
+Letters and digits are `\w`, which in Python 3 is **Unicode-aware**, and that
+is load-bearing rather than incidental. An ASCII-only boundary — the
+`[A-Za-z0-9_]` this module used first — leaves every accented letter outside
+the class, so `é` reads as a word boundary and the one-letter alias `R` matches
+the start of `Réseaux`, `Régression` and `Réalisation`. The corpus is partly in
+French, `R` is a real technology, and a false `R` under a `Required
+Qualifications` heading becomes a hard requirement nobody wrote. `C` and
+`Câblage` are the same bug, and so is `C` and `Cœur`.
+
+Combining marks are in the class for the same reason one step further down. A
+posting need not be normalized: `Ça` may arrive as `C` followed by U+0327
+COMBINING CEDILLA rather than as the single character `Ç`, and a boundary that
+only knew about letters would see `C` followed by something that is not a
+letter and call it a standalone `C`. The ranges below cover the combining marks
+of the scripts this corpus can plausibly contain — Latin, Greek, Cyrillic,
+Hebrew and Arabic — plus the general-purpose combining blocks.
+
+`+` and `#` are in the set because they belong to the names `C++` and `C#`: `C`
+immediately followed by `+` is not the language `C`. `&` is there because `R&D`
+is not the language `R`. A trailing `.` or `,` is fine — a sentence has to end
+somewhere — and so is `/`, which is why `CI/CD` and `Python/R` both read
+correctly.
 
 **Longest alias first, and no span reused.** Aliases are sorted by descending
 length and joined into one alternation, so at any position the longest
@@ -60,11 +81,35 @@ __all__ = [
     "mentions_catalogue_term",
 ]
 
-#: Characters a term may not touch on either side. Letters and digits are the
-#: ordinary word boundary; `+`, `#` and `&` are here because `C++`, `C#` and
-#: `R&D` exist and each of them would otherwise swallow, or be swallowed by, a
-#: shorter catalogue entry.
-_BOUNDARY = r"A-Za-z0-9_+#&"
+#: The combining-mark ranges a term may not touch. A combining mark belongs to
+#: the character in front of it, so a catalogue alias sitting next to one is
+#: inside a word, not beside it — `C` + U+0327 is `Ç`, whatever the posting's
+#: normalization form happens to be.
+#:
+#: Latin/Greek/Cyrillic diacritics, the two extension blocks, Cyrillic, Hebrew,
+#: Arabic, the marks for symbols, and the half marks. Written as explicit
+#: ranges rather than derived from the Unicode database at import time, so the
+#: compiled pattern is a constant and costs nothing to build.
+_COMBINING_RANGES = (
+    "\u0300-\u036f",  # Combining Diacritical Marks
+    "\u0483-\u0489",  # Cyrillic
+    "\u0591-\u05bd\u05bf\u05c1-\u05c2\u05c4-\u05c5\u05c7",  # Hebrew
+    "\u0610-\u061a\u064b-\u065f\u0670",  # Arabic
+    "\u06d6-\u06dc\u06df-\u06e4\u06e7-\u06e8\u06ea-\u06ed",  # Arabic
+    "\u0711\u0730-\u074a",  # Syriac
+    "\u1ab0-\u1aff",  # Combining Diacritical Marks Extended
+    "\u1dc0-\u1dff",  # Combining Diacritical Marks Supplement
+    "\u20d0-\u20f0",  # Combining Diacritical Marks for Symbols
+    "\ufe20-\ufe2f",  # Combining Half Marks
+)
+
+#: Characters a term may not touch on either side. `\w` is Unicode-aware in
+#: Python 3, so every letter and digit of every script is a boundary — see the
+#: module docstring for why an ASCII-only class was a real defect and not a
+#: theoretical one. `+`, `#` and `&` are here because `C++`, `C#` and `R&D`
+#: exist and each would otherwise swallow, or be swallowed by, a shorter
+#: catalogue entry.
+_BOUNDARY = r"\w+#&" + "".join(_COMBINING_RANGES)
 _LEFT = f"(?<![{_BOUNDARY}])"
 _RIGHT = f"(?![{_BOUNDARY}])"
 

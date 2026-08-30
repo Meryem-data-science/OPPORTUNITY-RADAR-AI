@@ -166,8 +166,12 @@ Phase 3 has started, and only these six slices of it exist:
   into two obligations would let a later phase reject somebody the posting would
   have accepted. Skills resolve through the Phase 3.4A normalizer into the same
   `skills` vocabulary the profile side uses — **nothing is seeded**, a row
-  appears only when a real posting requires that term — and matching is on token
-  boundaries, so `PostgreSQL` never yields `SQL` and `Google` never yields `Go`.
+  appears only when a real posting requires that term — and matching is on
+  **Unicode-aware** token boundaries, so `PostgreSQL` never yields `SQL`,
+  `Google` never yields `Go`, and the French `Réseaux` and `Câblage` never yield
+  `R` or `C`. A level belongs to a clause rather than to a sentence: "Python
+  required and Spark preferred" is one demand and one preference, and one
+  skill's cancelling words never delete another's.
   A language level is what the posting wrote: `Fluent` never becomes `C1`, and no
   language is inferred from a country, a city or the language the advertisement
   is written in. It is still **never compared to a profile**.
