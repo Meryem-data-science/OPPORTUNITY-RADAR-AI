@@ -178,6 +178,32 @@ Phase 3 has started, and only these six slices of it exist:
   A language level is what the posting wrote: `Fluent` never becomes `C1`, and no
   language is inferred from a country, a city or the language the advertisement
   is written in. It is still **never compared to a profile**.
+- **Phase 3.6** — the first slice that reads **both** sides, and the only one
+  that may. `services/eligibility/` answers one narrow question: given what a
+  posting explicitly demands and what a person's reliable facts state, is there
+  a **known** reason they could not apply? Three answers — `ELIGIBLE`,
+  `INELIGIBLE`, `UNKNOWN` — persisted by migration `0014` onto
+  `opportunity_eligibilities`, one row per person and posting, with every rule's
+  outcome, reason code and evidence pointers in `eligibility_rule_results`.
+  **`UNKNOWN` is a question, never a soft refusal**: a CV that never named a
+  language has not said its author cannot speak it, so absence produces UNKNOWN
+  or NOT_APPLICABLE and never a contradiction — and the schema's CHECK
+  constraints make the opposite unstorable. Only six dimensions may block —
+  education, enrolment, experience, a mandatory language, work authorization and
+  a mandatory internship agreement — and each may do so only on a contradiction
+  between an explicit `REQUIRED` demand and a reliable fact. **A required skill
+  never blocks**: "AWS, Azure or GCP" written as three bullets is three
+  `REQUIRED` rows and one choice, and nothing in the stored shape tells that
+  apart from three obligations, so a skill is evidence and never a verdict. The
+  ambiguities 3.5B refused to represent never become requirements, a `PREFERRED`
+  demand never blocks, and mobility, location, availability, duration, start
+  date and work mode are reported `NOT_EVALUATED` and decide nothing. **This is
+  not matching**: there is no score, no percentage, no similarity and no
+  ranking, and a posting can be `ELIGIBLE` and a poor fit or `INELIGIBLE` and an
+  excellent one. Comparisons are made only where both sides already speak one
+  normalized vocabulary — CEFR levels written as CEFR levels, education levels
+  within one ladder — and everything else answers "not comparable", which is
+  UNKNOWN.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is
@@ -196,19 +222,23 @@ certifications and languages, and the availability, mobility, preferences and
 career objectives a person states: no employer, institution, canonical role or
 computed date deduced from prose, no administrable alias table and no skill
 level. Nothing about what somebody wants is ever read out of what they have
-done. There is no eligibility, matching, ranking or score, and no web profile
-interface of any kind.
+done. Phase 3.6 decides eligibility and nothing more: there is no matching,
+ranking or score, and no web profile interface of any kind.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
-jobs, rank opportunities for a person, match a CV against an offer, or provide
+jobs, rank opportunities for a person, score a CV against an offer, or provide
 ML recommendations. The Digital Twin exists only as the slices listed
 above: there is no validated Master CV, no generated Master CV PDF, no skill
-level, no inferred seniority or duration, no eligibility rule, and no match
-score. What a person states about their availability, mobility, preferences
-and objectives is recorded and projected, and it is compared to nothing: no
-offer constraint is stored, no location or date is matched against an offer,
-and an absent statement stays `UNKNOWN` rather than being read as a "no". Reconciling a re-read CV
+level, no inferred seniority or duration, and no match score. Phase 3.6 decides
+whether a person could apply; it does not decide whether they should, and
+nothing ranks anything. What a person states about their availability, mobility, preferences
+and objectives is recorded and projected. Of it, Phase 3.6 reads exactly two
+things — whether they can provide an internship agreement and whether they need
+visa sponsorship — and no location, date, work mode or preferred domain is
+matched against an offer by anything. An absent statement stays `UNKNOWN`
+rather than being read as a "no", in the profile and in every verdict built on
+it. Reconciling a re-read CV
 proposes and retires readings; it confirms none of them by itself. Skills exist only as the
 projection of facts a person already accepted, and holding a skill says nothing
 about how well. Experiences and projects exist only as the same kind of
@@ -233,6 +263,9 @@ stale.
   into proposals a human decides, the skill and structured-entry projections
   derived from the facts those decisions accepted, and the availability,
   mobility, preferences and career objectives a person states explicitly.
+- `services/eligibility/`: the Phase 3.6 engine — the only package that reads
+  both the offer side and the profile side, and decides whether a person could
+  apply to a posting. Three answers, reasons, evidence pointers; no score.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

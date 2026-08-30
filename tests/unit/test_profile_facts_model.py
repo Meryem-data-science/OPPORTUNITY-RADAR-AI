@@ -286,6 +286,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0011_profile_preferences_availability_mobility.sql",
         "0012_opportunity_constraints.sql",
         "0013_opportunity_requirements.sql",
+        "0014_opportunity_eligibility.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",

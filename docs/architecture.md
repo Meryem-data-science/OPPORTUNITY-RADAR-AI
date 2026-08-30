@@ -1215,7 +1215,11 @@ certifications and languages added by Phase 3.4B2, and the availability,
 mobility, preferences and career objectives a person states, added by Phase
 3.4C, all described above. Phase 3.5A adds the constraints an **opportunity**
 states and Phase 3.5B the skills and languages it asks for, which are the offer
-side of the same future comparison and are joined to no profile. No
+side of the comparison Phase 3.6 makes. Phase 3.6 makes exactly that comparison
+and no other: whether a person could apply, as `ELIGIBLE`, `INELIGIBLE` or
+`UNKNOWN`, from an explicit demand contradicted by a reliable fact — never from
+an absent one, never from a required skill, never from an ambiguity Phase 3.5B
+declined to represent, and never from a nationality or a location. No
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or
@@ -1228,3 +1232,80 @@ no stale-`RUNNING` detection, no automatic retry, and no self-healing collector.
 Those possible later capabilities must not be inferred from the implemented
 qualification taxonomy, the recorded run history, the source health read model,
 or reserved package names.
+
+## Eligibility (Phase 3.6)
+
+`services/eligibility/` is the first package that reads both sides of the
+database, and the only one that may. Phases 3.4 and 3.5 were each built to
+answer one half of a question and were kept apart on purpose; this one joins
+them and answers:
+
+    given what a posting explicitly demands, and what a person's reliable facts
+    state, is there a KNOWN reason they could not apply?
+
+    ELIGIBLE    nothing known stands in the way
+    INELIGIBLE  a hard requirement was contradicted by a reliable fact
+    UNKNOWN     a hard requirement applies and the fact needed is missing
+
+The layering is the same one every slice before it uses, and the seam that
+matters is between the rules and the database:
+
+```text
+    models.py       the vocabulary, and the two inputs a rule may read
+    comparison.py   the two comparisons v1 will make, and their limits
+    explanations.py deterministic sentences for the reason codes
+    fingerprint.py  the digest over exactly what the rules read
+    engine.py       the rules, pure
+    inputs.py       reading both sides out of SQLite, and what is not there
+    repository.py   transactional persistence
+    service.py      idempotent synchronization
+    audit.py        checking the stored rows against this phase's promises
+    cli.py          status, sync, audit
+```
+
+**The two input dataclasses are the contract of the whole phase.** A rule may
+read a field of `OpportunityEligibilityInput` or `ProfileEligibilityInput` and
+nothing else. There is no connection to reach through, no lazy loader and no
+`extra` dict, so a rule cannot quietly start depending on a nationality, an
+address or a telephone number — and the fingerprint, computed over exactly those
+two objects plus the engine version, therefore covers exactly what was read. A
+field added to a rule without being added to the contract does not compile, and
+a field added to the contract without being serialized fails a test rather than
+breaking idempotence silently.
+
+`engine.py` opens no database, reads no clock and touches no network, which is
+what makes the whole truth table testable in memory and the digest a promise
+rather than a hope. `inputs.py` is the only module that runs a query, and it
+reads through the repositories Phases 3.4 and 3.5 already own rather than
+issuing its own SQL over their tables.
+
+**A contradiction is not a gap.** `VIOLATED` requires all six of: an explicit
+`REQUIRED` demand; that demand not being one Phase 3.5B refused to represent;
+the dimension being one of the six this version supports; the person's side
+holding the fact; the two being genuinely comparable; and the comparison coming
+out against. Miss any one and the answer is `UNKNOWN`, `NOT_APPLICABLE` or
+`NOT_EVALUATED`. `RuleResult` refuses to construct a result breaking that, and
+`migrations/0014` refuses to store one — a guarantee worth having is worth
+having twice.
+
+**Comparison is refused unless somebody else already put the two sides on one
+scale.** CEFR is compared where both sides wrote CEFR, because `B2` *is* the
+label rather than a mapping of one; `courant`, `fluent` and `native` are not
+CEFR and answer "not comparable", which the rules turn into `UNKNOWN`. Education
+levels are compared within one ladder — `BAC_PLUS_2..5`, or
+`BACHELOR/MASTER/PHD` — and never across them, because `0012` says in its own
+comment that merging `BAC_PLUS_5` and `MASTER` "would be an equivalence nobody
+stated".
+
+**Where the schema cannot support a comparison, the phase says so rather than
+inventing one.** Education level, current enrolment and experience duration are
+each unrepresentable today, each for a reason named as a constant in
+`inputs.py`, and each answers `UNKNOWN` or `NOT_APPLICABLE`. The rules for all
+three are written and tested; they will decide the day the Digital Twin records
+what they need.
+
+Eligibility and matching stay two concepts. Phase 4 will be able to read a
+verdict, its rule results, its reason codes and its evidence pointers, and
+nothing in this phase anticipates it: there is no score, no similarity, no
+ranking and no priority, and a posting can be `ELIGIBLE` and a poor fit or
+`INELIGIBLE` and an excellent one.

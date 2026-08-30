@@ -312,6 +312,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0011_profile_preferences_availability_mobility.sql",
         "0012_opportunity_constraints.sql",
         "0013_opportunity_requirements.sql",
+        "0014_opportunity_eligibility.sql",
     ]
 
 

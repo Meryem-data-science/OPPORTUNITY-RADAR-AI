@@ -1109,3 +1109,150 @@ gap, no `match_score`, no TF-IDF, no cosine similarity, no embedding, no fuzzy
 matching, no ranking, no recommendation, no notification and no auto-apply. It
 opens no network connection, downloads no model and calls no LLM, and there is
 no web interface or HTTP endpoint for any of it.
+
+## Eligibility (Phase 3.6)
+
+The first slice that reads both sides of the database, and the only one that
+may. It answers one narrow question about one person and one posting:
+
+    given what this posting explicitly demands, and what this person's reliable
+    facts state, is there a KNOWN reason they could not apply?
+
+Three answers, and the distance between two of them is the whole point:
+
+| verdict | means |
+| --- | --- |
+| `ELIGIBLE` | nothing known stands in the way |
+| `INELIGIBLE` | a hard requirement was **contradicted** by a reliable fact |
+| `UNKNOWN` | a hard requirement applies and the fact needed to answer is missing |
+
+`ELIGIBLE` does not mean the employer will accept the candidate, and `UNKNOWN`
+is a question rather than a soft refusal. A thin advertisement demanding nothing
+this engine checks is `ELIGIBLE`, because nothing is known to stand in the way.
+
+Apply the migration first, like every other:
+
+```bash
+python -m services.collector.cli.migrate --database data/opportunity-radar.db
+# or, against the configured backend:
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `opportunity_eligibilities` and `eligibility_rule_results`, and
+**inserts no row**.
+
+Three commands:
+
+```bash
+python -m services.eligibility.cli status --email you@example.com
+python -m services.eligibility.cli sync   --email you@example.com
+python -m services.eligibility.cli audit  --email you@example.com --show-reasons 20
+```
+
+`status` reads what is stored and counts it, deciding nothing and writing
+nothing; `sync` brings every in-scope posting's decision up to date; `audit`
+explains the refusals and the open questions and re-checks the phase's
+invariants against the rows on disk. `status` and `sync` accept `--limit`. The
+commands run no migration and refuse a non-SQLite backend before connecting.
+
+**Run Phases 3.5A and 3.5B first.** A verdict over a posting whose requirements
+nobody has read would be a verdict over silence, and silence and "requires
+nothing" are exactly the two things `opportunity_requirement_extraction_state`
+exists to tell apart — so a corpus with any unread posting is refused as one
+error, before anything is written. The usual order after a collection is
+`migrate`, 3.5A `sync`, 3.5B `sync`, then this.
+
+**The person must already exist.** `--email` names a Digital Twin created by the
+digital-twin commands; the eligibility run never creates one. Bringing a user
+into existence as a side effect would produce an empty profile and then a page
+of UNKNOWNs about it, which reads like an answer and is an accident.
+
+### What can block, and what cannot
+
+Six dimensions may produce a contradiction, and only on an explicit `REQUIRED`
+demand contradicted by a reliable fact: **education**, **current enrolment**,
+**experience**, **a mandatory language**, **work authorization / sponsorship**,
+and **a mandatory internship agreement**.
+
+Everything else is reported and decides nothing:
+
+```text
+a REQUIRED skill the profile does not hold  -> NOT_EVALUATED, never a refusal
+a PREFERRED demand of any kind              -> NOT_EVALUATED
+an ambiguity Phase 3.5B refused to store    -> NOT_EVALUATED
+mobility, location, availability, duration,
+start date, work mode                       -> NOT_EVALUATED
+```
+
+**A required skill never blocks, and that is deliberate.** "AWS, Azure or GCP"
+written as three bullets leaves three `REQUIRED` rows that look like three
+obligations and are one choice, and nothing in the stored shape tells them
+apart. Rejecting a candidate over the two the posting did not insist on is the
+one mistake this phase is built to avoid, so a skill is evidence and never a
+verdict until alternative groups are representable without loss.
+
+The invariants are also CHECK constraints in `0014`, so a row breaking one
+cannot be stored at all — see
+[database.md](database.md#opportunity-eligibility).
+
+### What it compares, and what it refuses to compare
+
+Only where both sides already speak one normalized vocabulary:
+
+```text
+CEFR written as CEFR         B2 vs C1   -> compared
+a level written in words     "courant"  -> not comparable -> UNKNOWN
+levels on one ladder         BAC_PLUS_3 vs BAC_PLUS_5 -> compared
+levels across two ladders    BAC_PLUS_5 vs MASTER     -> not comparable -> UNKNOWN
+```
+
+No mapping turns `fluent` into `C1` or `native` into `C2`, here or anywhere in
+this project, and no visa conclusion is reachable from a nationality, a country
+of residence or a posting's location — none of those is an input to any rule.
+
+Three dimensions currently answer UNKNOWN or NOT_APPLICABLE for every real
+profile, and the `audit` command prints why:
+
+* **education** — Phase 3.4 stores an education as institution, programme and
+  period, verbatim, and normalizes no degree level;
+* **current enrolment** — neither phase represents it, on either side;
+* **experience** — Phase 3.4 normalizes no duration, and Phase 3.5 stores a
+  quantity without the field it qualified, so "three years of data engineering"
+  has nothing comparable to answer it.
+
+None of the three is guessed at. A missing datum produces UNKNOWN, and the
+engine's rules for all three are written and tested against the day the Digital
+Twin records them.
+
+### Idempotence
+
+`input_fingerprint` is a SHA-256 over the canonical JSON of exactly what the
+rules read — both sides — plus `eligibility-rules-v1`. A second `sync` over
+unchanged inputs writes nothing, moves no timestamp, and reports:
+
+```text
+created=0
+replaced=0
+unchanged=N
+changed=false
+```
+
+A changed education requirement, required language, stated sponsorship need or
+gained skill recomputes the decisions it affects. A changed telephone number,
+GitHub URL, portfolio link, availability date or mobility recomputes nothing:
+none of them is read by a rule, so none of them is in the digest.
+
+**The output is counters, ids, versions and reason codes.** No posting's words
+and no person's reach stdout or the structured log — not a description, not an
+evidence fragment, not a skill or language name, and not the address the command
+was given. There is no flag that prints a verdict as a percentage, and nothing
+to build one from: the answer is one of three words.
+
+What this slice does **not** do: no match score, no skill-similarity score, no
+TF-IDF, no cosine similarity, no embedding, no fuzzy matching, no ranking, no
+priority, no recommendation, no notification and no auto-apply. It writes to
+nothing upstream — not `opportunities`, not any `profile_*` table, not the
+Phase 3.5 projections — and it leaves the historical
+`opportunities.eligibility_score` column untouched, because a categorical
+verdict is not a number. It opens no network connection, downloads no model and
+calls no LLM, and there is no web interface or HTTP endpoint for any of it.

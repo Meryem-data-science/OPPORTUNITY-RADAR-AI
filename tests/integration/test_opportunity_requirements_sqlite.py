@@ -183,8 +183,12 @@ def test_migration_0013_is_discovered_after_the_earlier_ones() -> None:
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY)
     ]
 
-    assert versions[-1] == "0013"
+    # Not the last one any more: Phase 3.6 added `0014`. What this slice
+    # actually needs is that it lands after everything it hangs off, and that
+    # nothing was renumbered underneath it.
+    assert "0013" in versions
     assert versions[: len(BEFORE_THIS_SLICE)] == list(BEFORE_THIS_SLICE)
+    assert versions[len(BEFORE_THIS_SLICE)] == "0013"
 
 
 def test_migration_0013_creates_the_five_new_tables(migrated) -> None:

@@ -80,6 +80,7 @@ def migrated_settings(tmp_path, name):
             "0011",
             "0012",
             "0013",
+            "0014",
         ]
     finally:
         connection.close()
