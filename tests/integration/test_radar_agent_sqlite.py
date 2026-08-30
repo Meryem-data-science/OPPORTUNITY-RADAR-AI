@@ -22,6 +22,7 @@ def test_agent_automatically_reconciles_qualifications_idempotently_and_on_input
             "0008",
             "0009",
             "0010",
+            "0011",
         ]
     finally:
         connection.close()

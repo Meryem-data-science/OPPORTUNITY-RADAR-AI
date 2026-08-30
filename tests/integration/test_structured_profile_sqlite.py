@@ -217,7 +217,7 @@ def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
         fact = accepted(connection, existing.profile_id, STRUCTURED_EXPERIENCE)
 
-        assert apply_migrations(connection) == ["0009", "0010"]
+        assert apply_migrations(connection) == ["0009", "0010", "0011"]
 
         assert {"profile_experiences", "profile_projects"} <= _tables(connection)
         # The facts that existed before the upgrade are untouched by it.
