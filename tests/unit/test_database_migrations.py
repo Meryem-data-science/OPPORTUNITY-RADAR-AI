@@ -48,6 +48,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0009",
             "0010",
             "0011",
+            "0012",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -62,6 +63,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0009",),
         ("0010",),
         ("0011",),
+        ("0012",),
     ]
 
 
@@ -79,6 +81,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0009",
             "0010",
             "0011",
+            "0012",
         ]
         assert apply_migrations(connection) == []
 
@@ -102,6 +105,12 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
                 "profile_mobility",
                 "profile_preferences",
                 "profile_career_objectives",
+                "opportunity_constraints",
+                "opportunity_constraint_locations",
+                "opportunity_education_requirements",
+                "opportunity_constraint_evidence",
+                "opportunity_constraint_conflicts",
+                "opportunity_skill_requirements",
             )
         }
         migration_count = connection.execute(
@@ -126,8 +135,14 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "profile_mobility": 0,
         "profile_preferences": 0,
         "profile_career_objectives": 0,
+        "opportunity_constraints": 0,
+        "opportunity_constraint_locations": 0,
+        "opportunity_education_requirements": 0,
+        "opportunity_constraint_evidence": 0,
+        "opportunity_constraint_conflicts": 0,
+        "opportunity_skill_requirements": 0,
     }
-    assert migration_count == 11
+    assert migration_count == 12
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:

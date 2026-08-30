@@ -135,6 +135,23 @@ Phase 3 has started, and only these six slices of it exist:
   section; no convention status from being a student; no visa need from a
   nationality or a location; and no career objective from a CV's professional
   title.
+- **Phase 3.5A** — the other side of the same coin: what an **opportunity**
+  requires. `services/collector/extractors/opportunity_constraints/` reads a
+  posting and records the kind of opportunity, the education levels, every
+  experience it asks for (two requirements in two sentences are two
+  requirements, not a contradiction), the duration, the start at the precision it was
+  written, the places, the work mode, and what it says about visa sponsorship,
+  work authorization and internship agreements — projected by migration `0012`
+  onto `opportunity_constraints` and its evidence, location, education and
+  conflict tables. **It is never compared to a profile**: joining the two is
+  Phase 3.6 and neither it nor any ranking exists. Absence is UNKNOWN, stored
+  as `NULL`, and never FALSE — a posting silent about visas has not refused to
+  sponsor, an address is not an attendance policy, "Senior" is not a number of
+  years, and an internship implies neither an agreement nor a duration. Every
+  asserted value carries the rule that fired and the minimal fragment it
+  matched; two readings that disagree assert nothing and record the
+  contradiction. Skills and languages are deliberately not extracted yet — that
+  is 3.5B.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is

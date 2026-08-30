@@ -140,7 +140,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
         assert _apply_up_to_0006(connection, tmp_path) == list(BEFORE_THIS_SLICE)
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
 
-        assert apply_migrations(connection) == ["0007", "0008", "0009", "0010", "0011"]
+        assert apply_migrations(connection) == ["0007", "0008", "0009", "0010", "0011", "0012"]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
         assert (
@@ -160,7 +160,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0011",)
+    assert recorded[-1] == ("0012",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -214,9 +214,30 @@ PHASE_34C_TABLES = frozenset(
     }
 )
 
+#: The seven tables migration `0012` adds. They are the **offer** side, not a
+#: second profile projection: they describe what a posting requires, and the
+#: guard below is about what may be derived from `profile_facts`. `education`
+#: `skill` and `experience` stay forbidden words all the same, so a second
+#: profile-side education, experience or skill table is still caught.
+PHASE_35A_TABLES = frozenset(
+    {
+        "opportunity_constraints",
+        "opportunity_constraint_locations",
+        "opportunity_education_requirements",
+        "opportunity_experience_requirements",
+        "opportunity_constraint_evidence",
+        "opportunity_constraint_conflicts",
+        "opportunity_skill_requirements",
+    }
+)
+
 #: Every table a projection slice is allowed to have added so far.
 PROJECTED_TABLES = (
-    PHASE_34A_TABLES | PHASE_34B1_TABLES | PHASE_34B2_TABLES | PHASE_34C_TABLES
+    PHASE_34A_TABLES
+    | PHASE_34B1_TABLES
+    | PHASE_34B2_TABLES
+    | PHASE_34C_TABLES
+    | PHASE_35A_TABLES
 )
 
 #: Concepts this database must not contain. The list is the docstring of the
@@ -251,12 +272,14 @@ def is_out_of_scope_table(name: str) -> bool:
 def test_no_table_beyond_the_projections_exists_yet(migrated):
     """3.4A projects skills, 3.4B experiences through languages, 3.4C the rest.
 
-    The twelve tables `0008` through `0011` add are exempted one by one; every
+    The twelve tables `0008` through `0011` add are exempted one by one, and so
+    are the six `0012` adds on the offer side; every
     other table is held to the whole out-of-scope list — no fourth skill table,
     no administrable alias table, no second education, certification or
     language table, no second preference, availability, mobility or career
     objective table, and no eligibility, matching, score or ranking table,
-    because Phases 3.5 and 3.6 are not implemented.
+    because Phase 3.6 and Phase 4 are not implemented. Phase 3.5A adds
+    constraints a posting states; it adds no comparison of one to a person.
     """
     for table in _tables(migrated):
         assert not is_out_of_scope_table(table), table

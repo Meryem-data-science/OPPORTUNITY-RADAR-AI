@@ -856,3 +856,129 @@ TF-IDF, no cosine similarity, no ranking, no recommendation and no
 notification. This is the profile side of Phases 3.5 and 3.6, and those are not
 implemented. It opens no network connection and calls no model, and there is no
 web interface or HTTP endpoint for any of it.
+
+## Opportunity constraints (Phase 3.5A)
+
+What a posting itself requires, extracted and projected. This reads listings;
+it compares them to nobody.
+
+Migration `0012` is applied by the ordinary explicit command, like every other
+one:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `opportunity_constraints`, `opportunity_constraint_locations`,
+`opportunity_education_requirements`, `opportunity_constraint_evidence`,
+`opportunity_constraint_conflicts` and `opportunity_skill_requirements`, and
+inserts no row.
+
+Three commands:
+
+```bash
+python -m services.collector.extractors.opportunity_constraints.cli status
+python -m services.collector.extractors.opportunity_constraints.cli sync
+python -m services.collector.extractors.opportunity_constraints.cli \
+    extract-one --opportunity-id 42
+```
+
+`status` reads what is stored and counts it; `sync` reconciles every posting in
+scope — active, not a merged duplicate, the same filter the qualification
+pipeline uses; `extract-one` does the same for a single posting, which is the
+command to reach for when checking why one listing reads the way it does. Both
+`status` and `sync` accept `--limit`. The commands run no migration and refuse
+a non-SQLite backend before connecting.
+
+**What it extracts.** The kind of opportunity (the Phase 3.4C registry, shared
+with the profile side), the education levels named and whether they are floors,
+**every** experience asked for — a posting wanting seven years of engineering
+and two of ML states two requirements, not one contradiction — in months and
+each with its own optional `REQUIRED`/`PREFERRED`, the duration, the start at the precision it was written, the places named, the work
+mode, and what the posting says about visa sponsorship, work authorization and
+internship agreements.
+
+**What it refuses to extract.** Skills and languages — see Phase 3.5B below.
+
+**UNKNOWN is the answer whenever a posting was silent, and UNKNOWN is never a
+"no".** A posting that never mentions visas has not refused to sponsor. A
+posting with an address has not required attendance. A posting written in
+English has not required English. A title reading "Senior" states no number of
+years. An internship does not imply a school agreement, a duration or a
+student. A salary paragraph saying "minimum and maximum target" states no
+required experience. "This isn't a research internship", "prior internship
+experience" and "mentoring junior consultants" describe something other than
+this offer, and none of them sets its type. `#LI-Onsite`, "onsite solutions"
+and "significant time on-site with customers" do not state a work mode: only a
+declaration attached to the role does. A date written as `01/02/2027` is two different days depending on the
+reader's country, so it is not read at all; a month with no year keeps no year,
+never the current one.
+
+**A PFE is an internship, named precisely.** A posting calling itself a
+`stage` in one line and a `PFE` in another is not disagreeing with itself, so
+the precise kind wins and nothing is recorded as a conflict. That one relation
+holds between the generic `INTERNSHIP` and the four specific kinds — `PFE`,
+`PFA`, `SUMMER_INTERNSHIP`, `PRE_HIRE_INTERNSHIP` — and nowhere else: a posting
+claiming both a PFE and a PFA, or a PFE and an alternance, still conflicts.
+
+**Contradictions stop an assertion rather than being settled.** "Fully remote"
+three lines above "fully on-site" leaves `work_mode` unset and writes a row to
+`opportunity_constraint_conflicts` naming both values and both rules. A conflict
+is keyed by the slot that disagreed, so a posting asking for "minimum 3 years
+required" and "at least 5 years preferred" records two conflicts — one about
+the quantity, one about the obligation — instead of colliding on one row. The one
+exception is the opportunity type, where the title outranks the description,
+exactly as the Phase 2 classifier already decides it.
+
+**Everything asserted is explainable.** Each value carries the rule that fired,
+the field it was read from, and the minimal fragment matched — capped at 200
+characters, so evidence stays a pointer into the posting rather than a copy of
+it. There is no confidence and no score.
+
+Re-running is expected and cheap. `extractor_version` is fixed by the code and
+cannot be passed in: a label a caller could choose per run would stop naming
+the rules that produced the rows. Idempotence is `(source_fingerprint,
+extractor_version)`: an unchanged posting is skipped entirely — no delete, no
+insert, no timestamp moved — an edited description is re-extracted whole, and a
+new extractor version re-extracts even identical text. A second run reports
+`changed=false`.
+
+The output is counters and versions, and it names **no posting's words** — no
+title, no description, no evidence fragment, no location — on stdout, in the
+structured log or in an error message, and there is no flag that would print
+one:
+
+| key | meaning |
+| --- | --- |
+| `total_opportunities` / `processed` | postings in scope, and postings read |
+| `unchanged` / `created` / `replaced` | skipped, first-projected, re-projected |
+| `projected` / `not_projected` | `status` only: how many hold a stored reading |
+| `known_opportunity_type` … `known_convention` | how many postings **stated** each thing. Never how many are suitable: there is nobody to be suitable for. `known_experience` counts postings holding at least one requirement, not requirements |
+| `conflicts` | how many contradictions were recorded rather than settled |
+| `extractor_version` | `opportunity-constraints-v3` |
+| `changed` | `false` when the run found every projection already correct |
+
+A `known_*` count is a property of how postings are written. A low
+`known_convention` means employers rarely say it, not that agreements are
+rarely needed.
+
+The failures it reports are a refused backend, an unmigrated database, an
+absent or out-of-scope posting, and `extract-one` called without
+`--opportunity-id`, each with exit code 1.
+
+What this slice does **not** do: no profile is read, no opportunity is compared
+to one, no eligibility result, no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no
+`match_score`, no TF-IDF, no cosine similarity, no ranking, no recommendation,
+no notification and no auto-apply. It opens no network connection and calls no
+model, and there is no web interface or HTTP endpoint for any of it.
+
+### Reserved for Phase 3.5B
+
+`opportunity_skill_requirements` is created empty and Phase 3.5A never writes a
+row into it. It exists now only to pin the offer side to the `skills`
+vocabulary Phase 3.4A created, so 3.5B extends one catalogue instead of
+starting a second, incompatible one. Language requirements have no table yet
+for the mirror reason: 3.5A cannot fill one, and an empty table with no writer
+is schema nobody can trust.

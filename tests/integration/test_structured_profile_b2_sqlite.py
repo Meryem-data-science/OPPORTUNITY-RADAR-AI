@@ -239,7 +239,7 @@ def test_0010_upgrades_a_database_that_stopped_at_0009(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
         fact = accepted(connection, existing.profile_id, STRUCTURED_EDUCATION)
 
-        assert apply_migrations(connection) == ["0010", "0011"]
+        assert apply_migrations(connection) == ["0010", "0011", "0012"]
 
         assert set(B2_TABLES) <= _tables(connection)
         # The facts that existed before the upgrade are untouched by it.
@@ -256,7 +256,7 @@ def test_0010_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0011",)
+    assert recorded[-1] == ("0012",)
     assert _counts(migrated) == (0, 0, 0)
 
 

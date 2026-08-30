@@ -894,8 +894,7 @@ defaults nothing and creates no "unknown" row, so nothing downstream can read
 preference the person did state, where "I don't know yet" is the answer they
 gave.
 
-Phase 3.4C stops there. It parses no offer, stores no opportunity constraint,
-computes no eligibility, produces no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, compares
+Phase 3.4C stops there. It parses no offer and computes no eligibility, produces no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, compares
 no location and no date against an offer, and adds no matching, match score,
 TF-IDF, cosine similarity, ranking, recommendation or notification. It is the
 profile side of Phases 3.5 and 3.6, and neither is implemented. There is no HTTP
@@ -903,6 +902,114 @@ endpoint, no web interface and no remote write path, and no network call or
 model takes part. The exact schema is in
 [database.md](database.md#explicit-profile-input), and the commands are in
 [operations.md](operations.md#explicit-profile-input-phase-34c).
+
+## Opportunity constraints (Phase 3.5A)
+
+`services/collector/extractors/opportunity_constraints/` reads a posting and
+records what **the posting** asks for. It is the mirror image of Phase 3.4C:
+that slice records what a person says they want, this one records what an offer
+says it requires, and **the two are never compared here**. Joining them is
+Phase 3.6, ranking them is Phase 4, and neither is implemented.
+
+```text
+opportunities
+    -> extract_opportunity_constraints   (pure, offline, deterministic)
+         -> opportunity_constraints
+              +-> opportunity_constraint_locations
+              +-> opportunity_education_requirements
+              +-> opportunity_experience_requirements
+              +-> opportunity_constraint_evidence
+              +-> opportunity_constraint_conflicts
+```
+
+The package is six modules with one responsibility each: `models.py` holds the
+closed registries and the frozen readings, `text.py` turns a collected
+description into text the rules can read, `rules.py` is the closed rule
+registry, `extractor.py` is the pure reading and the fingerprint,
+`repository.py` the transactional projection, `service.py` the orchestration
+and `cli.py` the three commands. The extractor opens no database: it is handed
+an `OpportunitySource` value object and returns an `ExtractedConstraints`,
+which is what makes it testable in memory against real postings without writing
+anywhere.
+
+**One hierarchy relation is modelled, and only one.** The four specific
+internship kinds are `INTERNSHIP` said more precisely, so a posting naming both
+keeps the precise one instead of being reported as contradicting itself — the
+last of those 46 conflicts. Two specific kinds still disagree: a posting cannot
+be both a PFE and a PFA, and an alternance is not an internship at all.
+
+**The Phase 2 classifier outranks the description** for the opportunity type:
+title first, then the classifier, then the description. The classifier is a
+versioned reading whose whole subject is the type of an opportunity; a
+description mention is one word in a paragraph about something else.
+
+**Two registries are imported rather than redefined.** `OpportunityType` and
+`WorkMode` come from `services.digital_twin.preferences.models`, the Phase 3.4C
+vocabulary, so the profile side and the offer side speak one language and
+Phase 3.6 cannot end up comparing two registries that merely look alike. The
+import direction is safe — that module imports only the standard library — and
+a test pins the names to the same objects so a future divergence fails loudly.
+
+**Text normalization is load-bearing, not cosmetic.** The Greenhouse collector
+stores its `content` field verbatim, and that field is HTML with its angle
+brackets escaped as entities; nothing upstream unescapes it, because the
+LinkedIn alert collector produces no description at all and no other path ever
+needed to. A rule looking for `minimum 3 years` in `&lt;p&gt;Minimum 3
+years&lt;/p&gt;` would find nothing and report UNKNOWN for a posting that said
+it plainly. So `text.py` unescapes entities, drops tags on a line break, and
+collapses whitespace — and changes no word beyond that.
+
+**UNKNOWN is the default and is never FALSE.** Every value needs a named rule
+and an explicit fragment; without one the field is UNKNOWN, stored as `NULL`. A
+title naming seniority states no number of years, an address states no
+attendance policy, a country states no visa policy, and the word "internship"
+states neither an agreement nor a duration nor a student.
+
+**Contradictions are recorded, not resolved** — and a contradiction is now a
+narrow thing. Two strong readings of one **global property of the offer** that
+disagree leave the field UNKNOWN and write a conflict row naming the values and
+the rules, keyed by the slot that disagreed. Asking for two different things is
+not a contradiction: education, experience and locations are multi-valued and
+never conflict.
+
+That distinction is what `v2` is mostly about. Running `v1` over 373 collected
+postings produced 46 conflicts, and reading the evidence showed most were not
+contradictions at all — a posting asking for "7+ years engineering experience"
+and "2+ years AI/ML experience" was told it disagreed with itself, and both
+requirements were dropped to describe a disagreement that was never there. So
+`v2` makes experience multi-valued, ties every quantity and every obligation to
+the experience it qualifies rather than to the sentence it sits in (a salary
+paragraph saying "minimum and maximum target" no longer states a required
+experience), refuses type wordings that are denied, describe a candidate's past
+or describe people being mentored, restricts `JUNIOR_ROLE` and `FIRST_JOB` to
+the title and the classifier, and requires a work mode to be attached to the
+role — so a `#LI-Onsite` tracking tag, "onsite solutions" and "time on-site
+with customers" no longer contradict a stated mode, while two genuine global
+declarations still do. The one documented exception is the opportunity type, where the
+title outranks the description — the precedent is the Phase 2 classifier, which
+already decides it that way, and a posting titled "PFE" whose body says
+"internship" is not contradicting itself.
+
+**Everything asserted is explainable**, projected places included: a location
+read from the collected `location` or `country` field carries its own rule and
+its own evidence, so no projection is a value a reader cannot trace. Each value
+carries the rule id, the source field and the minimal fragment matched, capped so evidence stays a
+pointer into the posting rather than a copy of it. There is no confidence and
+no score: a rule fired or it did not.
+
+Idempotence is `source_fingerprint` plus `extractor_version`, the pattern
+Phase 2 qualification already uses. The exact schema is in
+[database.md](database.md#opportunity-constraints) and the commands are in
+[operations.md](operations.md#opportunity-constraints-phase-35a).
+
+Phase 3.5A stops there. Skill and language requirements are **not** extracted:
+counting every mention of Python or SQL as a requirement would fill the
+projection with the contents of "our stack includes…" paragraphs and with
+skills a posting said it would teach, and a requirement nobody wrote is exactly
+what this slice refuses to invent. Doing it properly needs sentence-level
+context, which is Phase 3.5B. `opportunity_skill_requirements` exists now,
+empty, only so that 3.5B extends the shared `skills` catalogue rather than
+starting a rival one.
 
 ## Data-processing boundaries
 
@@ -978,7 +1085,9 @@ Phase 3.3C, the skill projection added by Phase 3.4A, the structured
 experiences and projects added by Phase 3.4B1, the structured education,
 certifications and languages added by Phase 3.4B2, and the availability,
 mobility, preferences and career objectives a person states, added by Phase
-3.4C, all described above; no
+3.4C, all described above. Phase 3.5A adds the constraints an **opportunity**
+states, which is the offer side of the same future comparison and is joined to
+no profile. No
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or
