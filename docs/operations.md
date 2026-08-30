@@ -696,9 +696,156 @@ The failures it can report are a refused backend, a missing profile and an
 unmigrated database, each with exit code 1.
 
 What this slice does **not** do: no availability, mobility, preference or
-career objective; no eligibility rule, no opportunity constraint, no skill
-inference, no skill level, no study level, no CEFR computation, no matching, no
-match score, no TF-IDF, no cosine similarity, no ranking, no recommendation, no
-notification, no CV adaptation and no auto-apply. It opens no network
-connection and calls no model, and there is no web interface or HTTP endpoint
-for any of it.
+career objective — those are [Phase 3.4C](#explicit-profile-input-phase-34c)
+and come from the person, never from a document; no eligibility rule, no
+opportunity constraint, no skill inference, no skill level, no study level, no
+CEFR computation, no matching, no match score, no TF-IDF, no cosine similarity,
+no ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. It opens no network connection and calls no model, and there is no
+web interface or HTTP endpoint for any of it.
+
+## Explicit profile input (Phase 3.4C)
+
+Availability, mobility, preferences and career objectives. These four are the
+things a CV cannot say, so **none of them is ever read from one**: they are
+typed by the person, recorded as `USER_INPUT` facts, and projected.
+
+Migration `0011` is applied by the ordinary explicit command, like every other
+one:
+
+```bash
+export DATABASE_BACKEND=sqlite
+export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `profile_availability`, `profile_mobility`, `profile_preferences`
+and `profile_career_objectives`, and inserts no row.
+
+Four commands state the four things, one command re-derives the projection, and
+one reports what is known:
+
+```bash
+python -m services.digital_twin.preferences.cli set-availability \
+    --status AVAILABLE_FROM --available-from 2026-09-01
+python -m services.digital_twin.preferences.cli set-availability --status AVAILABLE_NOW
+
+python -m services.digital_twin.preferences.cli set-mobility --scope OPEN
+python -m services.digital_twin.preferences.cli set-mobility --scope RESTRICTED \
+    --location "Casablanca" --location "Rabat"
+
+python -m services.digital_twin.preferences.cli set-preferences \
+    --opportunity-type PFE --opportunity-type ALTERNANCE \
+    --work-mode HYBRID --work-mode REMOTE \
+    --preferred-domain "Data engineering" \
+    --constraint "Pas de déplacement le week-end" \
+    --convention-status AVAILABLE --visa-sponsorship-required NO
+
+python -m services.digital_twin.preferences.cli set-career-objectives \
+    --objective "Rejoindre une équipe data en alternance"
+
+python -m services.digital_twin.preferences.cli sync
+python -m services.digital_twin.preferences.cli status
+```
+
+Four commands rather than one, because the four are four statements: somebody
+can say where they will go without having decided when they are free, and a
+single command taking every flag at once would make each run look like a
+statement about all four.
+
+Each command asks for the address without echo, so it never enters the shell
+history; `--email` stays available for tests and automation. The profile must
+already exist — create it with `python -m services.digital_twin.cli init-profile`
+first. These commands create no user and no profile, run no migration, and
+refuse a non-SQLite backend before connecting and before asking for anything.
+
+**Closed registries.** `--opportunity-type` is one of `PFA`, `PFE`,
+`SUMMER_INTERNSHIP`, `PRE_HIRE_INTERNSHIP`, `ALTERNANCE`, `INTERNSHIP`,
+`FIRST_JOB`, `JUNIOR_ROLE`; `--work-mode` one of `ON_SITE`, `HYBRID`, `REMOTE`;
+`--convention-status` one of `UNKNOWN`, `AVAILABLE`, `NOT_AVAILABLE`;
+`--visa-sponsorship-required` one of `UNKNOWN`, `YES`, `NO`. A value outside a
+registry is refused, never mapped onto the nearest member. `UNKNOWN` is the
+default for the last two and a perfectly valid answer.
+
+**Free text stays the person's own.** Locations, preferred domains, constraints
+and objectives are trimmed and exactly de-duplicated, and nothing else happens
+to them: the case, the wording and the order are kept, nothing is geocoded,
+expanded or corrected, and "Data" and "data" stay two entries because deciding
+they are one would be fuzzy matching.
+
+**Stating the same thing twice writes nothing.** Each domain is a singleton, so
+a `set-*` call resolves to exactly one of `CREATED` (the first statement),
+`UNCHANGED` (the same statement again — no second fact, no correction, not even
+a touched timestamp) or `CORRECTED` (a different statement: a new `ACCEPTED`
+fact, with the previous one kept as `CORRECTED` and pointing at its
+replacement, so the whole chain stays readable). Restating a preference with
+the same values typed in another order is `UNCHANGED`, because the encoding is
+canonical.
+
+**An absence is `UNKNOWN`, never a "no".** A person who never stated whether
+they need visa sponsorship has no `PREFERENCE` fact saying they do not need
+one: they have no statement at all. `status` reports that, and reports **no
+value**:
+
+```
+availability=KNOWN
+mobility=KNOWN
+preferences=KNOWN
+career_objectives=UNKNOWN
+mobility_location_count=2
+opportunity_type_count=3
+work_mode_count=2
+preferred_domain_count=2
+constraint_count=1
+career_objective_count=0
+```
+
+A `set-*` or `sync` run prints the reconciliation summary instead:
+
+| key | meaning |
+| --- | --- |
+| `fact_type` / `action` / `fact_id` / `previous_fact_id` | on a `set-*` only: what was stated, whether it was `CREATED`, `UNCHANGED` or `CORRECTED`, the fact holding it now, and the one it replaced |
+| `fact_changed` | on a `set-*` only: whether the statement moved at all |
+| `accepted_availability_facts` / `accepted_mobility_facts` / `accepted_preference_facts` / `accepted_career_objective_facts` | how many `ACCEPTED` facts of each type the run read — 0 or 1; 2 is refused |
+| `availability_rows` / `mobility_rows` / `preferences_rows` / `career_objectives_rows` | how many rows each table holds afterwards |
+| `created` / `removed` | rows added / dropped, a replacement counting as one of each |
+| `input_version` | `explicit-profile-input-v1` |
+| `changed` | `false` when the run found the projection already correct |
+
+Re-running is expected. The run is a reconciliation, not an append: a row the
+current facts would write identically keeps its timestamp, a missing one is
+created, a row whose fact was corrected or rejected is dropped, and a row the
+facts now decode differently is replaced whole. A second run on unchanged facts
+writes nothing and reports `changed=false`.
+
+**Two accepted facts of one domain stop the run.** A person has one
+availability, not two. If a domain ever holds two `ACCEPTED` facts the whole
+synchronization is refused and rolled back — the other three domains included —
+rather than the most recent one being picked: the newest statement is not the
+truest one, and choosing between two things somebody said is not a decision
+this command gets to make. Resolve it through the facts lifecycle first.
+
+**It never touches the neighbours.** `profile_facts` and
+`profile_fact_provenance` are read and never written by the projection, and the
+skill, experience, project, education, certification and language rows are left
+exactly where the earlier commands put them.
+
+The command prints **no value read back out of the database** — no objective,
+no constraint, no location, no domain, no availability date and no address —
+not on stdout, not in the structured log, not in an error message, and it has
+no flag that would print one. Reading the projection back is a Python call
+against a database you name explicitly.
+
+The failures it can report are a refused backend, a missing profile, an
+unmigrated database, an invalid statement (a malformed date, a `RESTRICTED`
+mobility naming nowhere, an empty objective, a value outside a registry) and an
+ambiguous domain, each with exit code 1. An invalid statement is refused before
+anything is opened, so nothing is written and no database is contacted.
+
+What this slice does **not** do: no opportunity constraint is parsed or stored,
+no eligibility rule, no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, no comparison of a
+profile's location or date against an offer's, no matching, no match score, no
+TF-IDF, no cosine similarity, no ranking, no recommendation and no
+notification. This is the profile side of Phases 3.5 and 3.6, and those are not
+implemented. It opens no network connection and calls no model, and there is no
+web interface or HTTP endpoint for any of it.

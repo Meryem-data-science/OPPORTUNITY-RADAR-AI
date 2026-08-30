@@ -181,9 +181,11 @@ its own: there is no import log, no second registry and no `cv_versions`. See
 [Normalized profile skills](#normalized-profile-skills) below, `0009` the
 Phase 3.4B1 structured projection described in
 [Structured profile experiences and projects](#structured-profile-experiences-and-projects),
-and `0010` the Phase 3.4B2 extension described in
-[Structured profile education, certifications and languages](#structured-profile-education-certifications-and-languages).
-None of the three adds a column to `profiles`, `profile_facts` or
+`0010` the Phase 3.4B2 extension described in
+[Structured profile education, certifications and languages](#structured-profile-education-certifications-and-languages),
+and `0011` the Phase 3.4C explicit input described in
+[Explicit profile input](#explicit-profile-input).
+None of the four adds a column to `profiles`, `profile_facts` or
 `profile_fact_provenance`, and the migrations stop there.
 
 ## Profile facts and their provenance
@@ -522,8 +524,9 @@ current proof. See [operations.md](operations.md#profile-skills-phase-34a).
 
 No administrable alias table, no preference, availability, mobility or career
 objective — the structured project, experience, education, certification and
-language tables belong to `0009` and `0010`, described below; no opportunity
-constraint, no eligibility rule, no skill extraction
+language tables belong to `0009` and `0010`, and the availability, mobility,
+preference and career objective tables to `0011`, all described below; no
+opportunity constraint, no eligibility rule, no skill extraction
 from an offer, no TF-IDF, no cosine similarity, no matching, no `match_score`,
 no ranking, no recommendation, no notification, no CV adaptation and no
 auto-apply. There is no HTTP endpoint and no remote write path over these
@@ -547,6 +550,10 @@ profile_facts  (the only place a claim is decided)
     +-> profile_educations      (0010)
     +-> profile_certifications  (0010)
     +-> profile_languages       (0010)
+    +-> profile_availability        (0011)
+    +-> profile_mobility            (0011)
+    +-> profile_preferences         (0011)
+    +-> profile_career_objectives   (0011)
 ```
 
 **A `NULL` is worth more than an invented value** — in every one of them.
@@ -697,7 +704,9 @@ no opportunity constraint, no skill inferred from an experience or a project,
 no skill level, no matching, no `match_score`, no TF-IDF, no cosine similarity,
 no ranking, no recommendation, no notification, no CV adaptation and no
 auto-apply. Structured education, certifications and languages are `0010`,
-below. There is no HTTP endpoint and no remote write path over these tables.
+below, and availability, mobility, preferences and career objectives are
+`0011`, below that. There is no HTTP endpoint and no remote write path over
+these tables.
 
 ## Structured profile education, certifications and languages
 
@@ -930,11 +939,126 @@ diploma, a certification or a language.
 
 ### Not implemented by `0010`
 
-No availability, mobility, preference or career objective; no eligibility rule,
-no opportunity constraint, no skill inference, no study level, no CEFR
-computation, no `match_score`, no TF-IDF, no cosine similarity, no ranking, no
-recommendation, no notification, no CV adaptation and no auto-apply. There is
-no HTTP endpoint and no remote write path over these tables.
+No availability, mobility, preference or career objective — those are `0011`,
+below, and they come from the person rather than from a document; no
+eligibility rule, no opportunity constraint, no skill inference, no study
+level, no CEFR computation, no `match_score`, no TF-IDF, no cosine similarity,
+no ranking, no recommendation, no notification, no CV adaptation and no
+auto-apply. There is no HTTP endpoint and no remote write path over these
+tables.
+
+## Explicit profile input
+
+Migration `0011` adds the Phase 3.4C projection of the availability, mobility,
+preferences and career objectives a person **states about themselves**, and
+nothing else: four tables, no index on any existing table, no column on any
+existing table, no seeded row. It creates no index on `profile_facts`: the
+composite identity its foreign keys need is `idx_profile_facts_id_profile`,
+which `0009` already created and this migration reuses.
+
+Every row is derived from a fact whose status is already `ACCEPTED`, and the
+projection reads
+`fact_type IN ('AVAILABILITY', 'MOBILITY', 'PREFERENCE', 'CAREER_OBJECTIVE')
+AND status = 'ACCEPTED'` and nothing else. On top of that, every fact these
+tables project carries `USER_INPUT` provenance:
+
+```text
+explicit user input (a person types it)
+    |
+    v
+profile_facts  (ACCEPTED, USER_INPUT provenance)
+    |
+    +-> profile_availability       → fact_id → profile_facts → profile_fact_provenance
+    +-> profile_mobility           → fact_id → ...
+    +-> profile_preferences        → fact_id → ...
+    +-> profile_career_objectives  → fact_id → ...
+
+    no accepted fact  →  no row  →  UNKNOWN
+```
+
+**Nothing here is read from a CV, and nothing in it can be.** No availability
+date is computed from a CV period, a diploma year or the clock; no mobility
+from a postal address, a city, a country or a past employer; no work mode from
+a past remote job; no preferred domain from a skill, a project or a section
+title; no convention status from being a student; no visa need from a
+nationality or a location; and no career objective from a CV's professional
+title.
+
+**Absence is `UNKNOWN`, and `UNKNOWN` has no row.** No seeded row, no default
+row, no "unknown" row: a profile with no accepted `AVAILABILITY` fact simply
+has no `profile_availability` row, and that absence is the whole representation
+of "we do not know". A missing preference is never stored or read as `FALSE` —
+"this person does not want remote" and "this person never said" are different
+claims, and only the first is knowledge.
+
+### The four tables
+
+Each is a **singleton**: `profile_id` is the primary key, so a person has one
+availability, one mobility, one set of preferences and one set of career
+objectives, and restating any of them corrects the previous statement rather
+than adding a second one. Each also carries `fact_id NOT NULL UNIQUE`, the same
+composite foreign key on `(fact_id, profile_id)` as `0009`/`0010`, an
+`input_version` and a `created_at`.
+
+| table | what it holds |
+| --- | --- |
+| `profile_availability` | `availability_status` (`AVAILABLE_NOW` / `AVAILABLE_FROM`) and `available_from`, a `YYYY-MM-DD` date or `NULL`. A table-level `CHECK` makes the two forms exclusive: `AVAILABLE_NOW` forbids a date, `AVAILABLE_FROM` requires one |
+| `profile_mobility` | `mobility_scope` (`OPEN` / `RESTRICTED`) and `locations_json`. A `CHECK` refuses a `RESTRICTED` row naming nowhere; `OPEN` with an empty array is the ordinary form |
+| `profile_preferences` | `opportunity_types_json` and `work_modes_json` (both non-empty), `preferred_domains_json` and `constraints_json` (both may be empty), `convention_status` (`UNKNOWN` / `AVAILABLE` / `NOT_AVAILABLE`) and `visa_sponsorship_required` (`UNKNOWN` / `YES` / `NO`) |
+| `profile_career_objectives` | `objectives_json`, at least one objective |
+
+Every `*_json` column holds **canonical** JSON — object keys sorted, no
+insignificant whitespace, closed registries in declaration order, free text in
+the person's own order after an exact first-occurrence dedup. Canonical means
+two identical statements are byte-identical, which is what lets the service
+tell "the same value again" (a no-op) from "a new value" (a correction).
+
+The closed registries are, in their canonical order: `opportunity_types` —
+`PFA`, `PFE`, `SUMMER_INTERNSHIP`, `PRE_HIRE_INTERNSHIP`, `ALTERNANCE`,
+`INTERNSHIP`, `FIRST_JOB`, `JUNIOR_ROLE`; `work_modes` — `ON_SITE`, `HYBRID`,
+`REMOTE`.
+
+### The fact values
+
+The fact `value` is the canonical JSON itself, under
+`input_version = 'explicit-profile-input-v1'`:
+
+```json
+{"available_from":null,"status":"AVAILABLE_NOW"}
+{"available_from":"2026-09-01","status":"AVAILABLE_FROM"}
+{"locations":[],"scope":"OPEN"}
+{"locations":["Casablanca","Rabat"],"scope":"RESTRICTED"}
+{"constraints":[],"convention_status":"UNKNOWN","opportunity_types":["PFE"],"preferred_domains":[],"visa_sponsorship_required":"UNKNOWN","work_modes":["HYBRID"]}
+{"objectives":["Rejoindre une équipe data en alternance"]}
+```
+
+A value whose own re-encoding is not byte-identical is refused rather than
+repaired: there is no best-effort reading of a preference.
+
+### What the projection may not do
+
+No row of these tables is ever updated, so none carries `updated_at`:
+reconciliation inserts what is missing, deletes what has stopped being
+justified, and replaces — delete then insert — a row the current facts would
+now decode differently. A second run on unchanged facts writes nothing.
+
+No table repeats `source_type`, `provenance_key` or any other evidence column:
+those live once, in `profile_fact_provenance`, and `fact_id` is the way to
+them. There is no `verified`, `confidence`, `score`, `match_score`,
+`eligibility` or `ranking` column either.
+
+A domain holding two `ACCEPTED` facts is a business integrity failure, and the
+synchronization refuses it out loud and rolls the whole run back rather than
+picking the most recent one.
+
+### Not implemented by `0011`
+
+No opportunity constraint is parsed or stored, no eligibility result, no
+`ELIGIBLE`/`NOT_ELIGIBLE` verdict, no comparison of a profile's location or
+date against an offer's, no matching, no `match_score`, no TF-IDF, no cosine
+similarity, no ranking, no recommendation and no notification. This is the
+profile side of Phases 3.5 and 3.6, and neither is implemented. There is no
+HTTP endpoint and no remote write path over these tables.
 
 ## Source run history
 

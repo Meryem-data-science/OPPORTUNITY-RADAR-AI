@@ -112,6 +112,23 @@ Phase 3 has started, and only these six slices of it exist:
   no CEFR level is computed from anything. No `Bac+N` is derived from the word
   "Master", no issuer, obtention date or expiry date is invented, and no
   language is deduced from a project written in English.
+- **Phase 3.4C** — the availability, mobility, preferences and career
+  objectives a person **states about themselves**. Nothing in this slice comes
+  from a CV, and nothing in it can: it reads
+  `fact_type IN ('AVAILABILITY', 'MOBILITY', 'PREFERENCE', 'CAREER_OBJECTIVE')
+  AND status = 'ACCEPTED'` and projects each onto its own singleton row in
+  `profile_availability`, `profile_mobility`, `profile_preferences` and
+  `profile_career_objectives`. Every one of those facts carries `USER_INPUT`
+  provenance — the person typed it — and holds **canonical JSON**, so the same
+  statement always has the same bytes and restating it is a no-op rather than a
+  correction. **An absent statement is `UNKNOWN`, and `UNKNOWN` has no row**:
+  no seeded row, no default row, no "unknown" row, and never a `FALSE`. No
+  availability is computed from a CV period, a diploma year or the clock; no
+  mobility from an address, a city, a country or a past employer; no work mode
+  from a past remote job; no preferred domain from a skill, a project or a CV
+  section; no convention status from being a student; no visa need from a
+  nationality or a location; and no career objective from a CV's professional
+  title.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is
@@ -124,20 +141,25 @@ neither is Phase 3.3. What 3.3A adds is the reliable place a validated fact
 lives and the reading — `list_verified_profile_facts` — that returns only
 `ACCEPTED` facts; what 3.3B adds is the honest way a CV reaches it; what 3.4A
 adds is one derived reading of those accepted facts and no new truth. No Master
-CV PDF is generated. Of Phase 3.4, only the two projections above exist — the
-normalized skills and the structured experiences and projects: no structured
-education, certification or language, no employer, institution, canonical role
-or computed date deduced from prose, no administrable alias table and no skill
-level. There is no eligibility, matching, ranking or score, and no web profile
+CV PDF is generated. Of Phase 3.4, only the projections above exist — the
+normalized skills, the structured experiences, projects, education,
+certifications and languages, and the availability, mobility, preferences and
+career objectives a person states: no employer, institution, canonical role or
+computed date deduced from prose, no administrable alias table and no skill
+level. Nothing about what somebody wants is ever read out of what they have
+done. There is no eligibility, matching, ranking or score, and no web profile
 interface of any kind.
 
 This is a locally validated prototype, not a production deployment. It does not
 schedule continuous collection, scrape authenticated LinkedIn pages, apply to
 jobs, rank opportunities for a person, match a CV against an offer, or provide
-ML recommendations. The Digital Twin exists only as the seven slices listed
+ML recommendations. The Digital Twin exists only as the slices listed
 above: there is no validated Master CV, no generated Master CV PDF, no skill
 level, no inferred seniority or duration, no eligibility rule, and no match
-score. Reconciling a re-read CV
+score. What a person states about their availability, mobility, preferences
+and objectives is recorded and projected, and it is compared to nothing: no
+offer constraint is stored, no location or date is matched against an offer,
+and an absent statement stays `UNKNOWN` rather than being read as a "no". Reconciling a re-read CV
 proposes and retires readings; it confirms none of them by itself. Skills exist only as the
 projection of facts a person already accepted, and holding a skill says nothing
 about how well. Experiences and projects exist only as the same kind of
@@ -159,8 +181,9 @@ stale.
 - `services/digital_twin/`: the user/profile root, the local CV PDF parser, the
   unverified candidate extractor built on it, the validated `profile_facts`
   store with its provenance, the bridge and review CLI that turn candidates
-  into proposals a human decides, and the skill projection derived from the
-  facts those decisions accepted.
+  into proposals a human decides, the skill and structured-entry projections
+  derived from the facts those decisions accepted, and the availability,
+  mobility, preferences and career objectives a person states explicitly.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

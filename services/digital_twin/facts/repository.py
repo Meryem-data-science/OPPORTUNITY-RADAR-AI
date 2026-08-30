@@ -745,3 +745,68 @@ def correct_profile_fact(
         connection.execute("ROLLBACK")
         raise
     return FactCorrection(corrected=corrected, replacement=replacement)
+
+
+def record_verified_user_input_fact(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_type: ProfileFactType | str,
+    value: str,
+    provenance: ProvenanceInput | None = None,
+    normalized_value: str | None = None,
+    after_fact: Callable[[], None] | None = None,
+) -> ProfileFact:
+    """Record one claim the person stated themselves, already `ACCEPTED`.
+
+    `propose_profile_fact` exists because something *else* produced a value and
+    a human had not looked at it yet; `PROPOSED` is the honest status for that.
+    A person typing their own availability is not that situation: there is no
+    third party whose reading needs confirming, and asking them to accept what
+    they just typed would be a review of nobody's work. The same reasoning is
+    already written into `correct_profile_fact`, whose replacement is
+    `ACCEPTED` for exactly this reason — this is its missing first step, for
+    the case where there is nothing yet to correct.
+
+    Nothing about the lifecycle is bypassed. The fact is a `profile_facts` row
+    like any other, it can still be corrected or rejected afterwards, its status
+    still moves only through the calls of this module, and it still cannot exist
+    without evidence: the fact and its `USER_INPUT` provenance are written in
+    one `BEGIN IMMEDIATE` transaction, so a provenance the schema refuses leaves
+    no fact behind either.
+
+    The provenance is `USER_INPUT` and this call refuses any other source type.
+    Recording somebody's own statement as `CV` evidence would claim a document
+    said it, and this is the one path where it is certain that none did.
+
+    `after_fact` is a test seam invoked once the fact row exists and before the
+    provenance is written; production callers leave it unset.
+    """
+    if value is None or str(value).strip() == "":
+        raise ProfileFactError("value must not be empty")
+    if provenance is None:
+        provenance = ProvenanceInput(source_type=FactSourceType.USER_INPUT)
+    if not isinstance(provenance, ProvenanceInput):
+        raise ProfileFactError("provenance must be a ProvenanceInput")
+    if provenance.source_type is not FactSourceType.USER_INPUT:
+        raise ProfileFactError("an explicit statement is USER_INPUT evidence")
+    stored_type = _fact_type_value(fact_type)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        _require_profile(connection, profile_id)
+        fact = _insert_fact(
+            connection,
+            profile_id=profile_id,
+            fact_type=stored_type,
+            value=value,
+            normalized_value=normalized_value,
+            status=FactStatus.ACCEPTED,
+        )
+        if after_fact is not None:
+            after_fact()
+        _insert_provenance(connection, fact.id, provenance)
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return fact

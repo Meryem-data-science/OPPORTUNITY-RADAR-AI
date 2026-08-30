@@ -239,7 +239,7 @@ def test_0010_upgrades_a_database_that_stopped_at_0009(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
         fact = accepted(connection, existing.profile_id, STRUCTURED_EDUCATION)
 
-        assert apply_migrations(connection) == ["0010"]
+        assert apply_migrations(connection) == ["0010", "0011"]
 
         assert set(B2_TABLES) <= _tables(connection)
         # The facts that existed before the upgrade are untouched by it.
@@ -256,15 +256,18 @@ def test_0010_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0010",)
+    assert recorded[-1] == ("0011",)
     assert _counts(migrated) == (0, 0, 0)
 
 
 def test_0010_is_the_only_migration_this_slice_adds() -> None:
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
-    assert names[-1] == MIGRATION.name
-    assert len(names) == 10
+    # `0010` is this slice's own migration and stays the tenth. Later slices
+    # add their own after it, so what is asserted is its position, not that it
+    # is the newest migration in the repository.
+    assert names[9] == MIGRATION.name
+    assert names.index(MIGRATION.name) == 9
 
 
 def test_0010_alters_no_existing_table() -> None:

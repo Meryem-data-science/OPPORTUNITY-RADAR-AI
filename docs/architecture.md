@@ -583,8 +583,9 @@ nothing about any profile.
 
 Phase 3.4A stops there. It adds no administrable alias table, no preference,
 availability, mobility or career objective — structured experiences and
-projects are the separate Phase 3.4B1 projection below, and structured
-education, certifications and languages the Phase 3.4B2 one — no opportunity
+projects are the separate Phase 3.4B1 projection below, structured education,
+certifications and languages the Phase 3.4B2 one, and what a person states
+about themselves the Phase 3.4C one — no opportunity
 constraint, no
 eligibility rule, no skill extraction from an offer, no TF-IDF, no cosine
 similarity, no matching, no match score, no ranking, no recommendation, no
@@ -608,6 +609,10 @@ profile_facts  (the source of truth, Phase 3.3A)
     +-> profile_educations      ── structure_education       (Phase 3.4B2)
     +-> profile_certifications  ── structure_certification   (Phase 3.4B2)
     +-> profile_languages       ── structure_language        (Phase 3.4B2)
+    +-> profile_availability                                 (Phase 3.4C)
+    +-> profile_mobility                                     (Phase 3.4C)
+    +-> profile_preferences                                  (Phase 3.4C)
+    +-> profile_career_objectives                            (Phase 3.4C)
 
     every row → its fact_id → profile_facts → profile_fact_provenance
 ```
@@ -675,8 +680,9 @@ copy that can drift. `0009` makes the profile scope a database rule too, with a
 composite foreign key on `(fact_id, profile_id)`.
 
 Phase 3.4B1 stops there. Structured education, certifications and languages are
-the Phase 3.4B2 extension below. It adds no availability, mobility, preference
-or career objective, no eligibility rule, no opportunity constraint, no skill
+the Phase 3.4B2 extension below, and availability, mobility, preferences and
+career objectives are the separate Phase 3.4C slice after it — they come from
+the person, never from a document. It adds no eligibility rule, no opportunity constraint, no skill
 inference, no skill level, no matching, no match score, no TF-IDF, no cosine
 similarity, no ranking, no recommendation, no notification, no CV adaptation
 and no auto-apply. There is no HTTP endpoint, no web interface and no remote
@@ -796,8 +802,9 @@ idempotence, the same profile scope, and the same refusal to write to
 `profile_skill_evidence`. No skill is inferred from a diploma, a certification
 or a language.
 
-Phase 3.4B2 stops there. It adds no availability, mobility, preference or
-career objective, no eligibility rule, no opportunity constraint, no skill
+Phase 3.4B2 stops there. Availability, mobility, preferences and career
+objectives are the Phase 3.4C slice below, and no rule in this package produces
+one. It adds no eligibility rule, no opportunity constraint, no skill
 inference, no level of any kind, no matching, no match score, no TF-IDF, no
 cosine similarity, no ranking, no recommendation, no notification, no CV
 adaptation and no auto-apply. There is no HTTP endpoint, no web interface and
@@ -806,6 +813,85 @@ is in
 [database.md](database.md#structured-profile-education-certifications-and-languages),
 and the command is the same one, in
 [operations.md](operations.md#structured-profile-entries-phase-34b1-and-34b2).
+
+## Explicit profile input (Phase 3.4C)
+
+`services/digital_twin/preferences/` records and projects the four things a CV
+cannot say: when somebody can start, where they will go, what they are looking
+for, and what they are aiming for.
+
+```text
+explicit user input (a person types it)
+    |
+    v
+profile_facts  (ACCEPTED, with USER_INPUT provenance)
+    |
+    +-> profile_availability        AVAILABILITY
+    +-> profile_mobility            MOBILITY
+    +-> profile_preferences         PREFERENCE
+    +-> profile_career_objectives   CAREER_OBJECTIVE
+
+    every row → its fact_id → profile_facts → profile_fact_provenance
+    no accepted fact  →  no row  →  UNKNOWN
+```
+
+The difference from 3.4B is where the claim comes from, and it is the whole
+point of the slice. `0009`/`0010` project what a **document** said about a past
+that already happened; `0011` projects what a **person** said about what they
+want next. **What somebody has done is not what somebody wants**, so nothing
+here is inferred, in either direction: no availability date from a CV period, a
+diploma year or the clock — this package imports no clock at all; no mobility
+from an address, a city, a country or a past employer, and no geocoding, no
+country lookup and no region expansion anywhere; no work mode from a past
+remote job; no preferred domain from a skill, a project or a CV section; no
+convention status from being a student; no visa need from a nationality or a
+location; and no career objective from a CV's professional title.
+
+The package is five modules with one responsibility each: `models.py` holds the
+closed registries and the frozen, self-validating statements; `codec.py` the
+canonical JSON both ways; `repository.py` the projection and its reconciliation;
+`service.py` the create/no-op/correct decision; `cli.py` the six commands.
+
+**Canonical JSON is what makes the rest work.** A fact's value has exactly one
+encoding — keys sorted, no padding, closed registries in declaration order, free
+text keeping the person's order after an exact first-occurrence dedup — so "the
+person restated what they already said" is a string comparison rather than a
+guess, and restating a preference in another order is a no-op instead of a
+correction nobody made. Decoding is strict in the other direction: a value whose
+own re-encoding is not byte-identical is refused rather than repaired, because
+there is no best-effort reading of a preference.
+
+**Every domain is a singleton**, so each `set-*` resolves to `CREATED`,
+`UNCHANGED` or `CORRECTED`, reusing the existing lifecycle — the correction is
+`correct_profile_fact`, which keeps the old value readable and points it at its
+replacement. The one new primitive is
+`record_verified_user_input_fact`, the missing first step of that same
+reasoning: a person typing their own availability is not a proposal somebody
+else needs to review, so the first statement is `ACCEPTED` directly, with its
+`USER_INPUT` provenance, in one transaction. Nothing about the lifecycle is
+bypassed — the fact can still be corrected or rejected, its status still moves
+only through the facts package, and it still cannot exist without evidence.
+
+**A domain holding two `ACCEPTED` facts is refused out loud**, and the whole
+synchronization rolls back with it. Picking the most recent one would decide,
+on nobody's behalf, which of two things somebody said counts.
+
+**An absence is `UNKNOWN`, and `UNKNOWN` has no row.** `0011` seeds nothing,
+defaults nothing and creates no "unknown" row, so nothing downstream can read
+"never said" as "said no". `ConventionStatus.UNKNOWN` and
+`VisaSponsorshipRequired.UNKNOWN` are not a contradiction: those sit inside a
+preference the person did state, where "I don't know yet" is the answer they
+gave.
+
+Phase 3.4C stops there. It parses no offer, stores no opportunity constraint,
+computes no eligibility, produces no `ELIGIBLE`/`NOT_ELIGIBLE` verdict, compares
+no location and no date against an offer, and adds no matching, match score,
+TF-IDF, cosine similarity, ranking, recommendation or notification. It is the
+profile side of Phases 3.5 and 3.6, and neither is implemented. There is no HTTP
+endpoint, no web interface and no remote write path, and no network call or
+model takes part. The exact schema is in
+[database.md](database.md#explicit-profile-input), and the commands are in
+[operations.md](operations.md#explicit-profile-input-phase-34c).
 
 ## Data-processing boundaries
 
@@ -878,8 +964,10 @@ read-only CV parser added by Phase 3.2A, the unverified candidates added by
 Phase 3.2B, the validated fact store added by Phase 3.3A, the bridge and
 local review command added by Phase 3.3B, the re-read reconciliation added by
 Phase 3.3C, the skill projection added by Phase 3.4A, the structured
-experiences and projects added by Phase 3.4B1, and the structured education,
-certifications and languages added by Phase 3.4B2, all described above; no
+experiences and projects added by Phase 3.4B1, the structured education,
+certifications and languages added by Phase 3.4B2, and the availability,
+mobility, preferences and career objectives a person states, added by Phase
+3.4C, all described above; no
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or

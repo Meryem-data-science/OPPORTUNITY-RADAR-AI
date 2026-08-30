@@ -197,7 +197,7 @@ def test_0008_upgrades_a_database_that_stopped_at_0007(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
         fact = accepted(connection, existing.profile_id, "Python")
 
-        assert apply_migrations(connection) == ["0008", "0009", "0010"]
+        assert apply_migrations(connection) == ["0008", "0009", "0010", "0011"]
 
         assert {
             "skills",
@@ -218,7 +218,7 @@ def test_0008_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0010",)
+    assert recorded[-1] == ("0011",)
     assert _counts(migrated) == (0, 0, 0)
 
 
