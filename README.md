@@ -150,8 +150,27 @@ Phase 3 has started, and only these six slices of it exist:
   years, and an internship implies neither an agreement nor a duration. Every
   asserted value carries the rule that fired and the minimal fragment it
   matched; two readings that disagree assert nothing and record the
-  contradiction. Skills and languages are deliberately not extracted yet — that
-  is 3.5B.
+  contradiction.
+- **Phase 3.5B** — the rest of what an opportunity asks for: **which skills and
+  which languages**, and how hard it asks.
+  `services/collector/extractors/opportunity_constraints/requirements/` reads a
+  description as sections — `Required Qualifications` and `Must Have` demand,
+  `Nice to Have` and `Atouts` prefer, `Responsibilities` and `Our stack` demand
+  nothing — and projects the result through migration `0013` onto the
+  `opportunity_skill_requirements` table `0012` reserved, plus language,
+  evidence, ambiguity and extraction-state tables. **A mention is not a
+  requirement**: "our stack includes Python", "you will build pipelines using
+  Python" and "no prior Python experience is required" each produce nothing. **An
+  `or` is not an `and`**: "Python or R required" is one requirement satisfiable
+  two ways, so v1 stores neither and records the refusal, because turning it
+  into two obligations would let a later phase reject somebody the posting would
+  have accepted. Skills resolve through the Phase 3.4A normalizer into the same
+  `skills` vocabulary the profile side uses — **nothing is seeded**, a row
+  appears only when a real posting requires that term — and matching is on token
+  boundaries, so `PostgreSQL` never yields `SQL` and `Google` never yields `Go`.
+  A language level is what the posting wrote: `Fluent` never becomes `C1`, and no
+  language is inferred from a country, a city or the language the advertisement
+  is written in. It is still **never compared to a profile**.
 
 **No CV candidate is ever accepted automatically.** An extraction is a reading
 of a document, not a truth about a person, so every fact the import creates is

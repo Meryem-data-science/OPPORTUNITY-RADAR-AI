@@ -140,7 +140,9 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
         assert _apply_up_to_0006(connection, tmp_path) == list(BEFORE_THIS_SLICE)
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
 
-        assert apply_migrations(connection) == ["0007", "0008", "0009", "0010", "0011", "0012"]
+        assert apply_migrations(connection) == [
+            "0007", "0008", "0009", "0010", "0011", "0012", "0013",
+        ]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
         assert (
@@ -160,7 +162,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0012",)
+    assert recorded[-1] == ("0013",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -231,6 +233,18 @@ PHASE_35A_TABLES = frozenset(
     }
 )
 
+#: The five tables `0013` adds on the offer side. `opportunity_skill_
+#: requirements` is not among them: `0012` created it and `0013` fills it.
+PHASE_35B_TABLES = frozenset(
+    {
+        "opportunity_skill_requirement_evidence",
+        "opportunity_language_requirements",
+        "opportunity_language_requirement_evidence",
+        "opportunity_requirement_ambiguities",
+        "opportunity_requirement_extraction_state",
+    }
+)
+
 #: Every table a projection slice is allowed to have added so far.
 PROJECTED_TABLES = (
     PHASE_34A_TABLES
@@ -238,6 +252,7 @@ PROJECTED_TABLES = (
     | PHASE_34B2_TABLES
     | PHASE_34C_TABLES
     | PHASE_35A_TABLES
+    | PHASE_35B_TABLES
 )
 
 #: Concepts this database must not contain. The list is the docstring of the
@@ -273,13 +288,14 @@ def test_no_table_beyond_the_projections_exists_yet(migrated):
     """3.4A projects skills, 3.4B experiences through languages, 3.4C the rest.
 
     The twelve tables `0008` through `0011` add are exempted one by one, and so
-    are the six `0012` adds on the offer side; every
+    are the seven `0012` adds and the five `0013` adds on the offer side; every
     other table is held to the whole out-of-scope list — no fourth skill table,
     no administrable alias table, no second education, certification or
     language table, no second preference, availability, mobility or career
     objective table, and no eligibility, matching, score or ranking table,
     because Phase 3.6 and Phase 4 are not implemented. Phase 3.5A adds
-    constraints a posting states; it adds no comparison of one to a person.
+    constraints a posting states and Phase 3.5B the skills and languages it
+    asks for; neither adds a comparison of one to a person.
     """
     for table in _tables(migrated):
         assert not is_out_of_scope_table(table), table

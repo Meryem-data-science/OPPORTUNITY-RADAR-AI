@@ -1002,14 +1002,98 @@ Phase 2 qualification already uses. The exact schema is in
 [database.md](database.md#opportunity-constraints) and the commands are in
 [operations.md](operations.md#opportunity-constraints-phase-35a).
 
-Phase 3.5A stops there. Skill and language requirements are **not** extracted:
-counting every mention of Python or SQL as a requirement would fill the
-projection with the contents of "our stack includes…" paragraphs and with
-skills a posting said it would teach, and a requirement nobody wrote is exactly
-what this slice refuses to invent. Doing it properly needs sentence-level
-context, which is Phase 3.5B. `opportunity_skill_requirements` exists now,
-empty, only so that 3.5B extends the shared `skills` catalogue rather than
-starting a rival one.
+Phase 3.5A stops there. Skill and language requirements are extracted by Phase
+3.5B, below, which is where the sentence-level context that reading them needs
+actually lives.
+
+## Opportunity skill and language requirements (Phase 3.5B)
+
+`services/collector/extractors/opportunity_constraints/requirements/` continues
+the same slice with the two things 3.5A deliberately left out: **which
+technologies and which languages a posting asks for**, and how hard it asks.
+It still compares nothing to anybody.
+
+```text
+opportunities.description
+    -> parse_requirement_segments        (sections: REQUIRED / PREFERRED / NEUTRAL)
+    -> extract_opportunity_requirements  (pure, offline, deterministic)
+         -> opportunity_skill_requirements        (the table 0012 reserved)
+         |     +-> opportunity_skill_requirement_evidence
+         +-> opportunity_language_requirements
+         |     +-> opportunity_language_requirement_evidence
+         +-> opportunity_requirement_ambiguities
+         +-> opportunity_requirement_extraction_state
+```
+
+Ten modules with one responsibility each: `models.py` the frozen readings and
+the closed registries, `sections.py` the context parser, `skill_catalog.py` and
+`language_catalog.py` the two closed catalogues, `matcher.py` the compiled
+alias matching, `signals.py` the sentence-level markers and connectors,
+`skills.py` and `languages.py` the two rule sets, `extractor.py` the pure
+reading and its fingerprint, `repository.py` the transactional projection,
+`service.py` the orchestration and `cli.py` the three commands.
+
+**A mention is not a requirement**, and the whole design follows from it. "Our
+stack includes Python and Spark" describes a company, "you will build pipelines
+using Python" describes a job, "we use SQL across the company" describes a
+habit, "training in Python will be provided" is a promise, and "no prior Python
+experience is required" is the opposite of a demand. None of them produces a
+row. What produces one is a section that says the items under it are demands
+(`Required Qualifications`, `Must Have`, `Profil recherché`) or preferences
+(`Nice to Have`, `Preferred Qualifications`, `Atouts`), or a sentence that says
+so itself (`Must have…`, `…is required`, `…is a plus`). Signals are read in a
+fixed order — a cancelling sentence, then a local marker, then the section,
+then nothing — so `Python preferred` under `Required Qualifications` is a
+preference, and a heading never promotes one.
+
+**A section ends where the next one begins**, including at headings nobody
+recognised: an unknown title-shaped line resets the context to `NEUTRAL` rather
+than letting `Required Qualifications` leak over a list of technologies further
+down. A line that names a catalogue term is never read as a heading, because
+`Python` on its own line is an item, not a title.
+
+**An OR is never widened into an AND.** "Python or R required" is one
+requirement satisfiable two ways; storing it as two requirements would let
+Phase 3.6 demand both and reject somebody the posting would have accepted. v1
+stores neither and writes a row in `opportunity_requirement_ambiguities`, so
+UNKNOWN is a decision on the record rather than a silence. `and` still gives
+two requirements, and `bilingual English/French` still gives two languages.
+
+**The vocabulary is the shared one and it is never seeded.** Skills resolve
+through the Phase 3.4A normalizer, so the offer side and the profile side
+compute the same `canonical_key` for the same technology and `skills` stays one
+catalogue. The 115 catalogue entries live in code; a `skills` row appears only
+the first time a real posting is found to require that term. Matching is on
+token boundaries that know about punctuation and on longest-alias-first,
+non-overlapping spans, so `PostgreSQL` never yields `SQL`, `PySpark` never
+yields `Spark`, `Google` never yields `Go`, and `C`, `C++` and `C#` stay three
+languages.
+
+**A language level is what the posting wrote.** `B2` stays `B2` and `Fluent`
+stays `Fluent`; nothing maps `Fluent` to `C1` or `Native` to `C2`. A language
+is never inferred from a country, a city, a nationality or the language the
+advertisement itself is written in. When one posting demands one language at
+two incompatible levels, the language stays `REQUIRED` and only the level
+becomes UNKNOWN, with a `CONFLICTING_LANGUAGE_PROFICIENCY` ambiguity saying so.
+
+Every asserted requirement carries the fragment that stated it, the rule that
+fired, the heading it sat under — stored **separately**, never welded into a
+sentence nobody wrote — and the level *that mention* stated, which may be
+weaker than the projected one.
+
+Idempotence is `source_fingerprint` plus `extractor_version`, over exactly the
+field 3.5B reads: the description, and nothing else. The version is its own,
+`opportunity-requirements-v1`, so a skill rule changing never recomputes a start
+date. `opportunity_requirement_extraction_state` records that a posting **was
+read**, which is what distinguishes "asks for nothing" from "never extracted".
+
+Phase 3.5B depends on Phase 3.5A: every row hangs off `opportunity_constraints`,
+a posting with no 3.5A projection is refused with an explicit error rather than
+skipped, and a 3.5A re-synchronization cascades the 3.5B reading away so the
+next run recomputes. It never runs the 3.5A sync for you. The exact schema is
+in [database.md](database.md#opportunity-skill-and-language-requirements) and
+the commands are in
+[operations.md](operations.md#opportunity-skill-and-language-requirements-phase-35b).
 
 ## Data-processing boundaries
 
@@ -1086,8 +1170,8 @@ experiences and projects added by Phase 3.4B1, the structured education,
 certifications and languages added by Phase 3.4B2, and the availability,
 mobility, preferences and career objectives a person states, added by Phase
 3.4C, all described above. Phase 3.5A adds the constraints an **opportunity**
-states, which is the offer side of the same future comparison and is joined to
-no profile. No
+states and Phase 3.5B the skills and languages it asks for, which are the offer
+side of the same future comparison and are joined to no profile. No
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or
