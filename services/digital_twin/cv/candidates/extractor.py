@@ -288,8 +288,6 @@ def _add_skills(builder: _Builder, segments: Sequence[SectionSegment]) -> None:
 def _add_labelled_lists(
     builder: _Builder,
     segments: Sequence[SectionSegment],
-    layout_evidence: layout_rules.DocumentLayoutEvidence,
-    style_evidence: typography_rules.DocumentStyleEvidence,
 ) -> None:
     """Add inline lists whose exact label and colon are structural evidence."""
     for section_index, segment in enumerate(segments):
@@ -306,31 +304,20 @@ def _add_labelled_lists(
 
         if segment.section_type is not SectionType.PROFESSIONAL_DEVELOPMENT:
             continue
-        _, blocks = entry_rules.segment_entries(
-            segment.body,
-            section_type=segment.section_type,
-            layout_evidence=layout_evidence,
-            style_evidence=style_evidence,
-        )
-        for block in blocks:
-            found = labelled_rules.certification_items(block)
-            if found is None:
-                continue
-            meaning, items = found
+        for item in labelled_rules.scan_certification_lists(segment.body):
             rule_id = (
                 ExtractionRule.CERTIFICATION_PLANNED_LIST_ITEM
-                if meaning == "planned"
+                if item.meaning == "planned"
                 else ExtractionRule.CERTIFICATION_PREPARING_LIST_ITEM
             )
-            for item in items:
-                builder.add(
-                    candidate_type=CandidateType.CERTIFICATION_ENTRY,
-                    raw_text=item,
-                    rule_id=rule_id,
-                    page_numbers=entry_rules.block_pages(block),
-                    section_type=segment.section_type,
-                    section_index=section_index,
-                )
+            builder.add(
+                candidate_type=CandidateType.CERTIFICATION_ENTRY,
+                raw_text=item.text,
+                rule_id=rule_id,
+                page_numbers=item.page_numbers,
+                section_type=segment.section_type,
+                section_index=section_index,
+            )
 
 
 def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
@@ -357,7 +344,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
     _add_identity(builder, segments, warnings)
     _add_contacts(builder, segments, _header_index(segments))
     _add_entries(builder, segments, layout_evidence, style_evidence)
-    _add_labelled_lists(builder, segments, layout_evidence, style_evidence)
+    _add_labelled_lists(builder, segments)
     _add_skills(builder, segments)
 
     if not builder.holds_any(_CONTACT_TYPES):
@@ -375,7 +362,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
         warnings.append(
             CandidateWarning(
                 code=CandidateWarningCode.NO_CANDIDATE_EXTRACTED,
-                message="no rule of cv-candidates-v6 produced a candidate",
+                message="no rule of cv-candidates-v7 produced a candidate",
             )
         )
 

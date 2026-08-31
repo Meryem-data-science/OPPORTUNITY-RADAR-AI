@@ -123,7 +123,7 @@ def test_the_same_parsed_cv_always_yields_the_same_candidates(synthetic_pdf) -> 
 def test_the_result_and_every_candidate_carry_the_extractor_version(extract) -> None:
     result = extract(HEADER, BODY)
 
-    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v6"
+    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v7"
     assert result.extractor_version != result.parser_version
     assert result.candidates
     assert all(
@@ -1283,6 +1283,43 @@ def test_generic_preparation_of_ordinary_skills_proposes_no_certification() -> N
         )
     )
     assert result.of_type(CandidateType.CERTIFICATION_ENTRY) == ()
+
+
+def test_preparing_list_survives_a_punctuation_proven_physical_wrap() -> None:
+    parsed = parsed_from_pages(
+        "PROFESSIONAL DEVELOPMENT\n"
+        "Currently preparing: Certificate Alpha; Certified Beta\n"
+        "Advanced Track; Certificate Gamma.\n"
+        "Languages: Alder, Birch"
+    )
+
+    first = extract_candidates(parsed)
+    second = extract_candidates(parsed)
+    assert first == second
+    assert _texts(first, CandidateType.CERTIFICATION_ENTRY) == [
+        "Certificate Alpha",
+        "Certified Beta\nAdvanced Track",
+        "Certificate Gamma.",
+    ]
+    assert _texts(first, CandidateType.LANGUAGE_ENTRY) == ["Alder", "Birch"]
+    assert _texts(first, CandidateType.SKILL) == []
+
+
+def test_certification_list_never_carries_across_a_section_boundary() -> None:
+    result = extract_candidates(
+        parsed_from_pages(
+            "PROFESSIONAL DEVELOPMENT\n"
+            "Currently preparing: Certificate Alpha; Certified Beta\n"
+            "PROJECTS\nAdvanced Track; Certificate Gamma."
+        )
+    )
+
+    assert _texts(result, CandidateType.CERTIFICATION_ENTRY) == [
+        "Certificate Alpha", "Certified Beta"
+    ]
+    assert _texts(result, CandidateType.PROJECT_ENTRY) == [
+        "Advanced Track; Certificate Gamma."
+    ]
 
 
 def test_labelled_languages_work_in_any_section_and_never_leak_as_skills() -> None:

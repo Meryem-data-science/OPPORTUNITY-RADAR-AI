@@ -497,7 +497,7 @@ def test_the_same_document_always_yields_the_same_result() -> None:
     assert first == second
     assert parse_cv_bytes(content) == parse_cv_bytes(content)
     assert first.parser_version == PARSER_VERSION == "cv-parser-v5"
-    assert first.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v6"
+    assert first.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v7"
 
 
 # --------------------------------------------------------------------------
