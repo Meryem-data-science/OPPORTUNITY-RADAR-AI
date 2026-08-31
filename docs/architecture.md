@@ -227,7 +227,7 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v6` and moves independently of
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v7` and moves independently of
 `PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, `v4`
 with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, and `v5` when the right-hand
 boundary those two rules test against stopped being a count of characters and
@@ -248,6 +248,15 @@ lexicon. Separate planned and preparing rule IDs preserve the source meaning
 without claiming either was obtained. Spacing continuation can retain a
 physically wrapped labelled certification; typography continuation is not
 extended to this structural section.
+
+Candidates v7 also scans those exact professional-development labels locally.
+When the labelled line already contains a certification-list separator, ends
+with an unfinished item, and the immediately following physical line supplies
+another supported separator, that next line remains in the same list. Blank
+separation, another exact label, terminal punctuation, or the section boundary
+stops the carry. Generic preparing items are filtered for their closed
+certification lexicon only after this punctuation-proven reconstruction;
+planned items retain their label-only evidence contract.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,

@@ -94,11 +94,10 @@ from services.digital_twin.facts.repository import (
 #: technical identifiers — no CV content and no personal data is hardcoded
 #: anywhere in this module.
 #:
-#: They move with `PARSER_VERSION` and `CANDIDATE_EXTRACTOR_VERSION`, one step
-#: behind: the default reconciliation is always the one from the campaign a
-#: profile most likely already holds facts from to the campaign this checkout
-#: produces. An operator reconciling from an older campaign than that names it
-#: explicitly, which is the only thing that changes here — nothing about *how*
+#: They name the campaign currently persisted and reviewed in the profile; they
+#: do not mechanically move one implementation version behind the checkout.
+#: An operator reconciling from a different campaign names it explicitly. That
+#: is the only thing that changes here — nothing about *how*
 #: two campaigns are compared depends on which versions they are, and no fact
 #: is re-decided by a bump: a reading the new campaign produces identically is
 #: still the same reading and keeps the human decision already made on it,
