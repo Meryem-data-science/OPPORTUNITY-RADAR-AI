@@ -28,6 +28,10 @@ explicitly asks the CLI for. The result lives in memory.
 """
 
 from services.digital_twin.cv.candidates.extractor import extract_candidates
+from services.digital_twin.cv.candidates.layout import (
+    LAYOUT_CONTINUATION_SECTION_TYPES,
+    DocumentLayoutEvidence,
+)
 from services.digital_twin.cv.candidates.models import (
     CANDIDATE_EXTRACTOR_VERSION,
     CandidateType,
@@ -41,9 +45,11 @@ from services.digital_twin.cv.candidates.models import (
 
 __all__ = [
     "CANDIDATE_EXTRACTOR_VERSION",
+    "LAYOUT_CONTINUATION_SECTION_TYPES",
     "CandidateType",
     "CandidateWarning",
     "CandidateWarningCode",
+    "DocumentLayoutEvidence",
     "ExtractedCandidate",
     "ExtractionRule",
     "StructuredCvExtraction",

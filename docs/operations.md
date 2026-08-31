@@ -255,7 +255,7 @@ Expected failures, each reported explicitly with exit code 1:
 | The PDF is encrypted | `EncryptedPdfError` |
 | The PDF has no text layer (a scan) | `EmptyPdfTextError` |
 
-A scanned CV is refused rather than guessed at: `cv-parser-v2` performs no OCR.
+A scanned CV is refused rather than guessed at: `cv-parser-v3` performs no OCR.
 
 What this command does **not** do: it stores no `profile_facts`, writes no row
 in the Digital Twin, creates no validated Master CV, offers no accept, correct
@@ -456,13 +456,17 @@ command creates no user and no profile, and it refuses a non-SQLite backend
 before it connects and before it asks for anything.
 
 The older campaign is named by two options, which default to the campaign this
-project moved off:
+project moved off — one step behind what the checkout produces, so they move
+with each bump:
 
 | Option | Default |
 | --- | --- |
-| `--old-parser-version` | `cv-parser-v1` |
-| `--old-extractor-version` | `cv-candidates-v1` |
+| `--old-parser-version` | `cv-parser-v2` |
+| `--old-extractor-version` | `cv-candidates-v2` |
 
+Reconciling from a campaign older than the defaults — `cv-parser-v1` and
+`cv-candidates-v1`, say — means naming it explicitly; nothing else changes,
+since how two campaigns are compared never depends on which versions they are.
 Both are technical version strings and never CV content. The command also
 refuses to run if the checkout does not itself produce a *newer* campaign than
 the one named, so a stale reading can never retire a good fact.

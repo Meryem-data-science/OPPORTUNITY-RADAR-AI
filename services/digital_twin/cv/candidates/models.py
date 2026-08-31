@@ -29,7 +29,7 @@ from services.digital_twin.cv.models import SectionType
 #: candidate can always be compared against the rules that produced it. It is
 #: independent of `PARSER_VERSION`: the two versions move for different
 #: reasons, and a candidate carries both.
-CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v2"
+CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v3"
 
 
 class CandidateType(StrEnum):
@@ -97,6 +97,13 @@ class ExtractionRule(StrEnum):
     SECTION_BULLET_BLOCK = "SECTION_BULLET_BLOCK"
     #: The section body has neither, so each line is one entry.
     SECTION_LINE_BLOCK = "SECTION_LINE_BLOCK"
+    #: The section body has neither, and the document's own layout showed that
+    #: one or more of its line breaks were the layout engine running out of
+    #: room: those lines were kept in the block they physically continue. The
+    #: name describes the geometry of the page and nothing else — no
+    #: institution, employer, diploma, date, place or level is read from the
+    #: joined lines, here or anywhere downstream of this rule.
+    SECTION_LAYOUT_CONTINUATION_BLOCK = "SECTION_LAYOUT_CONTINUATION_BLOCK"
     #: An EXPERIENCE body written as pipe-delimited header lines was cut on
     #: those lines. The name describes the punctuation the document used and
     #: nothing else: no employer, role, date, place or duration is read from

@@ -54,7 +54,7 @@ def test_parse_reports_the_shape_of_the_document(
     output = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "parser_version=cv-parser-v2" in output
+    assert "parser_version=cv-parser-v3" in output
     assert "pages=2" in output
     assert "sections=UNCLASSIFIED,PROFILE,EXPERIENCE,SKILLS" in output
     assert "UNCLASSIFIED_LEADING_CONTENT" in output
@@ -105,7 +105,7 @@ def test_json_out_writes_the_detailed_result_only_where_it_is_asked_to(
     assert exit_code == 0
     assert cli.JSON_OUT_NOTICE in output
     detailed = json.loads(destination.read_text(encoding="utf-8"))
-    assert detailed["parser_version"] == "cv-parser-v2"
+    assert detailed["parser_version"] == "cv-parser-v3"
     assert "Stage analyste donnees" in detailed["pages"][1]["text"]
     # The requested file holds the text; the terminal still does not.
     for secret in PERSONAL_TEST_CONTENT:

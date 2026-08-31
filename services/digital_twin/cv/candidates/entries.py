@@ -5,6 +5,13 @@ certifications, languages — are cut into blocks on the separator the section
 actually uses, and each block is kept with the text as written and the pages it
 covers. That is all this module does.
 
+One of those separators is the physical layout of the page, read through
+`layout.py`: where the document shows that a line break was the layout engine
+running out of room rather than the document ending an entry, the two lines stay
+in one block. That is still a statement about the shape of the document and not
+about its meaning — see that module for why, and for what it refuses to do when
+the layout proves nothing.
+
 It states nothing about what a block *means*: no institution, employer, role,
 date, duration, diploma level or language level is derived, normalized or
 canonicalised here. Those readings belong to Phase 3.4, and inventing them from
@@ -15,6 +22,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from services.digital_twin.cv.candidates.layout import (
+    LAYOUT_CONTINUATION_SECTION_TYPES,
+    DocumentLayoutEvidence,
+    continues_previous_line,
+)
 from services.digital_twin.cv.candidates.models import CandidateType, ExtractionRule
 from services.digital_twin.cv.candidates.text import starts_with_bullet
 from services.digital_twin.cv.models import SectionType
@@ -138,10 +150,49 @@ def _line_blocks(body: Sequence[SourceLine]) -> list[tuple[SourceLine, ...]]:
     return [(line,) for line in body if line.text]
 
 
+def _layout_continuation_blocks(
+    body: Sequence[SourceLine], evidence: DocumentLayoutEvidence
+) -> list[tuple[SourceLine, ...]]:
+    """One block per line, except where the layout carries a line on.
+
+    This is `_line_blocks` with one change: a line the document physically
+    places as the continuation of the line above it joins that line's block
+    instead of opening its own. The decision is `continues_previous_line`'s
+    alone, and it is taken pair by pair, so an entry the document wraps over
+    three or more lines stays one block for as long as each step is a
+    continuation of the one before it.
+    """
+    blocks: list[list[SourceLine]] = []
+    for line in body:
+        if not line.text:
+            continue
+        if blocks and continues_previous_line(evidence, blocks[-1][-1], line):
+            blocks[-1].append(line)
+        else:
+            blocks.append([line])
+    return [tuple(block) for block in blocks]
+
+
+def _has_layout_continuation(
+    body: Sequence[SourceLine], evidence: DocumentLayoutEvidence
+) -> bool:
+    """Say whether the layout carries any line of this body on.
+
+    Asked before the rule is named, so a body the layout says nothing about
+    keeps the rule — and the name — it had before this rule existed.
+    """
+    written = [line for line in body if line.text]
+    return any(
+        continues_previous_line(evidence, previous, line)
+        for previous, line in zip(written, written[1:], strict=False)
+    )
+
+
 def segment_entries(
     body: Sequence[SourceLine],
     *,
     section_type: SectionType,
+    layout_evidence: DocumentLayoutEvidence | None = None,
 ) -> tuple[ExtractionRule, tuple[tuple[SourceLine, ...], ...]]:
     """Cut a section body into entries, and name the rule that cut it.
 
@@ -157,6 +208,10 @@ def segment_entries(
        separator a CV writes, and the one that keeps a multi-line entry
        together;
     2. otherwise a list marker opening a line, whenever the body holds one;
+    2.5 otherwise, in the sections of `LAYOUT_CONTINUATION_SECTION_TYPES` and
+       only where the document's own layout proves that a line is the physical
+       continuation of the line above it, that line joins the block above
+       instead of opening its own;
     3. otherwise one entry per line, which asserts nothing beyond what the
        document's own line breaks already say.
 
@@ -165,6 +220,17 @@ def segment_entries(
     that line would join the bullet above it and the block would then hold two
     entries at once. Its preconditions are what keep it from firing anywhere
     else, and a body that does not satisfy both is cut exactly as before.
+
+    Rule 2.5 is where the physical layout of the document is read, and it is
+    placed there on purpose. A body separated by blank lines or by list markers
+    already keeps a wrapped entry together, so rules 1 and 2 need no help and
+    are left untouched; the body that needs help is the one with neither, whose
+    only remaining separator was the line break itself. Where the layout proves
+    that a line break was the layout engine's and not the document's, the two
+    lines stay in one block; where it proves nothing, rule 3 answers exactly as
+    it always did. `layout_evidence` left at `None` — a caller that has not read
+    the document's layout, a `ParsedCv` built from text alone — is that same
+    "proves nothing", so rule 2.5 simply never fires.
     """
     if section_type is SectionType.EXPERIENCE and _opens_on_pipe_boundaries(body):
         return (
@@ -175,6 +241,15 @@ def segment_entries(
         return ExtractionRule.SECTION_BLANK_LINE_BLOCK, tuple(_blank_line_blocks(body))
     if any(starts_with_bullet(line.text) for line in body):
         return ExtractionRule.SECTION_BULLET_BLOCK, tuple(_bullet_blocks(body))
+    if (
+        layout_evidence is not None
+        and section_type in LAYOUT_CONTINUATION_SECTION_TYPES
+        and _has_layout_continuation(body, layout_evidence)
+    ):
+        return (
+            ExtractionRule.SECTION_LAYOUT_CONTINUATION_BLOCK,
+            tuple(_layout_continuation_blocks(body, layout_evidence)),
+        )
     return ExtractionRule.SECTION_LINE_BLOCK, tuple(_line_blocks(body))
 
 

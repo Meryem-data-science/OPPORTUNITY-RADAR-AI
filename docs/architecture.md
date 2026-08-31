@@ -128,20 +128,35 @@ function of the file, deliberately kept apart from the opportunity collectors:
 local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ ParsedCv
    (bytes)  extract    conservative      lexicon       assemble    (frozen)
             + SHA-256  text clean-up     headings
+            + layout   (layout carried
+              per line  through, per line)
 ```
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
-  `DetectedSection`, `ParserWarning`, `ParsedCv`, and the `PARSER_VERSION`
-  (`cv-parser-v2`) every result carries. `pypdf` is pinned to an exact
-  version in `pyproject.toml` because the extracted text depends on it:
-  changing that pin, or any extraction, normalization or segmentation rule, is
-  a change of the rules `cv-parser-v2` names, so it requires deciding whether
-  `PARSER_VERSION` must move with it. Without that, two different outputs could
-  claim the same provenance.
+  `ExtractedLine`, `LineLayout`, `DetectedSection`, `ParserWarning`, `ParsedCv`,
+  and the `PARSER_VERSION` (`cv-parser-v3`) every result carries. `pypdf` is
+  pinned to an exact version in `pyproject.toml` because the extracted text
+  depends on it: changing that pin, or any extraction, normalization or
+  segmentation rule, is a change of the rules `cv-parser-v3` names, so it
+  requires deciding whether `PARSER_VERSION` must move with it. Without that,
+  two different outputs could claim the same provenance. `cv-parser-v2` became
+  `cv-parser-v3` when pages started carrying their layout: the text is
+  unchanged, character for character, but the result is observably richer and a
+  stored `cv-parser-v2` parse must not claim to be one of these.
 - `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
   file, and raises one explicit error per failure mode: missing path, path that
   is not a file, unreadable PDF, encrypted PDF, and a PDF with no extractable
-  text at all.
+  text at all. It reads the layer once, through `pypdf`'s `visitor_text`
+  callback, which hands over the text state behind each flushed line — so the
+  page comes back both as the string `extract_text()` returns and as one
+  `ExtractedLine` per line of it, carrying that line's left edge, baseline and
+  font size in PDF points (`LineLayout`). Nothing is inferred from the geometry
+  here and nothing is invented: a rotated, skewed or mirrored line has no
+  comparable position and gets `layout=None`, and a page whose lines cannot be
+  matched to its text one-for-one — the correspondence is *checked*, not assumed
+  — carries no lines at all rather than lines attached to the wrong text.
+  `ExtractedPage.text` is unchanged by any of this and remains the page's
+  primary representation.
 - `normalization.py` normalizes exactly one closed list of text-layer
   artefacts and nothing else: line-ending conventions become `\n`, space-like
   and zero-width characters are folded away, runs of spaces inside a line and
@@ -176,7 +191,8 @@ in the Digital Twin, adds no migration and no table, and no value it extracts is
 a verified fact about the person.
 
 `sections.py` exposes its segmentation twice, from one implementation:
-`segment_document` returns each section with the page of every line it holds,
+`segment_document` returns each section with the page — and the layout, where
+the PDF stated it — of every line it holds,
 and `detect_sections` is the flattened view the `ParsedCv` carries. Phase 3.2B
 reads the first, so there is exactly one answer in the codebase to "where does a
 section start". `export.py` holds the one writer both CV commands use for a
@@ -202,8 +218,9 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v2` and moves independently of
-`PARSER_VERSION`.
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v3` and moves independently of
+`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, which
+changes how some section bodies are cut and therefore which candidates come out.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,
@@ -245,8 +262,8 @@ What the rules refuse to do is the design:
   a portfolio on a guess.
 - **Entries.** Education, experience, project, certification and language
   sections are cut into blocks on the separator the section actually uses —
-  blank lines, else list markers, else one entry per line — and the block is
-  kept as written. One narrower separator comes first, in an `EXPERIENCE`
+  blank lines, else list markers, else the page's own layout, else one entry per
+  line — and the block is kept as written. One narrower separator comes first, in an `EXPERIENCE`
   section only: where the body opens on a line written as three or more
   non-empty parts separated by `|`, and holds at least two such lines, those
   lines are the separator (`EXPERIENCE_PIPE_DELIMITED_BLOCK`) and everything
@@ -258,6 +275,26 @@ What the rules refuse to do is the design:
   fails either precondition is cut exactly as before. No institution, employer,
   role, date, duration or diploma level is derived anywhere: that reading is
   Phase 3.4.
+- **Wrapped entries.** A body with no blank line and no list marker used to
+  become one entry per line, which turns a single entry the layout engine broke
+  across two baselines into two candidates — a human then corrects the first and
+  rejects the second. `candidates/layout.py` reads that break off the page
+  instead (`SECTION_LAYOUT_CONTINUATION_BLOCK`), in `EDUCATION`, `EXPERIENCE`,
+  `PROJECTS` and `CERTIFICATIONS` only. Nothing is compared against a constant:
+  the document is asked what *its own* spacings are, and a line joins the line
+  above it only where all of this holds — the document repeats a tightest
+  baseline step and also shows a step clearly looser than it, the two lines are
+  on one page at one font size and one left edge, their step is that tightest
+  one, and the first line reaches the right-hand boundary its own column
+  describes, so the next line's first token could not have fitted on it. A
+  document whose lines are evenly spaced demonstrates no distinction between
+  "next line" and "next entry", and then nothing is merged anywhere: that is the
+  conservative state, and it is also the state of every `ParsedCv` built from
+  text alone. Failing to merge a wrapped entry is visible in review; merging two
+  real entries silently deletes one, so every threshold leans the first way. The
+  rule reads geometry and, for the boundary, character counts as a stand-in for
+  width — never a word, a keyword or a lexicon: replace every letter of a body
+  line and the answer is identical.
 - **Skills.** Mentions come only from a recognised `SKILLS` section, split on
   the separators the CV used. There is no level of any kind in the model — no
   proficiency, no confidence, no score — so "Azure Data Platform (avancé)" is
