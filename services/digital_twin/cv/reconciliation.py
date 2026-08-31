@@ -103,8 +103,8 @@ from services.digital_twin.facts.repository import (
 #: is re-decided by a bump: a reading the new campaign produces identically is
 #: still the same reading and keeps the human decision already made on it,
 #: while a reading that changed is still a `PROPOSED` fact a human answers.
-PREVIOUS_PARSER_VERSION = "cv-parser-v3"
-PREVIOUS_EXTRACTOR_VERSION = "cv-candidates-v4"
+PREVIOUS_PARSER_VERSION = "cv-parser-v4"
+PREVIOUS_EXTRACTOR_VERSION = "cv-candidates-v5"
 
 __all__ = [
     "ALREADY_REJECTED",

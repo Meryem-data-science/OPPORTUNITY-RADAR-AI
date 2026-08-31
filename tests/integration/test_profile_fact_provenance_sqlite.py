@@ -49,8 +49,8 @@ TEST_ONLY_OTHER_SHA256 = "cd" * 32
 
 OLD_PARSER = "cv-parser-v1"
 OLD_EXTRACTOR = "cv-candidates-v1"
-NEW_PARSER = "cv-parser-v4"
-NEW_EXTRACTOR = "cv-candidates-v5"
+NEW_PARSER = "cv-parser-v5"
+NEW_EXTRACTOR = "cv-candidates-v6"
 
 
 def cv_provenance(**overrides) -> ProvenanceInput:

@@ -134,10 +134,10 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
   `ExtractedLine`, `LineLayout`, `DetectedSection`, `ParserWarning`, `ParsedCv`,
-  and the `PARSER_VERSION` (`cv-parser-v4`) every result carries. `pypdf` is
+  and the `PARSER_VERSION` (`cv-parser-v5`) every result carries. `pypdf` is
   pinned to an exact version in `pyproject.toml` because the extracted text
   depends on it: changing that pin, or any extraction, normalization or
-  segmentation rule, is a change of the rules `cv-parser-v4` names, so it
+  segmentation rule, is a change of the rules `cv-parser-v5` names, so it
   requires deciding whether `PARSER_VERSION` must move with it. Without that,
   two different outputs could claim the same provenance. `cv-parser-v2` became
   `cv-parser-v3` when pages started carrying their layout, and `cv-parser-v3`
@@ -227,7 +227,7 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v5` and moves independently of
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v6` and moves independently of
 `PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, `v4`
 with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, and `v5` when the right-hand
 boundary those two rules test against stopped being a count of characters and
@@ -235,6 +235,19 @@ became a reach measured in the size each line is set at — each of which change
 how some section bodies are cut and therefore which candidates come out.
 `PARSER_VERSION` did not move with `v5`: a `ParsedCv` holds exactly the same
 fields, read exactly the same way, and only the cut downstream of it changed.
+
+Parser v5 adds the exact lexicon headings `professional development` and
+`developpement professionnel` as the structural
+`PROFESSIONAL_DEVELOPMENT` boundary. The section terminates a preceding
+`SKILLS` run, but does not classify arbitrary prose as certification.
+Candidates v6 reads exact `Language(s):` and `Langue(s):` lists after their
+colon, in source order. Inside professional development, a planned-
+certification label is sufficient evidence; a generic preparation label also
+requires every proposed item to carry a word from the closed certification
+lexicon. Separate planned and preparing rule IDs preserve the source meaning
+without claiming either was obtained. Spacing continuation can retain a
+physically wrapped labelled certification; typography continuation is not
+extended to this structural section.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,

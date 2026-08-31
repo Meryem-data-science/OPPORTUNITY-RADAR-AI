@@ -79,6 +79,9 @@ _HEADINGS_BY_TYPE: Mapping[SectionType, tuple[str, ...]] = {
         "language", "languages", "language skills", "spoken languages",
         "langue", "langues", "langues parlees", "competences linguistiques",
     ),
+    SectionType.PROFESSIONAL_DEVELOPMENT: (
+        "professional development", "developpement professionnel",
+    ),
 }
 
 

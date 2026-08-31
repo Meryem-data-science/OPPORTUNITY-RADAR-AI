@@ -69,8 +69,8 @@ TEST_ONLY_SHA256 = "ab" * 32
 
 OLD_PARSER = "cv-parser-v1"
 OLD_EXTRACTOR = "cv-candidates-v1"
-NEW_PARSER = "cv-parser-v4"
-NEW_EXTRACTOR = "cv-candidates-v5"
+NEW_PARSER = "cv-parser-v5"
+NEW_EXTRACTOR = "cv-candidates-v6"
 
 # TEST ONLY CV content. Every line below is invented and describes nobody.
 NAME = "Alex Test-Only"
