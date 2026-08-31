@@ -255,7 +255,7 @@ Expected failures, each reported explicitly with exit code 1:
 | The PDF is encrypted | `EncryptedPdfError` |
 | The PDF has no text layer (a scan) | `EmptyPdfTextError` |
 
-A scanned CV is refused rather than guessed at: `cv-parser-v3` performs no OCR.
+A scanned CV is refused rather than guessed at: `cv-parser-v4` performs no OCR.
 
 What this command does **not** do: it stores no `profile_facts`, writes no row
 in the Digital Twin, creates no validated Master CV, offers no accept, correct
@@ -461,8 +461,8 @@ with each bump:
 
 | Option | Default |
 | --- | --- |
-| `--old-parser-version` | `cv-parser-v2` |
-| `--old-extractor-version` | `cv-candidates-v2` |
+| `--old-parser-version` | `cv-parser-v3` |
+| `--old-extractor-version` | `cv-candidates-v3` |
 
 Reconciling from a campaign older than the defaults — `cv-parser-v1` and
 `cv-candidates-v1`, say — means naming it explicitly; nothing else changes,

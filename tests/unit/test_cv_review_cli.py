@@ -527,8 +527,8 @@ def test_structured_events_carry_counters_and_never_the_cv(
     )
     assert succeeded["context"] == {
         "database_backend": "sqlite",
-        "parser_version": "cv-parser-v3",
-        "extractor_version": "cv-candidates-v3",
+        "parser_version": "cv-parser-v4",
+        "extractor_version": "cv-candidates-v4",
         "candidates": CANDIDATE_COUNT,
         "newly_proposed": CANDIDATE_COUNT,
         "already_imported": 0,

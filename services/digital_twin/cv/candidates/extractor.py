@@ -15,10 +15,15 @@ points back at the parse it was built on.
 
 The physical layout of the document is read the same way: from the pages Phase
 3.2A already carries, once, for the whole document, and before any section is
-cut. What that evidence is and what it refuses to conclude from it lives in
-`layout.py`; a `ParsedCv` carrying no layout — one built from text alone, or one
-read from a PDF whose text state could not be placed — yields evidence that
-proves nothing, and every section is then cut exactly as it was before.
+cut. There are two such readings, and they are kept apart because they rest on
+different evidence and a candidate has to be able to say which one grouped its
+lines: `layout.py` reads what the document's own spacing demonstrates, and
+`typography.py` reads which typeface each of the document's columns is seen to
+open its entries in, for the documents whose spacing cannot tell a wrapped line
+from a new entry. What each refuses to conclude lives in its own module; a
+`ParsedCv` carrying no layout — one built from text alone, or one read from a
+PDF whose text state could not be placed — yields evidence that proves nothing
+either way, and every section is then cut exactly as it was before.
 
 What comes out is a list of unverified readings. Not one of them is a fact
 about the person, none is accepted, corrected or rejected, and none is stored:
@@ -35,6 +40,7 @@ from services.digital_twin.cv.candidates import entries as entry_rules
 from services.digital_twin.cv.candidates import identity as identity_rules
 from services.digital_twin.cv.candidates import layout as layout_rules
 from services.digital_twin.cv.candidates import skills as skill_rules
+from services.digital_twin.cv.candidates import typography as typography_rules
 from services.digital_twin.cv.candidates.models import (
     CANDIDATE_EXTRACTOR_VERSION,
     CandidateType,
@@ -235,6 +241,7 @@ def _add_entries(
     builder: _Builder,
     segments: Sequence[SectionSegment],
     layout_evidence: layout_rules.DocumentLayoutEvidence,
+    style_evidence: typography_rules.DocumentStyleEvidence,
 ) -> None:
     for section_index, segment in enumerate(segments):
         candidate_type = entry_rules.ENTRY_CANDIDATE_TYPES.get(segment.section_type)
@@ -244,6 +251,7 @@ def _add_entries(
             segment.body,
             section_type=segment.section_type,
             layout_evidence=layout_evidence,
+            style_evidence=style_evidence,
         )
         for block in blocks:
             builder.add(
@@ -284,9 +292,12 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
     segments, _ = segment_document(parsed.pages)
     # Read once, from the whole document, and from the very same line stream the
     # segmentation was computed on: what a section's own two or three lines can
-    # show about spacing is nothing, and re-reading it per section would make
-    # the answer depend on where the section boundaries fell.
-    layout_evidence = layout_rules.read_layout_evidence(document_lines(parsed.pages))
+    # show about spacing or about a repeated opening typeface is nothing, and
+    # re-reading either per section would make the answer depend on where the
+    # section boundaries fell.
+    lines = document_lines(parsed.pages)
+    layout_evidence = layout_rules.read_layout_evidence(lines)
+    style_evidence = typography_rules.read_style_evidence(lines)
     builder = _Builder(
         cv_sha256=parsed.content_sha256, parser_version=parsed.parser_version
     )
@@ -294,7 +305,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
 
     _add_identity(builder, segments, warnings)
     _add_contacts(builder, segments, _header_index(segments))
-    _add_entries(builder, segments, layout_evidence)
+    _add_entries(builder, segments, layout_evidence, style_evidence)
     _add_skills(builder, segments)
 
     if not builder.holds_any(_CONTACT_TYPES):
@@ -312,7 +323,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
         warnings.append(
             CandidateWarning(
                 code=CandidateWarningCode.NO_CANDIDATE_EXTRACTED,
-                message="no rule of cv-candidates-v3 produced a candidate",
+                message="no rule of cv-candidates-v4 produced a candidate",
             )
         )
 

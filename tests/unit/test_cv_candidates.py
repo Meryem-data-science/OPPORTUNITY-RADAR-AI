@@ -123,7 +123,7 @@ def test_the_same_parsed_cv_always_yields_the_same_candidates(synthetic_pdf) -> 
 def test_the_result_and_every_candidate_carry_the_extractor_version(extract) -> None:
     result = extract(HEADER, BODY)
 
-    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v3"
+    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v4"
     assert result.extractor_version != result.parser_version
     assert result.candidates
     assert all(

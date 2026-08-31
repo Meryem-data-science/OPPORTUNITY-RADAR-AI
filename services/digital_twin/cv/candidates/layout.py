@@ -108,8 +108,12 @@ __all__ = [
     "X_EPSILON",
     "DocumentLayoutEvidence",
     "PlacedLine",
+    "comparable_gap",
     "continues_previous_line",
     "read_layout_evidence",
+    "reaches_right_boundary",
+    "right_boundary",
+    "same_column",
 ]
 
 
@@ -121,7 +125,7 @@ class PlacedLine:
     layout: LineLayout
     #: Number of characters of the normalized line. It stands in for how far the
     #: line reaches, and it is the only thing this module ever reads off a line's
-    #: text — a count, never a word. See `_reaches_right_boundary`.
+    #: text — a count, never a word. See `reaches_right_boundary`.
     length: int
 
 
@@ -156,7 +160,7 @@ class DocumentLayoutEvidence:
         }
 
 
-def _same_column(left: LineLayout, right: LineLayout) -> bool:
+def same_column(left: LineLayout, right: LineLayout) -> bool:
     """True when two lines start at the same left edge, at the same size."""
     return (
         abs(left.x_start - right.x_start) <= X_EPSILON
@@ -164,7 +168,7 @@ def _same_column(left: LineLayout, right: LineLayout) -> bool:
     )
 
 
-def _comparable_gap(previous: SourceLine, line: SourceLine) -> float | None:
+def comparable_gap(previous: SourceLine, line: SourceLine) -> float | None:
     """Return the baseline step from `previous` down to `line`, or `None`.
 
     A step is comparable only between two lines of the same page that start in
@@ -176,7 +180,7 @@ def _comparable_gap(previous: SourceLine, line: SourceLine) -> float | None:
         return None
     if previous.page_number != line.page_number:
         return None
-    if not _same_column(previous.layout, line.layout):
+    if not same_column(previous.layout, line.layout):
         return None
     gap = previous.layout.y - line.layout.y
     return gap if gap > 0 else None
@@ -195,7 +199,7 @@ def read_layout_evidence(
     """
     gaps: list[float] = []
     for previous, line in zip(lines, lines[1:], strict=False):
-        gap = _comparable_gap(previous, line)
+        gap = comparable_gap(previous, line)
         if gap is not None:
             gaps.append(gap)
     placed = tuple(
@@ -215,7 +219,7 @@ def read_layout_evidence(
     return DocumentLayoutEvidence(tight_gap=tight, placed_lines=placed)
 
 
-def _right_boundary(
+def right_boundary(
     evidence: DocumentLayoutEvidence, layout: LineLayout
 ) -> int | None:
     """Return how far the column of `layout` is seen to reach, or `None`.
@@ -226,7 +230,7 @@ def _right_boundary(
 
     Characters are a stand-in for width, and an imperfect one — a proportional
     font sets a hundred narrow letters in less space than a hundred wide ones —
-    which is why the comparison in `_reaches_right_boundary` is deliberately
+    which is why the comparison in `reaches_right_boundary` is deliberately
     made against the *widest observed* line and why the whole test is only ever
     one of several conditions. Its error direction is the safe one: a column
     whose longest line is unusually narrow-lettered reads as reaching further
@@ -236,7 +240,7 @@ def _right_boundary(
     lengths = [
         placed.length
         for placed in evidence.placed_lines
-        if _same_column(placed.layout, layout)
+        if same_column(placed.layout, layout)
     ]
     if len(lengths) < MIN_MARGIN_EVIDENCE_LINES:
         return None
@@ -255,7 +259,7 @@ def _first_word_length(text: str) -> int:
     return 0
 
 
-def _reaches_right_boundary(
+def reaches_right_boundary(
     evidence: DocumentLayoutEvidence, previous: SourceLine, line: SourceLine
 ) -> bool:
     """True when the first token of `line` could not have fitted on `previous`.
@@ -269,7 +273,7 @@ def _reaches_right_boundary(
     """
     if previous.layout is None:
         return False
-    boundary = _right_boundary(evidence, previous.layout)
+    boundary = right_boundary(evidence, previous.layout)
     if boundary is None:
         return False
     following = _first_word_length(line.text)
@@ -312,11 +316,11 @@ def continues_previous_line(
         return False
     if previous.layout is None or line.layout is None:
         return False
-    gap = _comparable_gap(previous, line)
+    gap = comparable_gap(previous, line)
     if gap is None:
         return False
     if gap > evidence.tight_gap + GAP_EPSILON:
         return False
     if gap > line.layout.font_size * MAX_CONTINUATION_LEADING_RATIO:
         return False
-    return _reaches_right_boundary(evidence, previous, line)
+    return reaches_right_boundary(evidence, previous, line)

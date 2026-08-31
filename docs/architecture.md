@@ -134,15 +134,17 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
   `ExtractedLine`, `LineLayout`, `DetectedSection`, `ParserWarning`, `ParsedCv`,
-  and the `PARSER_VERSION` (`cv-parser-v3`) every result carries. `pypdf` is
+  and the `PARSER_VERSION` (`cv-parser-v4`) every result carries. `pypdf` is
   pinned to an exact version in `pyproject.toml` because the extracted text
   depends on it: changing that pin, or any extraction, normalization or
-  segmentation rule, is a change of the rules `cv-parser-v3` names, so it
+  segmentation rule, is a change of the rules `cv-parser-v4` names, so it
   requires deciding whether `PARSER_VERSION` must move with it. Without that,
   two different outputs could claim the same provenance. `cv-parser-v2` became
-  `cv-parser-v3` when pages started carrying their layout: the text is
-  unchanged, character for character, but the result is observably richer and a
-  stored `cv-parser-v2` parse must not claim to be one of these.
+  `cv-parser-v3` when pages started carrying their layout, and `cv-parser-v3`
+  became `cv-parser-v4` when `LineLayout` started carrying the typographic
+  signature a line opens in: the text is unchanged, character for character, in
+  both steps, but each result is observably richer than the last and a stored
+  parse must never claim to be one of the newer ones.
 - `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
   file, and raises one explicit error per failure mode: missing path, path that
   is not a file, unreadable PDF, encrypted PDF, and a PDF with no extractable
@@ -150,7 +152,14 @@ local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ Pars
   callback, which hands over the text state behind each flushed line — so the
   page comes back both as the string `extract_text()` returns and as one
   `ExtractedLine` per line of it, carrying that line's left edge, baseline and
-  font size in PDF points (`LineLayout`). Nothing is inferred from the geometry
+  font size in PDF points plus the `/BaseFont` name of the font that set its
+  first glyph (`LineLayout`, `start_font_signature`). That signature is copied
+  out verbatim and kept opaque: `pypdf` flushes accumulated text *before* a
+  `Tf` selects a new font, so each run is reported under the font that rendered
+  it, and a line whose typeface changes part-way therefore carries the one it
+  opened in. Nothing here decides that a signature means bold, regular, heading
+  or emphasis, and a font resource stating no `/BaseFont` yields `None` rather
+  than a default. Nothing is inferred from the geometry
   here and nothing is invented: a rotated, skewed or mirrored line has no
   comparable position and gets `layout=None`, and a page whose lines cannot be
   matched to its text one-for-one — the correspondence is *checked*, not assumed
@@ -218,9 +227,10 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v3` and moves independently of
-`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, which
-changes how some section bodies are cut and therefore which candidates come out.
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v4` and moves independently of
+`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK` and
+`v4` with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, each of which changes how
+some section bodies are cut and therefore which candidates come out.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,
@@ -295,6 +305,29 @@ What the rules refuse to do is the design:
   rule reads geometry and, for the boundary, character counts as a stand-in for
   width — never a word, a keyword or a lexicon: replace every letter of a body
   line and the answer is identical.
+- **Wrapped entries a document's spacing cannot show.** Some CVs put so nearly
+  the same baseline step between two entries as inside a wrapped one — a
+  fraction of a point apart — that the rule above correctly refuses to conclude
+  anything, and every line becomes its own entry again. `candidates/typography.py`
+  reads a second physical signal for exactly that case
+  (`SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`), in `EDUCATION` only for now: the
+  typeface a column is seen to *open* its entries in. Which typeface that is, is
+  never assumed — a column demonstrates it by repeating the alternation
+  `A … B … A`, one signature opening the run, another appearing between two of
+  its occurrences — so a document opening in its lighter face is read exactly as
+  correctly as one opening in its heavier face, and neither "bold" nor any other
+  interpretation of a `/BaseFont` name appears anywhere in the code. `A B`,
+  `A A`, `B B` and `A B C` all demonstrate nothing and merge nothing. The
+  typeface is never the only evidence either: a line joins the block above only
+  when that block was itself opened in the column's opening signature, the line
+  is set in a different one, the two are on one page at one size and one left
+  edge on adjacent baselines, and the line above reaches the right-hand boundary
+  its own column describes. A run whose signatures the PDF does not fully state
+  demonstrates nothing, so the whole mechanism is inert on a document that
+  states no typography, exactly as it is on one built from text alone. The two
+  rules are named separately on purpose: a reader of a candidate's provenance
+  must be able to tell whether spacing or typography grouped its lines. The
+  spacing rule is tried first and a body is only ever cut by one of them.
 - **Skills.** Mentions come only from a recognised `SKILLS` section, split on
   the separators the CV used. There is no level of any kind in the model — no
   proficiency, no confidence, no score — so "Azure Data Platform (avancé)" is
