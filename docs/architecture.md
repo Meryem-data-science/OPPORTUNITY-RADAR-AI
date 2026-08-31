@@ -451,7 +451,8 @@ PDF ─ parse_cv_pdf ─ extract_candidates ─ fact_bridge ─ PROPOSED fact
                                                             │
                                               human review ─┴─ ACCEPT / REJECT
                                               (review_cli)     CORRECT / SKIP
-                                                               / QUIT
+                                              fact by fact,    / QUIT
+                                              or by group
 ```
 
 The bridge exists so that neither side has to know about the other. The
@@ -512,6 +513,29 @@ profile and never creates one, and it offers exactly five answers. Any other
 input prints a notice and asks again rather than falling through to a default.
 Quitting is safe and resuming is expected: undecided facts stay `PROPOSED`,
 decided ones are never offered again, and a second run re-imports nothing.
+
+`--grouped` is a second shape of that same review, and only a shape:
+`services/digital_twin/cv/grouped_review.py` says which group a fact type is
+shown in and what a typed command means, and decides nothing; `review_cli.py`
+remains the one place a decision is taken.
+
+```text
+still-PROPOSED facts ─ build_review_groups ─ printed group ─ human ─ a / a 1,3-5
+   (3.3B import)         (canonical type)     (values +              r 2 / c 3
+                                               provenance)           s / q
+```
+
+A group is read off the canonical fact type alone — no line of the module looks
+inside a value, which would make grouping a second, unreviewed classifier — and
+a type this version does not know lands in `OTHER` rather than disappearing. The
+scope of `a` is one printed group: the session keeps the ids of the facts the
+last printed group offered and refuses to decide anything outside them, and any
+decision that changes a group reprints it before the next command, so a stale
+index cannot move a fact twice. A selection naming an unknown or already-decided
+index refuses the whole command, a malformed command decides nothing, and there
+is no command whose scope is the CV. A group decided at once is decided in one
+transaction — `decide_profile_facts` — so a batch either lands whole or not at
+all.
 
 Phase 3.3B reuses the `0007` schema and adds no migration and no table. It
 generates no Master CV PDF, no cover letter, no application and no adapted CV,

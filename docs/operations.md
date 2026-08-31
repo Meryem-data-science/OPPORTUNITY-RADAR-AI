@@ -355,12 +355,19 @@ never writes one; no matching of any kind exists.
 ## CV review (Phase 3.3B)
 
 Import one local CV PDF as reviewable proposals, then decide about each of them
-by hand:
+by hand. There are two shapes of the same review — fact by fact, which is the
+default and has not changed, and group by group, which is the same decisions
+asked about a printed group at a time:
 
 ```bash
 export DATABASE_BACKEND=sqlite
 export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+
+# one fact, one question, one keystroke — the original review
 python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
+
+# the same review, one printed group at a time
+python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf --grouped
 ```
 
 The command runs the whole path in one go — parse the PDF, extract the
@@ -403,12 +410,86 @@ resumes where you stopped, and never offers a fact you already accepted,
 rejected or corrected. A run interrupted partway leaves every candidate it did
 import complete, with its provenance.
 
+### Reviewing by group (`--grouped`)
+
+A real CV yields dozens of proposals, most of them skills, and answering each
+one separately means typing `a` forty times at a list you took in at a glance.
+`--grouped` changes how many facts one answer covers, and **nothing else**: the
+same facts are asked about, the same decisions are available, and nothing is
+accepted that you were not shown.
+
+The review prints one group in full — its facts numbered, each with its value,
+its normalized form where there is one, and its provenance — and then waits:
+
+```text
+GROUP 1/7 — IDENTITY / CONTACT
+6 of 6 facts still PROPOSED
+
+[1] NAME (fact_id=1)
+    value: Example Person
+    pages=1 section=UNCLASSIFIED#0 rule=HEADER_FIRST_LINE_NAME_SHAPE
+
+[2] PROFESSIONAL_TITLE (fact_id=2)
+    ...
+```
+
+| Command | Effect |
+| --- | --- |
+| `a` | Accept the facts of **this printed group** that are still `PROPOSED`. Nothing else, ever. |
+| `a 1,3-5` | Accept only these facts of this group. Ranges are inclusive. |
+| `r 2,4` | Reject only these facts of this group. Rejecting requires indices; there is no bare `r`. |
+| `c 3` | Correct exactly one fact, as in the default review. Corrections are never batched. |
+| `s` | Skip: every fact still `PROPOSED` in this group stays `PROPOSED`, and the next group is shown. |
+| `q` | Quit. Everything still `PROPOSED` stays `PROPOSED`. |
+| `?` | Print the commands. |
+
+**`a` is not an auto-accept.** It accepts the facts of the group that is on
+screen, all of which were printed before you typed it, and it can reach nothing
+else: not a group that was not displayed, not a fact of another group, and not a
+fact somebody already decided. There is no command that accepts the whole CV, no
+yes-to-all, no accept-by-type, no score, no confidence and no threshold; the
+largest scope any single command has is one displayed group. Accepting more than
+twenty facts at once asks once more — `Accept all 42 facts still proposed in the
+group above? [y/N]:` — and only an exact `y` confirms; anything else, an empty
+line and a closed stdin included, decides nothing.
+
+**A partial decision keeps you in the group.** After `r 17,21` the group is
+printed again with those two marked as decided, so you can see what happened
+before typing `a` for the rest. Refusing two skills out of forty-three and
+accepting the other forty-one is two commands and one confirmation.
+
+The groups are walked in a fixed order — identity/contact, education,
+experience, projects, skills, certifications, languages, then anything else —
+and inside a group the facts keep the document order the extraction produced.
+A group is built from the canonical fact type alone: no value is ever read to
+decide where a fact is shown, and a fact type this version does not know lands
+in `OTHER` rather than disappearing.
+
+Commands are matched **exactly**, like the five answers of the default review:
+one action, optionally one space and one selection, and nothing else. `A`,
+`a ` and `a  1` are not commands; `a banana`, `a 1--4`, `a 3-1`, `a 01` and
+`c 1,2` are not commands either. An index that is out of range, or that names a
+fact already decided, refuses the whole command rather than the part of it that
+happened to be valid. Every refusal prints a notice and asks again, and **no
+input error ever ends in an acceptance**.
+
+A batch is atomic. `a` on a group of forty-two either moves all forty-two or
+none of them: they are decided in one transaction, so an interruption partway
+cannot leave you unable to tell what you actually answered.
+
+The grouped run adds three counters to the closing summary — `groups_shown`,
+`groups_completed`, `batch_actions` — next to the ones the default run prints.
+They are counters like the others: no group carries a value into the summary or
+the log.
+
+
 **This is the one command in the project that prints CV content**, because a
 person cannot decide about a value they are not shown. That exception is bounded
 to the review prompt itself. The closing summary is counters only —
 `candidates`, `newly_proposed`, `already_imported`, `accepted_this_run`,
 `rejected_this_run`, `corrected_this_run`, `skipped_this_run`,
-`remaining_proposed`, `quit_requested` — the structured log carries counters,
+`remaining_proposed`, `quit_requested`, plus `groups_shown`, `groups_completed`
+and `batch_actions` on a `--grouped` run — the structured log carries counters,
 versions, canonical types and ids and never a value, the CV path is never echoed
 back, not even in an error message, and the command writes no file at all. Keep
 your real CV out of the repository.
@@ -442,7 +523,7 @@ python -m services.digital_twin.cv.reconciliation_cli plan /path/to/cv.pdf
 # 2. attach the new evidence, propose what changed
 python -m services.digital_twin.cv.reconciliation_cli prepare /path/to/cv.pdf
 
-# 3. answer the proposals by hand
+# 3. answer the proposals by hand (add --grouped to answer them by group)
 python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
 
 # 4. retire the old readings the confirmed new ones replaced
