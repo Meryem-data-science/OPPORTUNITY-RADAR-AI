@@ -15,6 +15,7 @@ therefore statements about the actual rules over the actual schema, not about a
 stub agreeing with itself.
 """
 
+import ast
 import inspect
 import re
 import sqlite3
@@ -27,6 +28,9 @@ from services.collector.database.migrations import (
     apply_migrations,
     discover_migrations,
     split_sql_statements,
+)
+from services.collector.extractors.opportunity_constraints.requirements.repository import (
+    read_opportunity_requirements,
 )
 from services.collector.extractors.opportunity_constraints.requirements.service import (
     synchronize_opportunity_requirements,
@@ -60,12 +64,16 @@ from services.digital_twin.structured_profile.repository import (
     synchronize_structured_profile_entries,
 )
 from services.eligibility.audit import audit_eligibility
+from services.eligibility.fingerprint import canonical_eligibility_payload
 from services.eligibility.inputs import load_opportunity_input, load_profile_input
 from services.eligibility.models import (
     ELIGIBILITY_ENGINE_VERSION,
     ConventionCapability,
     Dimension,
+    EligibilityInput,
     GlobalStatus,
+    OpportunityEligibilityInput,
+    ProfileEligibilityInput,
     RuleStatus,
     SponsorshipNeed,
 )
@@ -963,3 +971,170 @@ def test_the_loader_maps_a_written_language_onto_the_shared_registry(migrated, t
 def test_a_posting_phase_3_5_has_not_read_loads_as_nothing(migrated):
     opportunity_id = insert_opportunity(migrated, description=BLOCKING_DESCRIPTION)
     assert load_opportunity_input(migrated, opportunity_id) is None
+
+
+# --------------------------------------------------------------------------
+# The seam between Phase 3.5 and Phase 3.6
+# --------------------------------------------------------------------------
+
+
+def test_the_engine_reads_no_raw_posting_text_anywhere():
+    """Phase 3.6 decides from Phase 3.5's structured output, never from prose.
+
+    The whole point of Phase 3.5 was to turn an advertisement into requirements
+    once, under rules that can be reviewed and versioned. A second reading of
+    the same prose here — even a small one, even "just to catch what 3.5
+    missed" — would be a second extractor nobody reviewed, disagreeing with the
+    first, in the one phase that can reject somebody.
+
+    So the SQL surface of this package is checked directly. It may name its own
+    two tables; it may ask `opportunities` for an id and `users` / `profiles`
+    whether a row exists; everything else it needs comes through the Phase 3.4
+    and Phase 3.5 repository functions, which own those shapes.
+    """
+    owned = set(ELIGIBILITY_TABLES)
+    readable = owned | {
+        "opportunities",
+        "opportunity_requirement_extraction_state",
+        "users",
+        "profiles",
+        "sqlite_master",
+    }
+    raw_text_columns = ("description", "canonical_title", "organization", "source_url")
+
+    inspected = 0
+    for path in sorted(Path("services/eligibility").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # Real string constants, via the parser rather than a regex: prose
+        # explaining the SQL is not SQL, and a pattern loose enough to catch a
+        # query is loose enough to catch a sentence containing the word "from".
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            statement = " ".join(node.value.split())
+            if not re.search(r"\b(SELECT|INSERT|UPDATE|DELETE)\b", statement):
+                continue
+            inspected += 1
+            for column in raw_text_columns:
+                assert column not in statement, (path, column, statement)
+            for table in re.findall(
+                r"\b(?:FROM|JOIN|INTO|UPDATE)\s+([a-z_]+)", statement
+            ):
+                assert table in readable, (path, table, statement)
+    assert inspected, "no SQL was inspected; the check would pass vacuously"
+
+
+def test_the_digest_holds_structured_requirements_and_no_prose():
+    """A description is not in the Phase 3.6 digest, and neither is 3.5's own
+    digest of it.
+
+    Both would be recomputation with no meaning behind it: 3.5's
+    `source_fingerprint` moves whenever a single character of an advertisement
+    changes, so carrying it here would rewrite a verdict because somebody fixed
+    a typo. What this digest holds is what the rules read — the requirements
+    Phase 3.5 extracted — plus the versions of the rules that extracted them.
+    """
+    payload = canonical_eligibility_payload(
+        EligibilityInput(
+            OpportunityEligibilityInput(
+                1, "opportunity-constraints-v3", "opportunity-requirements-v3"
+            ),
+            ProfileEligibilityInput(1),
+        )
+    )
+    assert set(payload["opportunity"]) == {
+        "constraints_extractor_version",
+        "requirements_extractor_version",
+        "education",
+        "enrollment_required",
+        "experience",
+        "languages",
+        "skills",
+        "ambiguities",
+        "visa_sponsorship",
+        "work_authorization",
+        "convention",
+    }
+    rendered = repr(payload)
+    for absent in ("description", "source_fingerprint", "title", "prose"):
+        assert absent not in rendered
+
+
+def test_a_reworded_posting_whose_requirements_are_identical_recomputes_nothing(
+    migrated, twin
+):
+    """The precise answer to "why did a description change move a fingerprint?".
+
+    It does not, directly. The chain is:
+
+        description edited
+          -> Phase 3.5's own `source_fingerprint` moves, so 3.5 re-extracts
+          -> the *structured requirements* change, or they do not
+          -> only if they changed does the Phase 3.6 digest move
+
+    Here the wording changes and the extracted requirements do not, so the
+    verdict is left exactly as it was — no delete, no insert, no timestamp
+    moved. A rewritten paragraph, a fixed typo or a new company blurb costs
+    nothing.
+    """
+    opportunity_id = insert_opportunity(
+        migrated, description=LANGUAGE_ONLY_DESCRIPTION
+    )
+    read_phases_3_5(migrated)
+    project_profile(migrated, twin.profile.id)
+    synchronize_eligibility(migrated, twin.user.id, twin.profile.id)
+    before = stored_eligibility_signature(migrated, twin.user.id, opportunity_id)
+    requirements_before = read_opportunity_requirements(migrated, opportunity_id)
+
+    reworded = (
+        "TEST ONLY posting. We are a friendly team in a bright office, and we "
+        "care a great deal about the people who join us."
+        "<h3>Requirements</h3><ul>"
+        "<li>English C1 required</li>"
+        "</ul>"
+    )
+    migrated.execute(
+        "UPDATE opportunities SET description = ? WHERE id = ?",
+        (reworded, opportunity_id),
+    )
+    migrated.commit()
+    read_phases_3_5(migrated)
+
+    # Phase 3.5 really did re-read it, and really did land on the same demands.
+    assert (
+        read_opportunity_requirements(migrated, opportunity_id).languages
+        == requirements_before.languages
+    )
+    second = synchronize_eligibility(migrated, twin.user.id, twin.profile.id)
+    assert second.replaced == 0
+    assert second.unchanged == 1
+    assert second.changed is False
+    assert stored_eligibility_signature(migrated, twin.user.id, opportunity_id) == before
+
+
+def test_a_reworded_posting_whose_requirements_changed_does_recompute(
+    migrated, twin
+):
+    """The other half: when the demand really moved, the verdict is redecided."""
+    opportunity_id = insert_opportunity(
+        migrated, description=LANGUAGE_ONLY_DESCRIPTION
+    )
+    read_phases_3_5(migrated)
+    project_profile(migrated, twin.profile.id)
+    synchronize_eligibility(migrated, twin.user.id, twin.profile.id)
+    before = stored_eligibility_signature(migrated, twin.user.id, opportunity_id)
+
+    migrated.execute(
+        "UPDATE opportunities SET description = ? WHERE id = ?",
+        (
+            "TEST ONLY posting.<h3>Requirements</h3><ul>"
+            "<li>English B1 required</li></ul>",
+            opportunity_id,
+        ),
+    )
+    migrated.commit()
+    read_phases_3_5(migrated)
+
+    second = synchronize_eligibility(migrated, twin.user.id, twin.profile.id)
+    assert second.replaced == 1
+    assert stored_eligibility_signature(migrated, twin.user.id, opportunity_id) != before
