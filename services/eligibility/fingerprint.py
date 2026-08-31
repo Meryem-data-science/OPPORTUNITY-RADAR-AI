@@ -49,8 +49,11 @@ from typing import Any
 
 from services.eligibility.models import (
     EligibilityInput,
+    ExperienceRequirementInput,
+    LanguageRequirementInput,
     OpportunityEligibilityInput,
     ProfileEligibilityInput,
+    ProfileLanguageInput,
 )
 
 __all__ = [
@@ -65,6 +68,42 @@ def canonical_json(payload: Any) -> str:
     return json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     )
+
+
+def _optional_int_sort_key(value: int | None) -> tuple[bool, int]:
+    """Order a nullable integer without replacing its serialized value."""
+    return (value is not None, 0 if value is None else value)
+
+
+def _optional_str_sort_key(value: str | None) -> tuple[bool, str]:
+    """Order a nullable string without replacing its serialized value."""
+    return (value is not None, "" if value is None else value)
+
+
+def _experience_sort_key(
+    item: ExperienceRequirementInput,
+) -> tuple[tuple[bool, int], tuple[bool, int], tuple[bool, str]]:
+    return (
+        _optional_int_sort_key(item.min_months),
+        _optional_int_sort_key(item.max_months),
+        _optional_str_sort_key(None if item.kind is None else item.kind.value),
+    )
+
+
+def _opportunity_language_sort_key(
+    item: LanguageRequirementInput,
+) -> tuple[str, str, tuple[bool, str]]:
+    return (
+        item.language_key,
+        item.kind.value,
+        _optional_str_sort_key(item.proficiency_text),
+    )
+
+
+def _profile_language_sort_key(
+    item: ProfileLanguageInput,
+) -> tuple[str, tuple[bool, str]]:
+    return (item.language_key, _optional_str_sort_key(item.proficiency_text))
 
 
 def _opportunity_payload(
@@ -87,18 +126,20 @@ def _opportunity_payload(
             [item.level, item.mode] for item in opportunity.education
         ),
         "enrollment_required": opportunity.enrollment_required,
-        "experience": sorted(
+        "experience": [
             [
                 item.min_months,
                 item.max_months,
                 None if item.kind is None else item.kind.value,
             ]
-            for item in opportunity.experience
-        ),
-        "languages": sorted(
+            for item in sorted(opportunity.experience, key=_experience_sort_key)
+        ],
+        "languages": [
             [item.language_key, item.kind.value, item.proficiency_text]
-            for item in opportunity.languages
-        ),
+            for item in sorted(
+                opportunity.languages, key=_opportunity_language_sort_key
+            )
+        ],
         "skills": sorted(
             [item.canonical_key, item.kind.value] for item in opportunity.skills
         ),
@@ -128,9 +169,10 @@ def _profile_payload(profile: ProfileEligibilityInput) -> dict[str, Any]:
         "education_levels": sorted(profile.education_levels),
         "currently_enrolled": profile.currently_enrolled,
         "comparable_experience_months": profile.comparable_experience_months,
-        "languages": sorted(
-            [item.language_key, item.proficiency_text] for item in profile.languages
-        ),
+        "languages": [
+            [item.language_key, item.proficiency_text]
+            for item in sorted(profile.languages, key=_profile_language_sort_key)
+        ],
         "skills": sorted(profile.skills),
         "sponsorship_need": profile.sponsorship_need.value,
         "convention_capability": profile.convention_capability.value,

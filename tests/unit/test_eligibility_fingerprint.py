@@ -108,6 +108,76 @@ def test_reordering_equivalent_collections_gives_the_same_digest():
     assert digest(reordered, shuffled) == digest()
 
 
+def test_mixed_bounded_and_unbounded_experience_is_canonicalized():
+    """Nullable bounds and kinds remain JSON values, but never compare directly."""
+    mixed = (
+        ExperienceRequirementInput(24, 48, RequirementKind.PREFERRED),
+        ExperienceRequirementInput(12, None, None),
+        ExperienceRequirementInput(None, 24, RequirementKind.REQUIRED),
+    )
+
+    payload = canonical_eligibility_payload(
+        EligibilityInput(offer(experience=mixed), person())
+    )
+
+    assert payload["opportunity"]["experience"] == [
+        [None, 24, "REQUIRED"],
+        [12, None, None],
+        [24, 48, "PREFERRED"],
+    ]
+    assert len(digest(offer(experience=mixed))) == 64
+
+
+def test_reordering_mixed_experience_preserves_payload_and_fingerprint():
+    mixed = (
+        ExperienceRequirementInput(None, 24, RequirementKind.REQUIRED),
+        ExperienceRequirementInput(12, None, None),
+        ExperienceRequirementInput(24, 48, RequirementKind.PREFERRED),
+    )
+    reversed_mixed = tuple(reversed(mixed))
+    first = EligibilityInput(offer(experience=mixed), person())
+    second = EligibilityInput(offer(experience=reversed_mixed), person())
+
+    assert canonical_eligibility_payload(first) == canonical_eligibility_payload(second)
+    assert eligibility_fingerprint(first) == eligibility_fingerprint(second)
+
+
+def test_nullable_opportunity_language_levels_sort_deterministically():
+    languages = (
+        LanguageRequirementInput("english", RequirementKind.REQUIRED, "B2"),
+        LanguageRequirementInput("english", RequirementKind.REQUIRED, None),
+    )
+    reversed_languages = tuple(reversed(languages))
+
+    first = EligibilityInput(offer(languages=languages), person())
+    second = EligibilityInput(offer(languages=reversed_languages), person())
+
+    assert canonical_eligibility_payload(first)["opportunity"]["languages"] == [
+        ["english", "REQUIRED", None],
+        ["english", "REQUIRED", "B2"],
+    ]
+    assert canonical_eligibility_payload(first) == canonical_eligibility_payload(second)
+    assert eligibility_fingerprint(first) == eligibility_fingerprint(second)
+
+
+def test_nullable_profile_language_levels_sort_deterministically():
+    languages = (
+        ProfileLanguageInput("english", "C1"),
+        ProfileLanguageInput("english", None),
+    )
+    reversed_languages = tuple(reversed(languages))
+
+    first = EligibilityInput(offer(), person(languages=languages))
+    second = EligibilityInput(offer(), person(languages=reversed_languages))
+
+    assert canonical_eligibility_payload(first)["profile"]["languages"] == [
+        ["english", None],
+        ["english", "C1"],
+    ]
+    assert canonical_eligibility_payload(first) == canonical_eligibility_payload(second)
+    assert eligibility_fingerprint(first) == eligibility_fingerprint(second)
+
+
 def test_a_new_engine_version_changes_the_digest():
     """A change of rules must recompute every stored verdict."""
     assert digest(engine_version="eligibility-rules-v2") != digest()
