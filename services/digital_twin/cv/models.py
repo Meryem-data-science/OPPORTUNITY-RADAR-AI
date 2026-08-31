@@ -16,7 +16,7 @@ from enum import StrEnum
 #: The text layer is read by `pypdf`, so its pinned version in `pyproject.toml`
 #: is part of those rules: changing that pin requires deciding whether the
 #: extracted text can differ and therefore whether this version must move too.
-PARSER_VERSION = "cv-parser-v3"
+PARSER_VERSION = "cv-parser-v4"
 
 
 class SectionType(StrEnum):
@@ -80,9 +80,27 @@ class LineLayout:
     y: float
     #: Effective font size of the line's first glyph, in PDF points.
     font_size: float
+    #: The PDF's own `/BaseFont` name for the font the line *starts* in — the
+    #: font resource that rendered its first glyph — kept verbatim, as an
+    #: opaque token. It is read, never interpreted: this package compares two
+    #: signatures for equality and does nothing else with them. In particular
+    #: nothing here decides that a signature means bold, italic, regular,
+    #: serif, heading or emphasis, because a `/BaseFont` name is a font
+    #: program's name and not a statement about how a document uses it.
+    #:
+    #: A line whose typeface changes part-way carries the signature it opened
+    #: with, not the one it ended on. `None` whenever the PDF did not state a
+    #: `/BaseFont` for that font resource, which reads as "the document did not
+    #: say" and never as a default typeface.
+    start_font_signature: str | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {"x_start": self.x_start, "y": self.y, "font_size": self.font_size}
+        return {
+            "x_start": self.x_start,
+            "y": self.y,
+            "font_size": self.font_size,
+            "start_font_signature": self.start_font_signature,
+        }
 
 
 @dataclass(frozen=True)

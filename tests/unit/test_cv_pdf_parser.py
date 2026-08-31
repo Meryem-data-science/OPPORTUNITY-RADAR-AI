@@ -58,7 +58,7 @@ def test_a_two_page_cv_is_extracted_segmented_and_hashed(synthetic_pdf) -> None:
 
     result = parse_cv_bytes(content)
 
-    assert result.parser_version == PARSER_VERSION == "cv-parser-v3"
+    assert result.parser_version == PARSER_VERSION == "cv-parser-v4"
     assert result.content_sha256 == hashlib.sha256(content).hexdigest()
     assert result.page_count == 2
     assert [page.page_number for page in result.pages] == [1, 2]
@@ -291,4 +291,6 @@ def test_the_detailed_view_carries_the_layout_next_to_the_text(
         "x_start": 72.0,
         "y": 760.0,
         "font_size": 12.0,
+        # The `/BaseFont` the builder declares for `F1`, copied out verbatim.
+        "start_font_signature": "/Helvetica",
     }
