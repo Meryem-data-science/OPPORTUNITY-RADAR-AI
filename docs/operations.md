@@ -255,7 +255,7 @@ Expected failures, each reported explicitly with exit code 1:
 | The PDF is encrypted | `EncryptedPdfError` |
 | The PDF has no text layer (a scan) | `EmptyPdfTextError` |
 
-A scanned CV is refused rather than guessed at: `cv-parser-v4` performs no OCR.
+A scanned CV is refused rather than guessed at: `cv-parser-v5` performs no OCR.
 
 What this command does **not** do: it stores no `profile_facts`, writes no row
 in the Digital Twin, creates no validated Master CV, offers no accept, correct
@@ -542,8 +542,8 @@ with each bump:
 
 | Option | Default |
 | --- | --- |
-| `--old-parser-version` | `cv-parser-v3` |
-| `--old-extractor-version` | `cv-candidates-v3` |
+| `--old-parser-version` | `cv-parser-v4` |
+| `--old-extractor-version` | `cv-candidates-v5` |
 
 Reconciling from a campaign older than the defaults — `cv-parser-v1` and
 `cv-candidates-v1`, say — means naming it explicitly; nothing else changes,
@@ -551,6 +551,13 @@ since how two campaigns are compared never depends on which versions they are.
 Both are technical version strings and never CV content. The command also
 refuses to run if the checkout does not itself produce a *newer* campaign than
 the one named, so a stale reading can never retire a good fact.
+
+For parser-v5/candidates-v6, equality remains exact: profile, CV digest,
+canonical fact type, and raw value must match byte for byte. An unchanged
+accepted reading keeps its human decision. A former `SKILL` now read as
+`LANGUAGE` or `CERTIFICATION` is changed, becomes a new `PROPOSED` fact needing
+human review, and never inherits the old decision; the wrong-type historical
+fact remains auditable rather than being deleted.
 
 **What each command does.** `plan` writes nothing at all. `prepare` attaches the
 current campaign's provenance to every reading that is unchanged — same fact

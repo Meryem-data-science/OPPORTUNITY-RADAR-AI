@@ -781,8 +781,8 @@ def test_the_same_document_always_yields_the_same_cut() -> None:
     second = extract_candidates(parse_cv_bytes(document))
 
     assert first == second
-    assert first.parser_version == PARSER_VERSION == "cv-parser-v4"
-    assert first.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v5"
+    assert first.parser_version == PARSER_VERSION == "cv-parser-v5"
+    assert first.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v6"
 
 
 def test_a_list_marker_still_wins_over_the_typography() -> None:

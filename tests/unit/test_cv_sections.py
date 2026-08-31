@@ -267,3 +267,8 @@ def test_the_flattened_sections_are_exactly_what_the_segments_say() -> None:
 
     assert sections == tuple(segment.as_section() for segment in segments)
     assert section_warnings == segment_warnings
+
+
+def test_professional_development_is_an_exact_structural_heading() -> None:
+    assert classify_heading("PROFESSIONAL DEVELOPMENT") is SectionType.PROFESSIONAL_DEVELOPMENT
+    assert classify_heading("Professional development programme") is None

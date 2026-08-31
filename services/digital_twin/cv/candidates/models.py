@@ -29,7 +29,7 @@ from services.digital_twin.cv.models import SectionType
 #: candidate can always be compared against the rules that produced it. It is
 #: independent of `PARSER_VERSION`: the two versions move for different
 #: reasons, and a candidate carries both.
-CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v5"
+CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v6"
 
 
 class CandidateType(StrEnum):
@@ -122,6 +122,14 @@ class ExtractionRule(StrEnum):
     #: nothing else: no employer, role, date, place or duration is read from
     #: the parts, here or anywhere downstream of this rule.
     EXPERIENCE_PIPE_DELIMITED_BLOCK = "EXPERIENCE_PIPE_DELIMITED_BLOCK"
+
+    #: An exact language label and colon introduce one list item.
+    LANGUAGES_LABELLED_LIST_ITEM = "LANGUAGES_LABELLED_LIST_ITEM"
+    #: An explicit planned-certification label and colon introduce one item.
+    CERTIFICATION_PLANNED_LIST_ITEM = "CERTIFICATION_PLANNED_LIST_ITEM"
+    #: A preparation label introduces an item which independently carries a
+    #: closed certification word. The rule does not claim it was obtained.
+    CERTIFICATION_PREPARING_LIST_ITEM = "CERTIFICATION_PREPARING_LIST_ITEM"
 
     #: A "label: a, b, c" line; the label is dropped, the list is split.
     SKILLS_LABELLED_LIST_LINE = "SKILLS_LABELLED_LIST_LINE"

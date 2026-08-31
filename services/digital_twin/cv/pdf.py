@@ -78,7 +78,7 @@ class EmptyPdfTextError(PdfExtractionError):
     """Raised when the PDF is readable but carries no extractable text.
 
     This is what a scanned CV looks like from here. OCR is out of scope for
-    `cv-parser-v4`, so the parser reports the absence instead of inventing one.
+    `cv-parser-v5`, so the parser reports the absence instead of inventing one.
     """
 
 
@@ -343,6 +343,6 @@ def extract_pages(content: bytes) -> tuple[ExtractedPage, ...]:
     if all(page.is_empty for page in pages):
         raise EmptyPdfTextError(
             "the PDF carries no extractable text; a scanned CV needs OCR, "
-            "which cv-parser-v4 does not perform"
+            "which cv-parser-v5 does not perform"
         )
     return tuple(pages)

@@ -134,6 +134,7 @@ LAYOUT_CONTINUATION_SECTION_TYPES = frozenset(
         SectionType.EXPERIENCE,
         SectionType.PROJECTS,
         SectionType.CERTIFICATIONS,
+        SectionType.PROFESSIONAL_DEVELOPMENT,
     }
 )
 

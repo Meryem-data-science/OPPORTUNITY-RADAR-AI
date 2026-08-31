@@ -58,7 +58,7 @@ def test_a_two_page_cv_is_extracted_segmented_and_hashed(synthetic_pdf) -> None:
 
     result = parse_cv_bytes(content)
 
-    assert result.parser_version == PARSER_VERSION == "cv-parser-v4"
+    assert result.parser_version == PARSER_VERSION == "cv-parser-v5"
     assert result.content_sha256 == hashlib.sha256(content).hexdigest()
     assert result.page_count == 2
     assert [page.page_number for page in result.pages] == [1, 2]
