@@ -16,7 +16,7 @@ from enum import StrEnum
 #: The text layer is read by `pypdf`, so its pinned version in `pyproject.toml`
 #: is part of those rules: changing that pin requires deciding whether the
 #: extracted text can differ and therefore whether this version must move too.
-PARSER_VERSION = "cv-parser-v2"
+PARSER_VERSION = "cv-parser-v3"
 
 
 class SectionType(StrEnum):
@@ -55,16 +55,88 @@ class WarningCode(StrEnum):
 
 
 @dataclass(frozen=True)
+class LineLayout:
+    """Where one extracted line physically sits on its page.
+
+    Every number is read straight off the PDF's own text state, in PDF points,
+    with the page's coordinate system as its frame: `x_start` and `y` are the
+    device-space position of the line's first glyph origin, and `font_size` is
+    the size that glyph was set at. Nothing is derived, estimated or completed —
+    in particular there is no `x_end`, because the width of a line cannot be
+    read off the text layer without the font's glyph metrics, and a made-up
+    width would be exactly the invented value this package refuses to produce.
+
+    A line only carries this when the PDF states it unambiguously: the text is
+    upright and unrotated, and the transformation is a plain translation and
+    scale. Anything else leaves `ExtractedLine.layout` at `None`, which reads as
+    "the document did not say", never as a default position.
+    """
+
+    #: Device-space x of the line's first glyph origin, in PDF points. Larger
+    #: means further right. Comparable between lines of the same page only.
+    x_start: float
+    #: Device-space y of the line's baseline, in PDF points. Larger means
+    #: higher on the page, so a following line normally has a smaller `y`.
+    y: float
+    #: Effective font size of the line's first glyph, in PDF points.
+    font_size: float
+
+    def as_dict(self) -> dict[str, object]:
+        return {"x_start": self.x_start, "y": self.y, "font_size": self.font_size}
+
+
+@dataclass(frozen=True)
+class ExtractedLine:
+    """One line of a page's normalized text, with its layout when the PDF said it.
+
+    `text` is the same string as the matching line of `ExtractedPage.text`; the
+    page number is the one the enclosing `ExtractedPage` carries, and is
+    deliberately not repeated here, so the two can never disagree.
+    """
+
+    text: str
+    layout: LineLayout | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "text": self.text,
+            "layout": None if self.layout is None else self.layout.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
 class ExtractedPage:
-    """One page of the PDF, after conservative text normalization."""
+    """One page of the PDF, after conservative text normalization.
+
+    `text` is the whole page as a single string and remains the page's primary
+    representation: it is what the heading lexicon, the sections and every
+    caller written before layout facts existed read. `lines` is the same text
+    split on its line breaks: one entry per line of `text`, in that order,
+    each carrying where that line physically sat when the PDF stated it. The
+    two are consistent by construction — every entry's `text` is the matching
+    line of the page's `text`, and the two hold the same number of lines — and
+    `lines` is left empty rather than guessed at when that correspondence
+    cannot be established, so a caller may always fall back to `text` alone.
+    """
 
     #: 1-based, in document order.
     page_number: int
     text: str
+    #: Empty when the page carries no text, and equally when the layout could
+    #: not be read: absence here means "no structural evidence", never "no
+    #: line".
+    lines: tuple[ExtractedLine, ...] = ()
 
     @property
     def is_empty(self) -> bool:
         return not self.text
+
+    @property
+    def has_layout(self) -> bool:
+        """True when every line of this page carries its layout facts."""
+        return bool(self.lines) and all(
+            line.layout is not None for line in self.lines if line.text
+        )
 
 
 @dataclass(frozen=True)
@@ -155,6 +227,9 @@ class ParsedCv:
             "empty_page_numbers": [
                 page.page_number for page in self.pages if page.is_empty
             ],
+            "layout_page_numbers": [
+                page.page_number for page in self.pages if page.has_layout
+            ],
             "section_types": [
                 section_type.value for section_type in self.section_types
             ],
@@ -168,7 +243,12 @@ class ParsedCv:
         """
         detailed = self.summary()
         detailed["pages"] = [
-            {"page_number": page.page_number, "text": page.text} for page in self.pages
+            {
+                "page_number": page.page_number,
+                "text": page.text,
+                "lines": [line.as_dict() for line in page.lines],
+            }
+            for page in self.pages
         ]
         detailed["sections"] = [section.as_dict() for section in self.sections]
         return detailed

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from services.digital_twin.cv.models import (
     DetectedSection,
     ExtractedPage,
+    LineLayout,
     ParserWarning,
     SectionType,
     WarningCode,
@@ -143,20 +144,44 @@ def classify_heading(line: str) -> SectionType | None:
 
 @dataclass(frozen=True)
 class SourceLine:
-    """One normalized line together with the page it was extracted from."""
+    """One normalized line, the page it came from, and where it sat on it.
+
+    `layout` is `None` whenever the PDF did not state the position
+    unambiguously, and equally whenever the line was not read from a PDF at all
+    — a caller building a page from text alone gets `None`, which reads as "no
+    structural evidence" and never as a default position. Nothing in this module
+    looks at it: it is carried here so that a rule needing the document's
+    physical layout reads it from the same line stream as everything else.
+    """
 
     text: str
     page_number: int
+    layout: LineLayout | None = None
 
 
 def document_lines(pages: Iterable[ExtractedPage]) -> tuple[SourceLine, ...]:
-    """Flatten pages into one line stream that remembers its provenance."""
+    """Flatten pages into one line stream that remembers its provenance.
+
+    A page's layout facts come along when the page carries them, matched to the
+    lines of `page.text` by position — a correspondence `ExtractedPage`
+    guarantees or leaves empty, so there is nothing to re-derive here.
+    """
     lines: list[SourceLine] = []
     for page in pages:
         if page.is_empty:
             continue
-        for text in page.text.split("\n"):
-            lines.append(SourceLine(text=text, page_number=page.page_number))
+        texts = page.text.split("\n")
+        layouts: tuple[LineLayout | None, ...] = (
+            tuple(line.layout for line in page.lines)
+            if len(page.lines) == len(texts)
+            else (None,) * len(texts)
+        )
+        for text, layout in zip(texts, layouts, strict=True):
+            lines.append(
+                SourceLine(
+                    text=text, page_number=page.page_number, layout=layout
+                )
+            )
     return tuple(lines)
 
 
