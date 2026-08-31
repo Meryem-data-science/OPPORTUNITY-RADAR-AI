@@ -227,10 +227,14 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v4` and moves independently of
-`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK` and
-`v4` with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, each of which changes how
-some section bodies are cut and therefore which candidates come out.
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v5` and moves independently of
+`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, `v4`
+with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, and `v5` when the right-hand
+boundary those two rules test against stopped being a count of characters and
+became a reach measured in the size each line is set at — each of which changes
+how some section bodies are cut and therefore which candidates come out.
+`PARSER_VERSION` did not move with `v5`: a `ParsedCv` holds exactly the same
+fields, read exactly the same way, and only the cut downstream of it changed.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,
@@ -302,9 +306,20 @@ What the rules refuse to do is the design:
   conservative state, and it is also the state of every `ParsedCv` built from
   text alone. Failing to merge a wrapped entry is visible in review; merging two
   real entries silently deletes one, so every threshold leans the first way. The
-  rule reads geometry and, for the boundary, character counts as a stand-in for
-  width — never a word, a keyword or a lexicon: replace every letter of a body
-  line and the answer is identical.
+  rule reads geometry and, for the boundary, a proxy for width — never a word, a
+  keyword or a lexicon: replace every letter of a body line and the answer is
+  identical. That proxy is a line's character count carried into the PDF point
+  size the line is set at, in *character-points*, and every term of the boundary
+  comparison is in it. A raw count would not do: a column tolerates a half-point
+  size difference, and 132 characters set half a point smaller do not reach as
+  far as 121 set at the column's own size, so counting both as characters let a
+  smaller line describe a boundary the column does not have. It is a proxy and
+  not a measurement — `pypdf`'s public API states no glyph metrics for the text
+  it extracts, and inventing them is the guess this package refuses — so eight
+  narrow letters and eight wide ones measure alike. The error that leaves is
+  bounded and points the safe way: the boundary is the *widest* line the column
+  shows, so an unmeasured glyph shape can only make the rule ask more of a line
+  before calling it full, and a merge is refused rather than invented.
 - **Wrapped entries a document's spacing cannot show.** Some CVs put so nearly
   the same baseline step between two entries as inside a wrapped one — a
   fraction of a point apart — that the rule above correctly refuses to conclude

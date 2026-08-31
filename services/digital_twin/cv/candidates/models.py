@@ -29,7 +29,7 @@ from services.digital_twin.cv.models import SectionType
 #: candidate can always be compared against the rules that produced it. It is
 #: independent of `PARSER_VERSION`: the two versions move for different
 #: reasons, and a candidate carries both.
-CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v4"
+CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v5"
 
 
 class CandidateType(StrEnum):

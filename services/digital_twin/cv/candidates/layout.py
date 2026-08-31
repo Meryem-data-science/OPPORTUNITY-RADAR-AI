@@ -36,6 +36,45 @@ the first line was *full*: the right-hand boundary it compares against is the
 one the document's own lines describe, and where too few lines describe it,
 there is no evidence and no continuation.
 
+Widths, and what "width" honestly means here
+-------------------------------------------
+
+The second condition needs to know how far a line reaches, and a PDF's text
+layer does not say. A real advance width would need the glyph metrics of every
+font the line uses — `/Widths` and `/FirstChar` for a simple font, `/W` and
+`/DW` for a CID font, the Adobe core metrics for a standard-14 font naming no
+widths at all — plus the character codes those widths are indexed by, which are
+exactly what decoding the string to Unicode threw away, plus the horizontal
+scaling and character and word spacing in force at the time. `pypdf` computes
+all of that internally and exposes none of it: its `visitor_text` callback,
+the only public route to a line's text state, hands over the matrices, the font
+resource dictionary and the size, and no width. Reconstructing the rest would
+mean inventing the parts the public API does not state, which is the one thing
+this package refuses to do.
+
+So no width here is measured. What is used instead is a proxy, `line_width`:
+a line's character count carried into the size that line is set at, in units of
+*character-points*. It is not the physical width of the line and is never
+described as one. What it is, is the smallest correction that makes the
+comparison well-posed: a count of characters is not a length at all, and
+comparing one line's count with another's when the two are set at different
+sizes compares two different units under one name. Multiplying by the size does
+not make the proxy true, but it makes it *dimensionally honest* and monotone in
+the two things that actually move a line's reach — more characters reach
+further, and the same characters set larger reach further.
+
+What the proxy still cannot see is the shape of the letters: eight narrow
+glyphs and eight wide ones are the same eight characters to it, and in a
+proportional font they are not the same width. That error is bounded and its
+direction is the safe one, for the same reason as before: the boundary is the
+*widest observed* line of the column, so a column whose widest line is unusually
+narrow-lettered reads as reaching further than it does, and a genuine
+continuation then fails this test and is left unmerged. The error that would
+matter — reading a column as narrower than it is, and merging two real entries —
+needs the *candidate* line to be the narrow-lettered one relative to a column
+described by wide-lettered lines, and even then it must survive every other
+condition below. This test is one of several, never the whole answer.
+
 The failure mode this is written against is merging two real entries into one,
 because that silently deletes an entry a human would have reviewed. Failing to
 merge a wrapped entry is visible, correctable in review, and therefore the
@@ -44,6 +83,7 @@ direction every threshold here leans.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -71,7 +111,7 @@ LOOSE_GAP_FACTOR = 1.25
 #: whatever the rest of the document does, so this bounds what a pathological
 #: calibration can authorise.
 MAX_CONTINUATION_LEADING_RATIO = 3.0
-#: How many lines must share a left edge and a font size before the longest of
+#: How many lines must share a left edge and a font size before the widest of
 #: them is read as describing that column's right-hand boundary.
 MIN_MARGIN_EVIDENCE_LINES = 3
 
@@ -110,6 +150,7 @@ __all__ = [
     "PlacedLine",
     "comparable_gap",
     "continues_previous_line",
+    "line_width",
     "read_layout_evidence",
     "reaches_right_boundary",
     "right_boundary",
@@ -117,16 +158,44 @@ __all__ = [
 ]
 
 
+def line_width(layout: LineLayout, length: int) -> float | None:
+    """Return how far `length` characters reach when set at `layout`'s size.
+
+    The unit is *character-points*: a count of characters multiplied by the PDF
+    point size the characters are set at. It is a proxy for physical width, not
+    a measured one — see the module note on what that means and does not mean —
+    and the whole of this module measures every distance in it, so that no two
+    quantities are ever compared across units.
+
+    `None` whenever the size the PDF stated cannot carry a width: a size that is
+    zero, negative or not a finite number is not a size a line was set at, and
+    the honest reading of such a line is that its width is unknown. Nothing is
+    substituted for it: a line with no width describes no boundary, and a line
+    with no width is never shown to have reached one. A negative `length` is the
+    same absence — a caller cannot ask how far minus three characters reach.
+    """
+    if length < 0:
+        return None
+    size = layout.font_size
+    if not math.isfinite(size) or size <= 0:
+        return None
+    return length * size
+
+
 @dataclass(frozen=True)
 class PlacedLine:
-    """One line of the document that carries a layout, and its length."""
+    """One line of the document that carries a layout, its length and its width."""
 
     page_number: int
     layout: LineLayout
-    #: Number of characters of the normalized line. It stands in for how far the
-    #: line reaches, and it is the only thing this module ever reads off a line's
-    #: text — a count, never a word. See `reaches_right_boundary`.
+    #: Number of characters of the normalized line. It is the only thing this
+    #: module ever reads off a line's text — a count, never a word.
     length: int
+    #: How far the line reaches, in the character-points of `line_width`: the
+    #: count above, carried into the size the line is actually set at, so that
+    #: it can be compared with the reach of a line set at another size. `None`
+    #: when the PDF stated no size a width could be derived from.
+    width: float | None
 
 
 @dataclass(frozen=True)
@@ -207,6 +276,7 @@ def read_layout_evidence(
             page_number=line.page_number,
             layout=line.layout,
             length=len(line.text),
+            width=line_width(line.layout, len(line.text)),
         )
         for line in lines
         if line.text and line.layout is not None
@@ -221,30 +291,36 @@ def read_layout_evidence(
 
 def right_boundary(
     evidence: DocumentLayoutEvidence, layout: LineLayout
-) -> int | None:
+) -> float | None:
     """Return how far the column of `layout` is seen to reach, or `None`.
 
-    The unit is characters of normalized text, and the value is the longest line
-    the document places in that column: a boundary the document describes rather
+    The value is the widest line the document places in that column, in the
+    character-points of `line_width`: a boundary the document describes rather
     than one this module assumes. `None` when too few lines describe it.
 
-    Characters are a stand-in for width, and an imperfect one — a proportional
-    font sets a hundred narrow letters in less space than a hundred wide ones —
-    which is why the comparison in `reaches_right_boundary` is deliberately
-    made against the *widest observed* line and why the whole test is only ever
-    one of several conditions. Its error direction is the safe one: a column
-    whose longest line is unusually narrow-lettered reads as reaching further
-    than it does, and a genuine continuation then fails the test and is left
-    unmerged.
+    Column identity and width are two different questions, and this is where
+    they meet. `same_column` answers the first — two lines returning to the same
+    left edge at what the document treats as one size are lines of one column —
+    and it deliberately tolerates a small size difference, because a producer's
+    rounding and a document's own hairline size changes both land inside it.
+    That tolerance is right for identity and wrong for capacity: 132 characters
+    set a half-point smaller do not reach as far as 132 characters set at the
+    column's size, and reading both as "132" would let the smaller line describe
+    a boundary the column does not have. So the cohort stays exactly as it was —
+    no line is dropped for being set slightly smaller, and a smaller line that
+    genuinely reaches furthest still sets the boundary — and what changed is the
+    unit each of its members is measured in. A line whose width is unknown
+    describes nothing and is left out; if that leaves too few, there is no
+    boundary rather than a boundary drawn from the rest.
     """
-    lengths = [
-        placed.length
+    widths = [
+        placed.width
         for placed in evidence.placed_lines
-        if same_column(placed.layout, layout)
+        if placed.width is not None and same_column(placed.layout, layout)
     ]
-    if len(lengths) < MIN_MARGIN_EVIDENCE_LINES:
+    if len(widths) < MIN_MARGIN_EVIDENCE_LINES:
         return None
-    return max(lengths)
+    return max(widths)
 
 
 def _first_word_length(text: str) -> int:
@@ -270,6 +346,15 @@ def reaches_right_boundary(
     column's boundary. A line that stops short of that was not broken by
     wrapping — the document ended it there on purpose — and is therefore the end
     of its block, whatever the line below it happens to say.
+
+    All four quantities are in the character-points of `line_width`, and they
+    are in it for the same reason: the question is counterfactual — *had* the
+    token stayed on `previous`, how far would that line have reached? — so the
+    line it would have been set on is the one whose size measures it. `previous`
+    text, the separating space and the following token are therefore all carried
+    into `previous.layout`'s size in a single call, and compared against a
+    boundary carried into each of its own lines' sizes. Nothing here is a raw
+    character count, and no two sides of the comparison are in different units.
     """
     if previous.layout is None:
         return False
@@ -279,7 +364,10 @@ def reaches_right_boundary(
     following = _first_word_length(line.text)
     if not following:
         return False
-    return len(previous.text) + 1 + following > boundary
+    required = line_width(previous.layout, len(previous.text) + 1 + following)
+    if required is None:
+        return False
+    return required > boundary
 
 
 def continues_previous_line(

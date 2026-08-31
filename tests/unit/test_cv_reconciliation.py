@@ -88,7 +88,7 @@ def test_an_older_extraction_is_not_current(parser_version, extractor_version):
 
 def test_the_documented_previous_campaign_is_the_one_this_project_moved_off():
     assert reconciliation.PREVIOUS_PARSER_VERSION == "cv-parser-v3"
-    assert reconciliation.PREVIOUS_EXTRACTOR_VERSION == "cv-candidates-v3"
+    assert reconciliation.PREVIOUS_EXTRACTOR_VERSION == "cv-candidates-v4"
     # And it is genuinely an older one, so the CLI defaults cannot name the
     # campaign the checkout itself produces.
     assert reconciliation.PREVIOUS_PARSER_VERSION != PARSER_VERSION

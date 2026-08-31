@@ -29,9 +29,9 @@ entries in its *lighter* face and wraps into its heavier one is read exactly as
 correctly as the other way round, because neither case is written down anywhere.
 
 Not a word is read. As in `layout.py`, the one thing taken off a line's text is
-how many characters it holds, which stands in for how far it reaches; replacing
-every word of the document with another word of the same length changes no
-decision this module makes.
+how many characters it holds, which — carried into the size the line is set at —
+stands in for how far it reaches; replacing every word of the document with
+another word of the same length changes no decision this module makes.
 
 Why the typeface alone is never enough
 --------------------------------------

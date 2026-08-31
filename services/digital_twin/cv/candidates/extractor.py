@@ -323,7 +323,7 @@ def extract_candidates(parsed: ParsedCv) -> StructuredCvExtraction:
         warnings.append(
             CandidateWarning(
                 code=CandidateWarningCode.NO_CANDIDATE_EXTRACTED,
-                message="no rule of cv-candidates-v4 produced a candidate",
+                message="no rule of cv-candidates-v5 produced a candidate",
             )
         )
 
