@@ -13,6 +13,15 @@ from .models import (
     MatchingOpportunityInput,
     MatchingProfileInput,
 )
+from .skill_signals import (
+    SKILL_SIGNAL_VERSION,
+    OpportunitySkillSignal,
+    OpportunitySkillSignals,
+    RequirementsState,
+    SkillSignalKind,
+    SkillSignalSource,
+    build_opportunity_skill_signals,
+)
 
 __all__ = [
     "MATCHING_INPUT_VERSION",
@@ -20,6 +29,13 @@ __all__ = [
     "MatchingInputError",
     "MatchingOpportunityInput",
     "MatchingProfileInput",
+    "OpportunitySkillSignal",
+    "OpportunitySkillSignals",
+    "RequirementsState",
+    "SKILL_SIGNAL_VERSION",
+    "SkillSignalKind",
+    "SkillSignalSource",
+    "build_opportunity_skill_signals",
     "canonical_matching_payload",
     "load_matching_input",
     "load_opportunity_matching_input",
