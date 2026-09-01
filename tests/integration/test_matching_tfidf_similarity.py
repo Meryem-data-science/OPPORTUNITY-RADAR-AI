@@ -71,6 +71,7 @@ def _seed_profile(connection):
         "INSERT INTO profile_skill_evidence (profile_skill_id, fact_id, normalizer_version, "
         "normalization_rule_id) VALUES (?, ?, 'v1', 'TEST')", (profile_skill, skill)
     )
+    connection.commit()
     set_profile_career_objectives(
         connection, profile_id, CareerObjectives(("Lead data platforms",))
     )
