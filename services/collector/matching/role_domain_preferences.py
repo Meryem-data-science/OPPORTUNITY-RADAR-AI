@@ -13,9 +13,9 @@ from services.digital_twin.preferences.models import WorkMode
 
 from .models import MatchingInput, MatchingPreferences, MatchingQualification
 
-ROLE_DOMAIN_PREFERENCES_VERSION = "role-domain-preferences-v1"
-OPPORTUNITY_TYPE_BRIDGE_VERSION = "opportunity-type-bridge-v1"
-DOMAIN_PREFERENCE_BRIDGE_VERSION = "domain-preference-bridge-v1"
+ROLE_DOMAIN_PREFERENCES_VERSION = "role-domain-preferences-v2"
+OPPORTUNITY_TYPE_BRIDGE_VERSION = "opportunity-type-bridge-v2"
+DOMAIN_PREFERENCE_BRIDGE_VERSION = "domain-preference-bridge-v2"
 WORK_MODE_BRIDGE_VERSION = "work-mode-bridge-v1"
 
 
@@ -30,6 +30,9 @@ class AlignmentReason(StrEnum):
     OPPORTUNITY_QUALIFICATION_ABSENT = "OPPORTUNITY_QUALIFICATION_ABSENT"
     OPPORTUNITY_TYPE_UNKNOWN = "OPPORTUNITY_TYPE_UNKNOWN"
     OPPORTUNITY_TYPE_UNMAPPED = "OPPORTUNITY_TYPE_UNMAPPED"
+    OPPORTUNITY_TYPE_INCOMPATIBLE_WITH_PREFERENCES = (
+        "OPPORTUNITY_TYPE_INCOMPATIBLE_WITH_PREFERENCES"
+    )
     OPPORTUNITY_TYPE_ALLOWED = "OPPORTUNITY_TYPE_ALLOWED"
     OPPORTUNITY_TYPE_NOT_ALLOWED = "OPPORTUNITY_TYPE_NOT_ALLOWED"
     PRIMARY_DOMAIN_UNKNOWN = "PRIMARY_DOMAIN_UNKNOWN"
@@ -94,6 +97,10 @@ _TYPE_BRIDGE = {
     QualifiedType.INTERNSHIP: PreferredType.INTERNSHIP,
     QualifiedType.APPRENTICESHIP: PreferredType.ALTERNANCE,
 }
+_JOB_LIKE_PREFERRED_TYPES = {
+    PreferredType.FIRST_JOB,
+    PreferredType.JUNIOR_ROLE,
+}
 
 
 def _normalize_label(value: str) -> str:
@@ -101,13 +108,21 @@ def _normalize_label(value: str) -> str:
 
 
 _DOMAIN_LABELS = {
-    Domain.DATA_ENGINEERING: ("Data Engineering", "DATA_ENGINEERING"),
+    Domain.DATA_ENGINEERING: (
+        "Data Engineering",
+        "Big Data / Data Platforms",
+        "Big Data/Data Platforms",
+        "DATA_ENGINEERING",
+    ),
     Domain.DATA_SCIENCE: ("Data Science", "DATA_SCIENCE"),
     Domain.MACHINE_LEARNING_AI: (
         "ML/AI",
         "ML / AI",
         "Machine Learning/AI",
         "Machine Learning / AI",
+        "Machine Learning / Deep Learning",
+        "Machine Learning/Deep Learning",
+        "Artificial Intelligence",
         "MACHINE_LEARNING_AI",
     ),
     Domain.GENAI_LLM: (
@@ -115,11 +130,15 @@ _DOMAIN_LABELS = {
         "GenAI / LLM",
         "Generative AI/LLM",
         "Generative AI / LLM",
+        "Generative AI / LLM / RAG",
+        "Generative AI/LLM/RAG",
         "GENAI_LLM",
     ),
     Domain.MLOPS_ML_PLATFORM: (
         "MLOps/ML Platform",
         "MLOps / ML Platform",
+        "MLOps / ML Engineering",
+        "MLOps/ML Engineering",
         "MLOPS_ML_PLATFORM",
     ),
     Domain.BI_ANALYTICS: (
@@ -127,6 +146,8 @@ _DOMAIN_LABELS = {
         "BI / Analytics",
         "Business Intelligence/Analytics",
         "Business Intelligence / Analytics",
+        "Data Analytics / Business Intelligence",
+        "Data Analytics/Business Intelligence",
         "BI_ANALYTICS",
     ),
     Domain.DATA_QUALITY_GOVERNANCE: (
@@ -211,6 +232,16 @@ def _type_alignment(preferences, qualification, validated):
         )
     mapped = _TYPE_BRIDGE.get(opportunity_type)
     if mapped is None:
+        if opportunity_type is QualifiedType.JOB and not any(
+            preferred.value in preferences.opportunity_types
+            for preferred in _JOB_LIKE_PREFERRED_TYPES
+        ):
+            return OpportunityTypeAlignment(
+                AlignmentStatus.MISMATCH,
+                AlignmentReason.OPPORTUNITY_TYPE_INCOMPATIBLE_WITH_PREFERENCES,
+                opportunity_type.value,
+                None,
+            )
         return OpportunityTypeAlignment(
             AlignmentStatus.UNKNOWN,
             AlignmentReason.OPPORTUNITY_TYPE_UNMAPPED,

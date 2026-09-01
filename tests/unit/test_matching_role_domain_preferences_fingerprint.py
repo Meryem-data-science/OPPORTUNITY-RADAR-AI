@@ -70,3 +70,43 @@ def test_official_alias_spelling_is_semantically_stable():
         left
     ) == role_domain_preferences_fingerprint(right)
     assert left.domain.status is AlignmentStatus.MATCH
+
+
+def test_new_alias_is_semantically_identical_to_existing_canonical_alias():
+    existing = build_role_domain_preference_signals(
+        inputs(domain="DATA_ENGINEERING", domains=("Data Engineering",))
+    )
+    added = build_role_domain_preference_signals(
+        inputs(domain="DATA_ENGINEERING", domains=("Big Data / Data Platforms",))
+    )
+    assert existing == added
+    assert role_domain_preferences_fingerprint(
+        existing
+    ) == role_domain_preferences_fingerprint(added)
+
+
+def test_v2_versions_change_fingerprint_from_v1_versions():
+    current = build_role_domain_preference_signals(inputs())
+    previous = replace(
+        current,
+        role_domain_preferences_version="role-domain-preferences-v1",
+        opportunity_type_bridge_version="opportunity-type-bridge-v1",
+        domain_preference_bridge_version="domain-preference-bridge-v1",
+    )
+    assert role_domain_preferences_fingerprint(
+        current
+    ) != role_domain_preferences_fingerprint(previous)
+
+
+def test_job_unknown_and_safe_negative_mismatch_have_distinct_fingerprints():
+    mismatch = build_role_domain_preference_signals(
+        inputs(opportunity_type="JOB", types=("PFE", "INTERNSHIP"))
+    )
+    unknown = build_role_domain_preference_signals(
+        inputs(opportunity_type="JOB", types=("FIRST_JOB",))
+    )
+    assert mismatch.opportunity_type.status is AlignmentStatus.MISMATCH
+    assert unknown.opportunity_type.status is AlignmentStatus.UNKNOWN
+    assert role_domain_preferences_fingerprint(
+        mismatch
+    ) != role_domain_preferences_fingerprint(unknown)
