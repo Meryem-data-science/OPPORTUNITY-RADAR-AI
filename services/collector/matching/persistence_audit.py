@@ -301,7 +301,8 @@ def audit_matching_profile_history(
     issues = []
     run_ids = {row[0] for row in runs_raw}
     if (
-        (status == "EMPTY" and current_run_id is not None)
+        (status == "NOT_SYNCED" and bool(runs_raw))
+        or (status == "EMPTY" and current_run_id is not None)
         or (status == "READY" and current_run_id not in run_ids)
         or status not in {"NOT_SYNCED", "EMPTY", "READY"}
     ):

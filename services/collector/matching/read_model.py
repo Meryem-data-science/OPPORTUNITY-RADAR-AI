@@ -53,6 +53,7 @@ class MatchingRunReadModel:
     run_fingerprint: str
     assessment_count: int
     created_at: str
+    batch_payload: Mapping[str, Any]
     assessments: tuple[MatchingAssessmentReadModel, ...]
 
 
@@ -100,11 +101,21 @@ def read_matching_run(
         """SELECT id,profile_id,persistence_version,selection_version,
         matching_engine_version,matching_rules_version,semantic_percentile_version,
         corpus_fingerprint,tfidf_model_fingerprint,batch_fingerprint,run_fingerprint,
-        assessment_count,created_at FROM matching_runs WHERE id=?""",
+        assessment_count,created_at,batch_payload_json FROM matching_runs WHERE id=?""",
         (run_id,),
     ).fetchone()
     if row is None:
         raise MatchingReadError(f"matching run {run_id} does not exist")
+    try:
+        batch_payload = json.loads(row[13])
+    except (json.JSONDecodeError, TypeError) as error:
+        raise MatchingReadError(
+            f"invalid batch JSON for matching run {run_id}"
+        ) from error
+    if not isinstance(batch_payload, dict):
+        raise MatchingReadError(
+            f"batch payload for matching run {run_id} is not an object"
+        )
     assessments = []
     for item in connection.execute(
         """SELECT opportunity_id,lane,match_quality,evidence_coverage,
@@ -125,7 +136,7 @@ def read_matching_run(
         assessments.append(MatchingAssessmentReadModel(*item[:6], _freeze(payload)))
     if len(assessments) != row[11]:
         raise MatchingReadError(f"assessment count mismatch for matching run {run_id}")
-    return MatchingRunReadModel(*row, tuple(assessments))
+    return MatchingRunReadModel(*row[:13], _freeze(batch_payload), tuple(assessments))
 
 
 def list_matching_runs(
@@ -162,6 +173,10 @@ def read_current_matching(
         (profile_id,),
     ).fetchone()
     if state is None:
+        if history_count:
+            raise MatchingReadError(
+                f"profile {profile_id} has matching runs without profile state"
+            )
         return MatchingProfileReadModel(
             profile_id, "NOT_SYNCED", None, None, None, None, history_count
         )
