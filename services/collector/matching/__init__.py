@@ -1,5 +1,29 @@
 """Public deterministic Phase 4 matching contracts."""
 
+from .component_audit import (
+    COMPONENT_AUDIT_SELECTION_VERSION,
+    COMPONENT_AUDIT_VERSION,
+    AlignmentSummary,
+    ComponentAuditInputError,
+    ComponentAuditReport,
+    Correlation,
+    MatchingComponentObservation,
+    NumericDistribution,
+    SemanticSummary,
+    SkillSummary,
+    StructuredSummary,
+    audit_matching_components,
+    audit_matching_database,
+    numeric_distribution,
+    pearson_correlation,
+)
+from .component_audit_fingerprint import (
+    canonical_component_audit_payload,
+    canonical_component_observation_payload,
+    component_audit_fingerprint,
+    component_observation_fingerprint,
+)
+
 from .fingerprint import canonical_matching_payload, matching_input_fingerprint
 from .inputs import (
     MatchingInputError,
@@ -74,6 +98,25 @@ from .tfidf_similarity import (
 )
 
 __all__ = [
+    "COMPONENT_AUDIT_SELECTION_VERSION",
+    "COMPONENT_AUDIT_VERSION",
+    "AlignmentSummary",
+    "ComponentAuditInputError",
+    "ComponentAuditReport",
+    "Correlation",
+    "MatchingComponentObservation",
+    "NumericDistribution",
+    "SemanticSummary",
+    "SkillSummary",
+    "StructuredSummary",
+    "audit_matching_components",
+    "audit_matching_database",
+    "numeric_distribution",
+    "pearson_correlation",
+    "canonical_component_audit_payload",
+    "canonical_component_observation_payload",
+    "component_audit_fingerprint",
+    "component_observation_fingerprint",
     "MATCHING_INPUT_VERSION",
     "ROLE_DOMAIN_PREFERENCES_VERSION",
     "OPPORTUNITY_TYPE_BRIDGE_VERSION",
