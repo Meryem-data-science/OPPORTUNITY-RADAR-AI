@@ -61,6 +61,24 @@ from .persistence_fingerprint import (
     canonical_matching_run_payload,
     matching_run_fingerprint,
 )
+from .persistence_audit import (
+    MATCHING_PERSISTENCE_AUDIT_VERSION,
+    MatchingPersistenceAuditError,
+    MatchingPersistenceAuditIssue,
+    MatchingPersistenceAuditReport,
+    MatchingRunAuditResult,
+    audit_matching_profile_history,
+)
+from .read_model import (
+    MatchingAssessmentReadModel,
+    MatchingProfileReadModel,
+    MatchingReadError,
+    MatchingRunReadModel,
+    MatchingRunSummary,
+    list_matching_runs,
+    read_current_matching,
+    read_matching_run,
+)
 from .selection import MATCHING_SELECTION_VERSION, select_matching_opportunity_ids
 from .sync import MatchingSyncError, MatchingSyncResult, sync_matching
 
@@ -138,6 +156,20 @@ from .tfidf_similarity import (
 )
 
 __all__ = [
+    "MATCHING_PERSISTENCE_AUDIT_VERSION",
+    "MatchingAssessmentReadModel",
+    "MatchingPersistenceAuditError",
+    "MatchingPersistenceAuditIssue",
+    "MatchingPersistenceAuditReport",
+    "MatchingProfileReadModel",
+    "MatchingReadError",
+    "MatchingRunAuditResult",
+    "MatchingRunReadModel",
+    "MatchingRunSummary",
+    "audit_matching_profile_history",
+    "list_matching_runs",
+    "read_current_matching",
+    "read_matching_run",
     "MATCHING_SELECTION_VERSION",
     "MatchingSyncError",
     "MatchingSyncResult",
