@@ -141,7 +141,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
 
         assert apply_migrations(connection) == [
-            "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014",
+            "0007", "0008", "0009", "0010", "0011", "0012", "0013", "0014", "0015",
         ]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
@@ -162,7 +162,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0014",)
+    assert recorded[-1] == ("0015",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -250,9 +250,15 @@ PHASE_35B_TABLES = frozenset(
 #: database where a row names a person and a posting at once, and they exist
 #: because the phase that compares the two sides is implemented. Everything the
 #: guard below still forbids remains forbidden: a *third* table joining them, a
-#: match, a score and a ranking, because Phase 4 does not exist.
+#: match, a score and a ranking beyond the exact persistence tables now owned
+#: by Phase 4.7A.
 PHASE_36_TABLES = frozenset(
     {"opportunity_eligibilities", "eligibility_rule_results"}
+)
+#: The exact Phase 4.7A persistence tables. Their names contain `match`, but
+#: unrelated matching, score and ranking tables remain out of scope.
+PHASE_47A_TABLES = frozenset(
+    {"matching_runs", "matching_assessments", "matching_profile_state"}
 )
 
 PROJECTED_TABLES = (
@@ -263,6 +269,7 @@ PROJECTED_TABLES = (
     | PHASE_35A_TABLES
     | PHASE_35B_TABLES
     | PHASE_36_TABLES
+    | PHASE_47A_TABLES
 )
 
 #: Concepts this database must not contain. The list is the docstring of the
@@ -299,14 +306,16 @@ def test_no_table_beyond_the_projections_exists_yet(migrated):
 
     The twelve tables `0008` through `0011` add are exempted one by one, and so
     are the seven `0012` adds, the five `0013` adds on the offer side and the
-    two `0014` adds for Phase 3.6; every other table is held to the whole
-    out-of-scope list — no fourth skill table, no administrable alias table, no
+    two `0014` adds for Phase 3.6 and the three `0015` persistence tables;
+    every other table is held to the whole out-of-scope list — no fourth skill
+    table, no administrable alias table, no
     second education, certification or language table, no second preference,
     availability, mobility or career objective table, no *second* eligibility
-    table, and no matching, score or ranking table, because Phase 4 is not
-    implemented. Phase 3.5A adds constraints a posting states and Phase 3.5B
-    the skills and languages it asks for; neither adds a comparison of one to a
-    person. Phase 3.6 adds exactly that comparison, in exactly two tables.
+    table, and no matching, score or ranking table beyond the exact Phase 4.7A
+    persistence allowlist. Phase 3.5A adds constraints a posting states and
+    Phase 3.5B the skills and languages it asks for; neither adds a comparison
+    of one to a person. Phase 3.6 adds exactly that comparison, in exactly two
+    tables.
     """
     for table in _tables(migrated):
         assert not is_out_of_scope_table(table), table

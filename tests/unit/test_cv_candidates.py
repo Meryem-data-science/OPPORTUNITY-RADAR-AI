@@ -1181,6 +1181,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0012_opportunity_constraints.sql",
         "0013_opportunity_requirements.sql",
         "0014_opportunity_eligibility.sql",
+        "0015_matching_persistence.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications

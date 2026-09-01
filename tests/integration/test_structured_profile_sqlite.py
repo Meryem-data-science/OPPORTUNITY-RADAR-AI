@@ -218,7 +218,7 @@ def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
         fact = accepted(connection, existing.profile_id, STRUCTURED_EXPERIENCE)
 
         assert apply_migrations(connection) == [
-            "0009", "0010", "0011", "0012", "0013", "0014",
+            "0009", "0010", "0011", "0012", "0013", "0014", "0015",
         ]
 
         assert {"profile_experiences", "profile_projects"} <= _tables(connection)
