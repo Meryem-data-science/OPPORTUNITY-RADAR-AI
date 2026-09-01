@@ -13,6 +13,24 @@ from .models import (
     MatchingOpportunityInput,
     MatchingProfileInput,
 )
+from .role_domain_preferences import (
+    DOMAIN_PREFERENCE_BRIDGE_VERSION,
+    OPPORTUNITY_TYPE_BRIDGE_VERSION,
+    ROLE_DOMAIN_PREFERENCES_VERSION,
+    WORK_MODE_BRIDGE_VERSION,
+    AlignmentReason,
+    AlignmentStatus,
+    DomainPreferenceAlignment,
+    OpportunityTypeAlignment,
+    RoleDomainPreferencesInputError,
+    RoleDomainPreferencesResult,
+    WorkModeAlignment,
+    build_role_domain_preference_signals,
+)
+from .role_domain_preferences_fingerprint import (
+    canonical_role_domain_preferences_payload,
+    role_domain_preferences_fingerprint,
+)
 from .skill_signals import (
     SKILL_SIGNAL_VERSION,
     OpportunitySkillSignal,
@@ -57,6 +75,17 @@ from .tfidf_similarity import (
 
 __all__ = [
     "MATCHING_INPUT_VERSION",
+    "ROLE_DOMAIN_PREFERENCES_VERSION",
+    "OPPORTUNITY_TYPE_BRIDGE_VERSION",
+    "DOMAIN_PREFERENCE_BRIDGE_VERSION",
+    "WORK_MODE_BRIDGE_VERSION",
+    "AlignmentReason",
+    "AlignmentStatus",
+    "DomainPreferenceAlignment",
+    "OpportunityTypeAlignment",
+    "RoleDomainPreferencesInputError",
+    "RoleDomainPreferencesResult",
+    "WorkModeAlignment",
     "MatchingInput",
     "MatchingInputError",
     "MatchingOpportunityInput",
@@ -82,6 +111,7 @@ __all__ = [
     "SkillFitInputError",
     "SkillFitResult",
     "build_opportunity_skill_signals",
+    "build_role_domain_preference_signals",
     "build_skill_fit",
     "build_opportunity_semantic_document",
     "build_profile_semantic_document",
@@ -94,10 +124,12 @@ __all__ = [
     "semantic_similarity_fingerprint",
     "tfidf_model_fingerprint",
     "canonical_matching_payload",
+    "canonical_role_domain_preferences_payload",
     "canonical_skill_fit_payload",
     "load_matching_input",
     "load_opportunity_matching_input",
     "load_profile_matching_input",
     "matching_input_fingerprint",
+    "role_domain_preferences_fingerprint",
     "skill_fit_fingerprint",
 ]
