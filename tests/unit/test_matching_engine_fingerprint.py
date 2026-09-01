@@ -1,0 +1,57 @@
+from dataclasses import replace
+
+from services.collector.matching import (
+    MatchLane,
+    MatchingBatchResult,
+    matching_assessment_fingerprint,
+    matching_batch_fingerprint,
+)
+from tests.unit.test_matching_engine import assessment
+
+
+def test_assessment_fingerprint_excludes_ids_and_is_semantically_sensitive():
+    original = assessment()
+    assert matching_assessment_fingerprint(original) == matching_assessment_fingerprint(
+        replace(original, profile_id=999, opportunity_id=888)
+    )
+    variants = (
+        replace(original, matching_rules_version="matching-rules-v2"),
+        replace(original, semantic_percentile_version="semantic-percentile-v2"),
+        replace(original, lane=MatchLane.UNCERTAIN),
+        replace(
+            original,
+            required_skill=replace(original.required_skill, normalized_score=0.7),
+        ),
+        replace(original, semantic=replace(original.semantic, raw_similarity=0.41)),
+        replace(original, semantic=replace(original.semantic, percentile=0.6)),
+        replace(
+            original, semantic=replace(original.semantic, corpus_fingerprint="other")
+        ),
+        replace(
+            original, semantic=replace(original.semantic, model_fingerprint="other")
+        ),
+        replace(original, domain=replace(original.domain, preferred_rank=3)),
+        replace(original, evidence_coverage=0.8),
+        replace(
+            original, preferred_skill=replace(original.preferred_skill, matched_count=0)
+        ),
+        replace(
+            original, required_skill=replace(original.required_skill, base_weight=0.4)
+        ),
+    )
+    assert all(
+        matching_assessment_fingerprint(item) != original.assessment_fingerprint
+        for item in variants
+    )
+
+
+def test_batch_fingerprint_is_order_independent_and_multiplicity_sensitive():
+    first = assessment()
+    second = replace(first, assessment_fingerprint="f" * 64)
+    batch = MatchingBatchResult((first, second), "corpus", "model", 2)
+    reversed_batch = replace(batch, assessments=(second, first))
+    assert matching_batch_fingerprint(batch) == matching_batch_fingerprint(
+        reversed_batch
+    )
+    duplicated = replace(batch, assessments=(first, first))
+    assert matching_batch_fingerprint(batch) != matching_batch_fingerprint(duplicated)

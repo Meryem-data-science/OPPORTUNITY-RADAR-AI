@@ -23,6 +23,32 @@ from .component_audit_fingerprint import (
     component_audit_fingerprint,
     component_observation_fingerprint,
 )
+from .engine import (
+    DOMAIN_WEIGHT,
+    MATCHING_ENGINE_VERSION,
+    MATCHING_RULES_VERSION,
+    REQUIRED_SKILL_WEIGHT,
+    SEMANTIC_PERCENTILE_VERSION,
+    SEMANTIC_WEIGHT,
+    DomainScoreComponent,
+    MatchLane,
+    MatchingAssessment,
+    MatchingBatchResult,
+    MatchingEngineInputError,
+    MatchingScoreComponent,
+    OpportunityTypeCompatibility,
+    SemanticScoreComponent,
+    SupportingSkillEvidence,
+    build_matching_assessment,
+    build_matching_assessments,
+    semantic_percentiles,
+)
+from .engine_fingerprint import (
+    canonical_matching_assessment_payload,
+    canonical_matching_batch_payload,
+    matching_assessment_fingerprint,
+    matching_batch_fingerprint,
+)
 
 from .fingerprint import canonical_matching_payload, matching_input_fingerprint
 from .inputs import (
@@ -98,6 +124,28 @@ from .tfidf_similarity import (
 )
 
 __all__ = [
+    "MATCHING_ENGINE_VERSION",
+    "MATCHING_RULES_VERSION",
+    "SEMANTIC_PERCENTILE_VERSION",
+    "REQUIRED_SKILL_WEIGHT",
+    "SEMANTIC_WEIGHT",
+    "DOMAIN_WEIGHT",
+    "MatchLane",
+    "MatchingEngineInputError",
+    "MatchingScoreComponent",
+    "SemanticScoreComponent",
+    "DomainScoreComponent",
+    "OpportunityTypeCompatibility",
+    "SupportingSkillEvidence",
+    "MatchingAssessment",
+    "MatchingBatchResult",
+    "build_matching_assessment",
+    "build_matching_assessments",
+    "semantic_percentiles",
+    "canonical_matching_assessment_payload",
+    "canonical_matching_batch_payload",
+    "matching_assessment_fingerprint",
+    "matching_batch_fingerprint",
     "COMPONENT_AUDIT_SELECTION_VERSION",
     "COMPONENT_AUDIT_VERSION",
     "AlignmentSummary",
