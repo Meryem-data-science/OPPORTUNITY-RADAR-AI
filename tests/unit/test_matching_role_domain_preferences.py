@@ -87,8 +87,8 @@ def inputs(
         (
             "JOB",
             (),
-            AlignmentStatus.UNKNOWN,
-            AlignmentReason.OPPORTUNITY_TYPE_UNMAPPED,
+            AlignmentStatus.MISMATCH,
+            AlignmentReason.OPPORTUNITY_TYPE_INCOMPATIBLE_WITH_PREFERENCES,
             None,
         ),
         (
@@ -109,6 +109,24 @@ def test_opportunity_type_bridge(opportunity_type, types, status, reason, mapped
         reason,
     )
     assert result.opportunity_type.mapped_profile_type == mapped
+
+
+@pytest.mark.parametrize(
+    "types",
+    [
+        ("FIRST_JOB",),
+        ("JUNIOR_ROLE",),
+        ("FIRST_JOB", "JUNIOR_ROLE"),
+        ("PFE", "FIRST_JOB"),
+    ],
+)
+def test_job_remains_unmapped_when_profile_allows_a_job_like_type(types):
+    alignment = build_role_domain_preference_signals(
+        inputs(opportunity_type="JOB", types=types)
+    ).opportunity_type
+    assert alignment.status is AlignmentStatus.UNKNOWN
+    assert alignment.reason is AlignmentReason.OPPORTUNITY_TYPE_UNMAPPED
+    assert alignment.mapped_profile_type is None
 
 
 @pytest.mark.parametrize(
@@ -162,6 +180,81 @@ def test_domain_aliases_match_at_original_rank(domain, labels, rank):
     result = build_role_domain_preference_signals(inputs(domain=domain, domains=labels))
     assert result.domain.status is AlignmentStatus.MATCH
     assert result.domain.preferred_rank == rank
+
+
+@pytest.mark.parametrize(
+    ("domain", "label"),
+    [
+        ("BI_ANALYTICS", "Data Analytics / Business Intelligence"),
+        ("BI_ANALYTICS", "Data Analytics/Business Intelligence"),
+        ("MACHINE_LEARNING_AI", "Machine Learning / Deep Learning"),
+        ("MACHINE_LEARNING_AI", "Machine Learning/Deep Learning"),
+        ("MACHINE_LEARNING_AI", "Artificial Intelligence"),
+        ("GENAI_LLM", "Generative AI / LLM / RAG"),
+        ("GENAI_LLM", "Generative AI/LLM/RAG"),
+        ("MLOPS_ML_PLATFORM", "MLOps / ML Engineering"),
+        ("MLOPS_ML_PLATFORM", "MLOps/ML Engineering"),
+        ("DATA_ENGINEERING", "Big Data / Data Platforms"),
+        ("DATA_ENGINEERING", "Big Data/Data Platforms"),
+    ],
+)
+def test_real_audit_domain_aliases_are_exactly_recognized(domain, label):
+    alignment = build_role_domain_preference_signals(
+        inputs(domain=domain, domains=(label,))
+    ).domain
+    assert alignment.status is AlignmentStatus.MATCH
+    assert alignment.preferred_rank == 1
+
+
+def test_ordered_real_profile_labels_preserve_first_canonical_domain_rank():
+    labels = (
+        "Data Science",
+        "Data Engineering",
+        "Data Analytics / Business Intelligence",
+        "Machine Learning / Deep Learning",
+        "Artificial Intelligence",
+        "Generative AI / LLM / RAG",
+        "MLOps / ML Engineering",
+        "Big Data / Data Platforms",
+    )
+    expected_ranks = {
+        "DATA_SCIENCE": 1,
+        "DATA_ENGINEERING": 2,
+        "BI_ANALYTICS": 3,
+        "MACHINE_LEARNING_AI": 4,
+        "GENAI_LLM": 6,
+        "MLOPS_ML_PLATFORM": 7,
+    }
+    for domain, rank in expected_ranks.items():
+        alignment = build_role_domain_preference_signals(
+            inputs(domain=domain, domains=labels)
+        ).domain
+        assert alignment.status is AlignmentStatus.MATCH
+        assert alignment.preferred_rank == rank
+
+    other = build_role_domain_preference_signals(
+        inputs(domain="OTHER_DATA_AI", domains=labels)
+    ).domain
+    assert other.status is AlignmentStatus.MISMATCH
+    assert other.reason is AlignmentReason.DOMAIN_PREFERENCE_NOT_LISTED
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "Machine Learning Engineer",
+        "AI and Data",
+        "Gen AI RAG Platform",
+        "Business Analytics",
+        "Big Data Engineer",
+    ),
+)
+def test_domain_bridge_does_not_fuzzy_match_nearby_labels(label):
+    alignment = build_role_domain_preference_signals(
+        inputs(domain="OTHER_DATA_AI", domains=(label,))
+    ).domain
+    assert alignment.status is AlignmentStatus.UNKNOWN
+    assert alignment.reason is AlignmentReason.DOMAIN_PREFERENCES_PARTIALLY_UNMAPPED
 
 
 def test_domain_empty_is_unknown_and_complete_nonmatch_is_mismatch():
