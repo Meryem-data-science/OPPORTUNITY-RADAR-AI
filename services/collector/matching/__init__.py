@@ -61,6 +61,8 @@ from .persistence_fingerprint import (
     canonical_matching_run_payload,
     matching_run_fingerprint,
 )
+from .selection import MATCHING_SELECTION_VERSION, select_matching_opportunity_ids
+from .sync import MatchingSyncError, MatchingSyncResult, sync_matching
 
 from .fingerprint import canonical_matching_payload, matching_input_fingerprint
 from .inputs import (
@@ -136,6 +138,11 @@ from .tfidf_similarity import (
 )
 
 __all__ = [
+    "MATCHING_SELECTION_VERSION",
+    "MatchingSyncError",
+    "MatchingSyncResult",
+    "select_matching_opportunity_ids",
+    "sync_matching",
     "MATCHING_PERSISTENCE_VERSION",
     "MatchingPersistenceError",
     "MatchingStoreResult",
