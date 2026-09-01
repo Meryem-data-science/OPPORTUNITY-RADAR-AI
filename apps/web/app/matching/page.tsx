@@ -11,12 +11,55 @@ const laneLabels: Record<MatchingLane, string> = {
 };
 const lanes = Object.keys(laneLabels) as MatchingLane[];
 const percent = (value: number | null) => value === null ? "Indisponible" : `${Math.round(value * 100)} %`;
+const record = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
-function Component({ label, value }: { label: string; value: unknown }) {
-  if (typeof value !== "object" || value === null) return null;
-  const data = value as Record<string, unknown>;
+function TechnicalPayload({ data }: { data: Record<string, unknown> }) {
+  return <details><summary>Données techniques</summary><pre>{JSON.stringify(data, null, 2)}</pre></details>;
+}
+
+function OpportunityTypeExplanation({ value }: { value: unknown }) {
+  const data = record(value);
+  if (data === null) return null;
+  const labels: Record<string, string> = { MATCH: "Dans vos préférences", MISMATCH: "Hors préférences", UNKNOWN: "Compatibilité incertaine" };
+  const status = typeof data.status === "string" ? labels[data.status] ?? data.status : "Indisponible";
+  const reason = data.reason === "OPPORTUNITY_TYPE_INCOMPATIBLE_WITH_PREFERENCES"
+    ? "Le type de cette opportunité ne correspond pas aux préférences du profil."
+    : null;
+  return <div><strong>Type d’opportunité</strong><span>{status}</span>{reason && <p>{reason}</p>}<TechnicalPayload data={data} /></div>;
+}
+
+function RequiredSkillExplanation({ value }: { value: unknown }) {
+  const data = record(value);
+  if (data === null) return null;
   const score = typeof data.normalized_score === "number" ? data.normalized_score : null;
-  return <div><strong>{label}</strong><span>{percent(score)}</span><pre>{JSON.stringify(data, null, 2)}</pre></div>;
+  const hasCounts = typeof data.matched_count === "number" && typeof data.total_count === "number";
+  return <div><strong>Compétences requises</strong><span>{percent(score)}</span>{hasCounts && <p>{data.matched_count as number} compétences reconnues sur {data.total_count as number}</p>}<TechnicalPayload data={data} /></div>;
+}
+
+function SemanticExplanation({ value }: { value: unknown }) {
+  const data = record(value);
+  if (data === null) return null;
+  const available = data.status === "available" && typeof data.percentile === "number";
+  const rawSimilarity = typeof data.raw_similarity === "number" ? data.raw_similarity : null;
+  return <div><strong>Sémantique</strong><span>{percent(available ? data.percentile as number : null)}</span>{available && rawSimilarity !== null && <p>Similarité brute : {percent(rawSimilarity)}</p>}<TechnicalPayload data={data} /></div>;
+}
+
+function DomainExplanation({ value }: { value: unknown }) {
+  const data = record(value);
+  if (data === null) return null;
+  const score = typeof data.normalized_score === "number" ? data.normalized_score : null;
+  const rank = data.status === "MATCH" && typeof data.preferred_rank === "number" ? data.preferred_rank : null;
+  return <div><strong>Domaine</strong><span>{percent(score)}</span>{rank !== null && <p>Préférence de domaine n°{rank}</p>}{data.status === "MISMATCH" && <p>Hors préférences de domaine</p>}<TechnicalPayload data={data} /></div>;
+}
+
+function SupportingSkillExplanation({ label, value, emptyMessage }: { label: string; value: unknown; emptyMessage: string }) {
+  const data = record(value);
+  if (data === null) return null;
+  const ratio = typeof data.ratio === "number" ? data.ratio : null;
+  const hasCounts = typeof data.matched_count === "number" && typeof data.total_count === "number";
+  const empty = data.total_count === 0 && data.ratio === null;
+  return <div><strong>{label}</strong><span>{empty ? `Non évaluable — ${emptyMessage}` : percent(ratio)}</span>{!empty && hasCounts && <p>{data.matched_count as number} sur {data.total_count as number}</p>}<TechnicalPayload data={data} /></div>;
 }
 
 function MatchingCard({ item }: { item: MatchingItem }) {
@@ -31,12 +74,12 @@ function MatchingCard({ item }: { item: MatchingItem }) {
       <p><strong>Couverture des preuves</strong><span>{percent(item.matching.evidence_coverage)}</span></p>
     </div>
     <details className="matching-details"><summary>Pourquoi ce résultat ?</summary>
-      <Component label="Type d’opportunité" value={explanation.opportunity_type} />
-      <Component label="Compétences requises" value={explanation.required_skill} />
-      <Component label="Sémantique" value={explanation.semantic} />
-      <Component label="Domaine" value={explanation.domain} />
-      <Component label="Compétences préférées" value={(explanation.supporting as Record<string, unknown> | undefined)?.preferred} />
-      <Component label="Compétences de contexte" value={(explanation.supporting as Record<string, unknown> | undefined)?.context} />
+      <OpportunityTypeExplanation value={explanation.opportunity_type} />
+      <RequiredSkillExplanation value={explanation.required_skill} />
+      <SemanticExplanation value={explanation.semantic} />
+      <DomainExplanation value={explanation.domain} />
+      <SupportingSkillExplanation label="Compétences préférées" value={record(explanation.supporting)?.preferred} emptyMessage="aucune compétence préférée requise" />
+      <SupportingSkillExplanation label="Compétences de contexte" value={record(explanation.supporting)?.context} emptyMessage="aucun signal de contexte disponible" />
     </details>
     <a href={item.opportunity.original_url} target="_blank" rel="noreferrer">Voir l’offre originale</a>
   </article>;
