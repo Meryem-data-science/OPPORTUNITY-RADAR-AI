@@ -255,7 +255,8 @@ def _row_counts(connection, tables) -> dict[str, int]:
 
 def test_migration_0014_is_the_next_version_and_nothing_earlier_moved():
     versions = [migration.version for migration in discover_migrations()]
-    assert versions[-1] == "0014"
+    eligibility_index = versions.index("0014")
+    assert versions[eligibility_index - 1] == "0013"
     assert versions == sorted(versions, key=int)
     assert len(set(versions)) == len(versions)
 

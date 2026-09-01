@@ -49,6 +49,18 @@ from .engine_fingerprint import (
     matching_assessment_fingerprint,
     matching_batch_fingerprint,
 )
+from .persistence import (
+    MatchingPersistenceError,
+    MatchingStoreResult,
+    read_matching_profile_state,
+    set_matching_state_empty,
+    store_matching_batch,
+)
+from .persistence_fingerprint import (
+    MATCHING_PERSISTENCE_VERSION,
+    canonical_matching_run_payload,
+    matching_run_fingerprint,
+)
 
 from .fingerprint import canonical_matching_payload, matching_input_fingerprint
 from .inputs import (
@@ -124,6 +136,14 @@ from .tfidf_similarity import (
 )
 
 __all__ = [
+    "MATCHING_PERSISTENCE_VERSION",
+    "MatchingPersistenceError",
+    "MatchingStoreResult",
+    "canonical_matching_run_payload",
+    "matching_run_fingerprint",
+    "read_matching_profile_state",
+    "set_matching_state_empty",
+    "store_matching_batch",
     "MATCHING_ENGINE_VERSION",
     "MATCHING_RULES_VERSION",
     "SEMANTIC_PERCENTILE_VERSION",
