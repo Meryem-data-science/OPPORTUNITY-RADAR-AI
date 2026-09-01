@@ -12,6 +12,7 @@ from services.digital_twin.preferences.models import (
     CareerObjectives,
     OpportunityPreferences,
     OpportunityType,
+    WorkMode,
 )
 from services.digital_twin.preferences.repository import synchronize_profile_preferences
 from services.digital_twin.preferences.service import (
@@ -30,7 +31,7 @@ def test_disposable_database_pipeline_is_read_only_and_deterministic(tmp_path):
         profile_id,
         OpportunityPreferences(
             opportunity_types=(OpportunityType.INTERNSHIP,),
-            work_modes=(),
+            work_modes=(WorkMode.REMOTE,),
             preferred_domains=("Data Engineering", "Data Science"),
             constraints=(),
         ),
