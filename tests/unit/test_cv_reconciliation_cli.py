@@ -20,9 +20,11 @@ from services.collector.database.migrations import apply_migrations
 from services.digital_twin.cv import reconciliation_cli
 from services.digital_twin.cv.candidates.extractor import extract_candidates
 from services.digital_twin.cv.candidates.models import (
+    CANDIDATE_EXTRACTOR_VERSION,
     CandidateType,
     StructuredCvExtraction,
 )
+from services.digital_twin.cv.models import PARSER_VERSION
 from services.digital_twin.cv.fact_bridge import import_cv_candidates
 from services.digital_twin.cv.parser import parse_cv_pdf
 from services.digital_twin.facts.models import FactStatus
@@ -35,8 +37,13 @@ from services.digital_twin.repository import ensure_user_profile
 # TEST ONLY address; no real identity is ever used or stored by the tests.
 TEST_ONLY_EMAIL = "student@example.invalid"
 
-OLD_PARSER = "cv-parser-v1"
-OLD_EXTRACTOR = "cv-candidates-v1"
+#: The campaign the CLI reconciles away from by default. Taken from the module
+#: rather than spelled out, because what these tests exercise is the default
+#: itself: seed the database with the campaign the CLI will look for, run the
+#: command with no version arguments, and the two have to line up. Spelling a
+#: version here would only make the tests pass a bump without noticing one.
+OLD_PARSER = reconciliation_cli.PREVIOUS_PARSER_VERSION
+OLD_EXTRACTOR = reconciliation_cli.PREVIOUS_EXTRACTOR_VERSION
 
 # TEST ONLY CV content. The synthetic PDF below describes nobody.
 FIRST_PAGE = [
@@ -346,9 +353,9 @@ def test_reconciling_the_current_campaign_with_itself_is_refused(
             "plan",
             cv_path,
             "--old-parser-version",
-            "cv-parser-v2",
+            PARSER_VERSION,
             "--old-extractor-version",
-            "cv-candidates-v2",
+            CANDIDATE_EXTRACTOR_VERSION,
         )
         == 1
     )

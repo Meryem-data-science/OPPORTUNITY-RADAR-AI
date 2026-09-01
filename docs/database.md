@@ -1602,3 +1602,137 @@ similarity, no embedding, no fuzzy matching, no ranking, no recommendation, no
 notification and no auto-apply. There is no `confidence` and no `score` column.
 There is no HTTP endpoint and no remote write path over these tables, and no
 LLM, model download or network call takes part in producing a single row.
+
+## Opportunity eligibility
+
+Migration `0014` adds the Phase 3.6 decision: whether **one person** could apply
+to **one posting**. It is the only place in this schema where a row names a user
+and an opportunity at once, and everything before it was kept apart on purpose —
+`0012` and `0013` say so in their own comments, and `0006` through `0011` never
+looked at a posting.
+
+```text
+    users ─┐
+           ├─> opportunity_eligibilities          (one current decision)
+    opportunities ─┘   +-> eligibility_rule_results   (why, rule by rule)
+```
+
+The question is narrow: *given what this posting explicitly demands, and what
+this person's reliable facts state, is there a known reason they could not
+apply?* Not "would they be hired", not "are they a good fit", and not "how good
+a fit". There is no score here, no percentage, no rank and no weight, and none
+of the columns can be turned into one: `status` is categorical and the counters
+count rule outcomes, not a numerator and a denominator. Matching is Phase 4 and
+does not exist.
+
+### UNKNOWN is not INELIGIBLE, and the schema enforces it
+
+That is the whole design, and the CHECK constraints exist to make the opposite
+**unstorable** rather than merely discouraged. A person whose CV never named a
+language has not said they do not speak it; a posting that never named a degree
+has not demanded one. Three constraints write the aggregator into the schema:
+
+```sql
+CHECK (status <> 'INELIGIBLE' OR violated_count > 0)
+CHECK (status <> 'UNKNOWN'    OR (violated_count = 0 AND blocking_unknown_count > 0))
+CHECK (status <> 'ELIGIBLE'   OR (violated_count = 0 AND blocking_unknown_count = 0))
+```
+
+Read together they say the thing this phase exists to say: a decision is
+`INELIGIBLE` only when a hard rule was **contradicted**, and an absent fact
+produces `UNKNOWN` instead. Nothing can promote an UNKNOWN into a refusal,
+however many of them there are.
+
+### A decision belongs to a person
+
+`UNIQUE (user_id, opportunity_id)`, not `UNIQUE (opportunity_id)`. Eligibility
+is not a property of a posting, and storing it as one would make a second user's
+answer overwrite the first's. History is not kept: a recomputation replaces the
+row, because a stale verdict beside a fresh one is two answers to one question.
+
+### The tables
+
+| table | holds |
+| --- | --- |
+| `opportunity_eligibilities` | one current verdict per `(user_id, opportunity_id)`, its engine version, its input digest, the five rule-outcome counters and the blocking-unknown subset, and its timestamps |
+| `eligibility_rule_results` | one row per rule the engine ran, in evaluation order: the dimension, the rule code, the outcome, whether it could block, how the posting stated the requirement, the reason code, a deterministic sentence, and a logical pointer to each side of the comparison |
+
+### Five rule outcomes, and the difference between the last three
+
+| outcome | means |
+| --- | --- |
+| `SATISFIED` | an applicable requirement exists and reliable facts meet it |
+| `VIOLATED` | a hard applicable requirement exists and reliable facts **contradict** it — only ever a contradiction, never a gap |
+| `UNKNOWN` | a hard applicable requirement exists and the facts needed to answer are not there |
+| `NOT_APPLICABLE` | the posting asked for nothing on this dimension |
+| `NOT_EVALUATED` | something was asked and `eligibility-rules-v1` deliberately declines to decide it |
+
+Every decision keeps its whole reasoning, the rules that passed included.
+Stopping at the first contradiction would give an operator one reason where the
+posting gave three.
+
+### What may block
+
+`is_blocking` is what the aggregator counts, and it is narrow by construction: a
+rule blocks only when it belongs to one of six hard dimensions — `EDUCATION`,
+`ENROLLMENT`, `EXPERIENCE`, `LANGUAGE`, `WORK_AUTHORIZATION`, `CONVENTION` —
+**and** the posting stated the requirement as `REQUIRED`. Five more CHECKs make
+the phase's promises properties of the schema rather than of the code that fills
+it:
+
+* a skill requirement can never block, **not even a `REQUIRED` one**, because
+  "Python or R" written as two bullets is two `REQUIRED` rows and one choice,
+  and rejecting somebody over the alternative the posting did not insist on is
+  the one mistake this phase is built to avoid;
+* an ambiguity can never block — `0013` recorded a refusal to *represent* a
+  demand, and a refusal is not a demand;
+* mobility, location, availability, duration, start date and work mode can never
+  block, because this version does not evaluate them;
+* a `PREFERRED` requirement can never block, on any dimension;
+* nothing that cannot block can ever be `VIOLATED`, and the advisory and
+  deferred dimensions cannot claim a hard outcome by using `UNKNOWN` either —
+  an unverified skill is `NOT_EVALUATED`, which no aggregator counts.
+
+### Evidence is pointed at, never copied
+
+`requirement_ref` and `profile_ref` are stable logical pointers —
+`LANGUAGE#english`, `SKILL#python`, `EDUCATION#BAC_PLUS_5:MINIMUM`,
+`profile_preferences#convention_status`. Not row ids, because `0013` rebuilds its
+rows whole and an id would dangle after the next extraction; and not copies of
+the evidence, because Phase 3.4 and Phase 3.5B already store the words, and
+duplicating them here would create a second, divergent record of the same proof.
+Neither column ever holds a posting's text or a person's, and neither does
+`explanation`, which is a deterministic rendering of `reason_code` and the same
+normalized values — a courtesy for a reader, never something to parse.
+
+### Idempotence
+
+`input_fingerprint` is a SHA-256 over the canonical JSON of **exactly what the
+rules read** — the posting's education, experience, language, work
+authorization, convention and skill requirements, the ambiguities `0013`
+refused to resolve, this person's projected education, enrolment, languages,
+skills, stated convention capability and stated sponsorship need — plus
+`eligibility-rules-v1`. The digest domain is the two input dataclasses the rules
+are handed, so "in the digest" and "read by a rule" are one set by construction.
+
+A changed telephone number, a new GitHub URL, an edited portfolio link, a
+widened mobility or a moved availability date is not a field of either input, so
+none of them is in the digest and none recomputes anything. A version bump
+recomputes everything, which is what a version is for. Nothing volatile takes
+part: no clock, no `evaluated_at`, no `updated_at`, no row id and no database
+ordering, so two runs a week apart over unchanged data produce the same
+sixty-four characters — which is what makes `unchanged=N, changed=false` a fact
+about the data rather than about the run.
+
+### Not implemented by `0014`
+
+No match score, no skill-similarity score, no TF-IDF, no cosine similarity, no
+embedding, no fuzzy matching, no ranking, no priority, no interview-potential
+score, no recommendation, no notification and no auto-apply. No `confidence` and
+no percentage column, and nothing that could be divided into one. Three
+dimensions cannot currently be decided at all and answer `UNKNOWN` or
+`NOT_APPLICABLE` rather than guessing: education level and experience duration,
+because Phase 3.4 normalizes neither, and current enrolment, because neither
+phase represents it. The historical `opportunities.eligibility_score` column is
+not written, read or repurposed. No LLM, model download or network call takes
+part in producing a single row.

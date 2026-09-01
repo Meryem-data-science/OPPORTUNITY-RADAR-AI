@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 from services.digital_twin.facts.models import (
     ALLOWED_TRANSITIONS,
@@ -615,6 +615,38 @@ def list_profile_fact_provenance(
     return tuple(_provenance_from_row(row) for row in rows)
 
 
+def _decide_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    fact_id: int,
+    target: FactStatus,
+) -> ProfileFact:
+    """Move one fact, inside a transaction the caller already opened.
+
+    It opens none of its own and commits nothing, so a caller can put one fact
+    or twenty under the same `BEGIN IMMEDIATE` and have the whole set land or
+    none of it.
+    """
+    fact = _require_fact(connection, profile_id, fact_id)
+    _check_transition(fact, target)
+    if fact.status is target:
+        # Deciding again what was already decided changes nothing, and
+        # must not restamp the moment the real decision was taken.
+        return fact
+    row = connection.execute(
+        f"""UPDATE profile_facts
+               SET status = ?,
+                   decided_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND profile_id = ? AND status = ?
+         RETURNING {_FACT_COLUMNS}""",
+        (target.value, fact_id, profile_id, fact.status.value),
+    ).fetchone()
+    if row is None:
+        raise ProfileFactError("the fact changed while it was being decided")
+    return _fact_from_row(row)
+
+
 def _decide(
     connection: sqlite3.Connection,
     profile_id: int,
@@ -623,30 +655,59 @@ def _decide(
 ) -> ProfileFact:
     connection.execute("BEGIN IMMEDIATE")
     try:
-        fact = _require_fact(connection, profile_id, fact_id)
-        _check_transition(fact, target)
-        if fact.status is target:
-            # Deciding again what was already decided changes nothing, and
-            # must not restamp the moment the real decision was taken.
-            connection.execute("COMMIT")
-            return fact
-        row = connection.execute(
-            f"""UPDATE profile_facts
-                   SET status = ?,
-                       decided_at = CURRENT_TIMESTAMP,
-                       updated_at = CURRENT_TIMESTAMP
-                 WHERE id = ? AND profile_id = ? AND status = ?
-             RETURNING {_FACT_COLUMNS}""",
-            (target.value, fact_id, profile_id, fact.status.value),
-        ).fetchone()
-        if row is None:
-            raise ProfileFactError("the fact changed while it was being decided")
-        decided = _fact_from_row(row)
+        decided = _decide_in_transaction(connection, profile_id, fact_id, target)
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")
         raise
     return decided
+
+
+def decide_profile_facts(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    fact_ids: Sequence[int],
+    target: FactStatus,
+    *,
+    after_fact: Callable[[int], None] | None = None,
+) -> tuple[ProfileFact, ...]:
+    """Decide several facts of one profile at once: all of them, or none.
+
+    One `BEGIN IMMEDIATE` covers the whole set, so a fact the cycle forbids, a
+    fact belonging to another profile or any failure partway through leaves the
+    database exactly as it was. That matters for a review that offers to decide
+    a whole group on one keystroke: a batch that half happened would leave a
+    person unable to tell what they had actually answered.
+
+    The target is `ACCEPTED` or `REJECTED`. A correction replaces one value with
+    another and stays one fact at a time, in `correct_profile_fact`.
+
+    Ids must be distinct: naming the same fact twice in one batch is a caller
+    mistake, and silently collapsing it would hide which one was meant.
+    `after_fact` is a test seam invoked after each fact moves and before the
+    commit; production callers leave it unset.
+    """
+    if target not in (FactStatus.ACCEPTED, FactStatus.REJECTED):
+        raise ProfileFactError("a batch decision is an acceptance or a rejection")
+    ordered = tuple(fact_ids)
+    if len(set(ordered)) != len(ordered):
+        raise ProfileFactError("a fact cannot be decided twice in one batch")
+    if not ordered:
+        return ()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        decided: list[ProfileFact] = []
+        for fact_id in ordered:
+            decided.append(
+                _decide_in_transaction(connection, profile_id, fact_id, target)
+            )
+            if after_fact is not None:
+                after_fact(fact_id)
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return tuple(decided)
 
 
 def accept_profile_fact(

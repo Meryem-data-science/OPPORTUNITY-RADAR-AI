@@ -29,7 +29,7 @@ from services.digital_twin.cv.models import SectionType
 #: candidate can always be compared against the rules that produced it. It is
 #: independent of `PARSER_VERSION`: the two versions move for different
 #: reasons, and a candidate carries both.
-CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v2"
+CANDIDATE_EXTRACTOR_VERSION = "cv-candidates-v7"
 
 
 class CandidateType(StrEnum):
@@ -97,11 +97,39 @@ class ExtractionRule(StrEnum):
     SECTION_BULLET_BLOCK = "SECTION_BULLET_BLOCK"
     #: The section body has neither, so each line is one entry.
     SECTION_LINE_BLOCK = "SECTION_LINE_BLOCK"
+    #: The section body has neither, and the document's own layout showed that
+    #: one or more of its line breaks were the layout engine running out of
+    #: room: those lines were kept in the block they physically continue. The
+    #: name describes the geometry of the page and nothing else — no
+    #: institution, employer, diploma, date, place or level is read from the
+    #: joined lines, here or anywhere downstream of this rule.
+    SECTION_LAYOUT_CONTINUATION_BLOCK = "SECTION_LAYOUT_CONTINUATION_BLOCK"
+    #: The section body has neither, the document's spacing could not tell a
+    #: line from a block, and its own typography could: the column was seen
+    #: repeatedly opening its entries in one typeface, and a line set in
+    #: another — under a full line, in the same column, on an adjacent baseline
+    #: of the same page — was kept in the block it physically continues. The
+    #: name describes the typeface the PDF names and the geometry of the page,
+    #: and nothing else: the signature is an opaque `/BaseFont` token compared
+    #: for equality, never read as bold, regular, heading or emphasis, and no
+    #: institution, diploma, date, place or level is read from the joined
+    #: lines, here or anywhere downstream of this rule.
+    SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK = (
+        "SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK"
+    )
     #: An EXPERIENCE body written as pipe-delimited header lines was cut on
     #: those lines. The name describes the punctuation the document used and
     #: nothing else: no employer, role, date, place or duration is read from
     #: the parts, here or anywhere downstream of this rule.
     EXPERIENCE_PIPE_DELIMITED_BLOCK = "EXPERIENCE_PIPE_DELIMITED_BLOCK"
+
+    #: An exact language label and colon introduce one list item.
+    LANGUAGES_LABELLED_LIST_ITEM = "LANGUAGES_LABELLED_LIST_ITEM"
+    #: An explicit planned-certification label and colon introduce one item.
+    CERTIFICATION_PLANNED_LIST_ITEM = "CERTIFICATION_PLANNED_LIST_ITEM"
+    #: A preparation label introduces an item which independently carries a
+    #: closed certification word. The rule does not claim it was obtained.
+    CERTIFICATION_PREPARING_LIST_ITEM = "CERTIFICATION_PREPARING_LIST_ITEM"
 
     #: A "label: a, b, c" line; the label is dropped, the list is split.
     SKILLS_LABELLED_LIST_LINE = "SKILLS_LABELLED_LIST_LINE"

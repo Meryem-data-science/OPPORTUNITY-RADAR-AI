@@ -53,8 +53,8 @@ def test_the_default_output_reports_the_shape_and_no_cv_text(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "extractor_version=cv-candidates-v2" in output
-    assert "parser_version=cv-parser-v2" in output
+    assert "extractor_version=cv-candidates-v7" in output
+    assert "parser_version=cv-parser-v5" in output
     assert "NAME_CANDIDATE=1" in output
     assert "EMAIL=1" in output
     assert "GITHUB_URL=1" in output
@@ -100,7 +100,7 @@ def test_the_export_writes_the_candidates_and_their_provenance(
     assert exit_code == 0
     assert cli.JSON_OUT_NOTICE in capsys.readouterr().out
     payload = json.loads(destination.read_text(encoding="utf-8"))
-    assert payload["extractor_version"] == "cv-candidates-v2"
+    assert payload["extractor_version"] == "cv-candidates-v7"
     emails = [
         candidate
         for candidate in payload["candidates"]

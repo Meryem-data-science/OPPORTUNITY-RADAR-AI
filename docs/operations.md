@@ -255,7 +255,7 @@ Expected failures, each reported explicitly with exit code 1:
 | The PDF is encrypted | `EncryptedPdfError` |
 | The PDF has no text layer (a scan) | `EmptyPdfTextError` |
 
-A scanned CV is refused rather than guessed at: `cv-parser-v2` performs no OCR.
+A scanned CV is refused rather than guessed at: `cv-parser-v5` performs no OCR.
 
 What this command does **not** do: it stores no `profile_facts`, writes no row
 in the Digital Twin, creates no validated Master CV, offers no accept, correct
@@ -355,12 +355,19 @@ never writes one; no matching of any kind exists.
 ## CV review (Phase 3.3B)
 
 Import one local CV PDF as reviewable proposals, then decide about each of them
-by hand:
+by hand. There are two shapes of the same review — fact by fact, which is the
+default and has not changed, and group by group, which is the same decisions
+asked about a printed group at a time:
 
 ```bash
 export DATABASE_BACKEND=sqlite
 export SQLITE_DATABASE_PATH=.data/opportunity-radar.db
+
+# one fact, one question, one keystroke — the original review
 python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
+
+# the same review, one printed group at a time
+python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf --grouped
 ```
 
 The command runs the whole path in one go — parse the PDF, extract the
@@ -403,12 +410,86 @@ resumes where you stopped, and never offers a fact you already accepted,
 rejected or corrected. A run interrupted partway leaves every candidate it did
 import complete, with its provenance.
 
+### Reviewing by group (`--grouped`)
+
+A real CV yields dozens of proposals, most of them skills, and answering each
+one separately means typing `a` forty times at a list you took in at a glance.
+`--grouped` changes how many facts one answer covers, and **nothing else**: the
+same facts are asked about, the same decisions are available, and nothing is
+accepted that you were not shown.
+
+The review prints one group in full — its facts numbered, each with its value,
+its normalized form where there is one, and its provenance — and then waits:
+
+```text
+GROUP 1/7 — IDENTITY / CONTACT
+6 of 6 facts still PROPOSED
+
+[1] NAME (fact_id=1)
+    value: Example Person
+    pages=1 section=UNCLASSIFIED#0 rule=HEADER_FIRST_LINE_NAME_SHAPE
+
+[2] PROFESSIONAL_TITLE (fact_id=2)
+    ...
+```
+
+| Command | Effect |
+| --- | --- |
+| `a` | Accept the facts of **this printed group** that are still `PROPOSED`. Nothing else, ever. |
+| `a 1,3-5` | Accept only these facts of this group. Ranges are inclusive. |
+| `r 2,4` | Reject only these facts of this group. Rejecting requires indices; there is no bare `r`. |
+| `c 3` | Correct exactly one fact, as in the default review. Corrections are never batched. |
+| `s` | Skip: every fact still `PROPOSED` in this group stays `PROPOSED`, and the next group is shown. |
+| `q` | Quit. Everything still `PROPOSED` stays `PROPOSED`. |
+| `?` | Print the commands. |
+
+**`a` is not an auto-accept.** It accepts the facts of the group that is on
+screen, all of which were printed before you typed it, and it can reach nothing
+else: not a group that was not displayed, not a fact of another group, and not a
+fact somebody already decided. There is no command that accepts the whole CV, no
+yes-to-all, no accept-by-type, no score, no confidence and no threshold; the
+largest scope any single command has is one displayed group. Accepting more than
+twenty facts at once asks once more — `Accept all 42 facts still proposed in the
+group above? [y/N]:` — and only an exact `y` confirms; anything else, an empty
+line and a closed stdin included, decides nothing.
+
+**A partial decision keeps you in the group.** After `r 17,21` the group is
+printed again with those two marked as decided, so you can see what happened
+before typing `a` for the rest. Refusing two skills out of forty-three and
+accepting the other forty-one is two commands and one confirmation.
+
+The groups are walked in a fixed order — identity/contact, education,
+experience, projects, skills, certifications, languages, then anything else —
+and inside a group the facts keep the document order the extraction produced.
+A group is built from the canonical fact type alone: no value is ever read to
+decide where a fact is shown, and a fact type this version does not know lands
+in `OTHER` rather than disappearing.
+
+Commands are matched **exactly**, like the five answers of the default review:
+one action, optionally one space and one selection, and nothing else. `A`,
+`a ` and `a  1` are not commands; `a banana`, `a 1--4`, `a 3-1`, `a 01` and
+`c 1,2` are not commands either. An index that is out of range, or that names a
+fact already decided, refuses the whole command rather than the part of it that
+happened to be valid. Every refusal prints a notice and asks again, and **no
+input error ever ends in an acceptance**.
+
+A batch is atomic. `a` on a group of forty-two either moves all forty-two or
+none of them: they are decided in one transaction, so an interruption partway
+cannot leave you unable to tell what you actually answered.
+
+The grouped run adds three counters to the closing summary — `groups_shown`,
+`groups_completed`, `batch_actions` — next to the ones the default run prints.
+They are counters like the others: no group carries a value into the summary or
+the log.
+
+
 **This is the one command in the project that prints CV content**, because a
 person cannot decide about a value they are not shown. That exception is bounded
 to the review prompt itself. The closing summary is counters only —
 `candidates`, `newly_proposed`, `already_imported`, `accepted_this_run`,
 `rejected_this_run`, `corrected_this_run`, `skipped_this_run`,
-`remaining_proposed`, `quit_requested` — the structured log carries counters,
+`remaining_proposed`, `quit_requested`, plus `groups_shown`, `groups_completed`
+and `batch_actions` on a `--grouped` run — the structured log carries counters,
 versions, canonical types and ids and never a value, the CV path is never echoed
 back, not even in an error message, and the command writes no file at all. Keep
 your real CV out of the repository.
@@ -442,7 +523,7 @@ python -m services.digital_twin.cv.reconciliation_cli plan /path/to/cv.pdf
 # 2. attach the new evidence, propose what changed
 python -m services.digital_twin.cv.reconciliation_cli prepare /path/to/cv.pdf
 
-# 3. answer the proposals by hand
+# 3. answer the proposals by hand (add --grouped to answer them by group)
 python -m services.digital_twin.cv.review_cli review /path/to/cv.pdf
 
 # 4. retire the old readings the confirmed new ones replaced
@@ -456,16 +537,27 @@ command creates no user and no profile, and it refuses a non-SQLite backend
 before it connects and before it asks for anything.
 
 The older campaign is named by two options, which default to the campaign this
-project moved off:
+project moved off — one step behind what the checkout produces, so they move
+with each bump:
 
 | Option | Default |
 | --- | --- |
-| `--old-parser-version` | `cv-parser-v1` |
-| `--old-extractor-version` | `cv-candidates-v1` |
+| `--old-parser-version` | `cv-parser-v4` |
+| `--old-extractor-version` | `cv-candidates-v5` |
 
+Reconciling from a campaign older than the defaults — `cv-parser-v1` and
+`cv-candidates-v1`, say — means naming it explicitly; nothing else changes,
+since how two campaigns are compared never depends on which versions they are.
 Both are technical version strings and never CV content. The command also
 refuses to run if the checkout does not itself produce a *newer* campaign than
 the one named, so a stale reading can never retire a good fact.
+
+For parser-v5/candidates-v6, equality remains exact: profile, CV digest,
+canonical fact type, and raw value must match byte for byte. An unchanged
+accepted reading keeps its human decision. A former `SKILL` now read as
+`LANGUAGE` or `CERTIFICATION` is changed, becomes a new `PROPOSED` fact needing
+human review, and never inherits the old decision; the wrong-type historical
+fact remains auditable rather than being deleted.
 
 **What each command does.** `plan` writes nothing at all. `prepare` attaches the
 current campaign's provenance to every reading that is unchanged — same fact
@@ -1109,3 +1201,150 @@ gap, no `match_score`, no TF-IDF, no cosine similarity, no embedding, no fuzzy
 matching, no ranking, no recommendation, no notification and no auto-apply. It
 opens no network connection, downloads no model and calls no LLM, and there is
 no web interface or HTTP endpoint for any of it.
+
+## Eligibility (Phase 3.6)
+
+The first slice that reads both sides of the database, and the only one that
+may. It answers one narrow question about one person and one posting:
+
+    given what this posting explicitly demands, and what this person's reliable
+    facts state, is there a KNOWN reason they could not apply?
+
+Three answers, and the distance between two of them is the whole point:
+
+| verdict | means |
+| --- | --- |
+| `ELIGIBLE` | nothing known stands in the way |
+| `INELIGIBLE` | a hard requirement was **contradicted** by a reliable fact |
+| `UNKNOWN` | a hard requirement applies and the fact needed to answer is missing |
+
+`ELIGIBLE` does not mean the employer will accept the candidate, and `UNKNOWN`
+is a question rather than a soft refusal. A thin advertisement demanding nothing
+this engine checks is `ELIGIBLE`, because nothing is known to stand in the way.
+
+Apply the migration first, like every other:
+
+```bash
+python -m services.collector.cli.migrate --database data/opportunity-radar.db
+# or, against the configured backend:
+python -m services.collector.cli.migrate_configured --apply
+```
+
+It creates `opportunity_eligibilities` and `eligibility_rule_results`, and
+**inserts no row**.
+
+Three commands:
+
+```bash
+python -m services.eligibility.cli status --email you@example.com
+python -m services.eligibility.cli sync   --email you@example.com
+python -m services.eligibility.cli audit  --email you@example.com --show-reasons 20
+```
+
+`status` reads what is stored and counts it, deciding nothing and writing
+nothing; `sync` brings every in-scope posting's decision up to date; `audit`
+explains the refusals and the open questions and re-checks the phase's
+invariants against the rows on disk. `status` and `sync` accept `--limit`. The
+commands run no migration and refuse a non-SQLite backend before connecting.
+
+**Run Phases 3.5A and 3.5B first.** A verdict over a posting whose requirements
+nobody has read would be a verdict over silence, and silence and "requires
+nothing" are exactly the two things `opportunity_requirement_extraction_state`
+exists to tell apart — so a corpus with any unread posting is refused as one
+error, before anything is written. The usual order after a collection is
+`migrate`, 3.5A `sync`, 3.5B `sync`, then this.
+
+**The person must already exist.** `--email` names a Digital Twin created by the
+digital-twin commands; the eligibility run never creates one. Bringing a user
+into existence as a side effect would produce an empty profile and then a page
+of UNKNOWNs about it, which reads like an answer and is an accident.
+
+### What can block, and what cannot
+
+Six dimensions may produce a contradiction, and only on an explicit `REQUIRED`
+demand contradicted by a reliable fact: **education**, **current enrolment**,
+**experience**, **a mandatory language**, **work authorization / sponsorship**,
+and **a mandatory internship agreement**.
+
+Everything else is reported and decides nothing:
+
+```text
+a REQUIRED skill the profile does not hold  -> NOT_EVALUATED, never a refusal
+a PREFERRED demand of any kind              -> NOT_EVALUATED
+an ambiguity Phase 3.5B refused to store    -> NOT_EVALUATED
+mobility, location, availability, duration,
+start date, work mode                       -> NOT_EVALUATED
+```
+
+**A required skill never blocks, and that is deliberate.** "AWS, Azure or GCP"
+written as three bullets leaves three `REQUIRED` rows that look like three
+obligations and are one choice, and nothing in the stored shape tells them
+apart. Rejecting a candidate over the two the posting did not insist on is the
+one mistake this phase is built to avoid, so a skill is evidence and never a
+verdict until alternative groups are representable without loss.
+
+The invariants are also CHECK constraints in `0014`, so a row breaking one
+cannot be stored at all — see
+[database.md](database.md#opportunity-eligibility).
+
+### What it compares, and what it refuses to compare
+
+Only where both sides already speak one normalized vocabulary:
+
+```text
+CEFR written as CEFR         B2 vs C1   -> compared
+a level written in words     "courant"  -> not comparable -> UNKNOWN
+levels on one ladder         BAC_PLUS_3 vs BAC_PLUS_5 -> compared
+levels across two ladders    BAC_PLUS_5 vs MASTER     -> not comparable -> UNKNOWN
+```
+
+No mapping turns `fluent` into `C1` or `native` into `C2`, here or anywhere in
+this project, and no visa conclusion is reachable from a nationality, a country
+of residence or a posting's location — none of those is an input to any rule.
+
+Three dimensions currently answer UNKNOWN or NOT_APPLICABLE for every real
+profile, and the `audit` command prints why:
+
+* **education** — Phase 3.4 stores an education as institution, programme and
+  period, verbatim, and normalizes no degree level;
+* **current enrolment** — neither phase represents it, on either side;
+* **experience** — Phase 3.4 normalizes no duration, and Phase 3.5 stores a
+  quantity without the field it qualified, so "three years of data engineering"
+  has nothing comparable to answer it.
+
+None of the three is guessed at. A missing datum produces UNKNOWN, and the
+engine's rules for all three are written and tested against the day the Digital
+Twin records them.
+
+### Idempotence
+
+`input_fingerprint` is a SHA-256 over the canonical JSON of exactly what the
+rules read — both sides — plus `eligibility-rules-v1`. A second `sync` over
+unchanged inputs writes nothing, moves no timestamp, and reports:
+
+```text
+created=0
+replaced=0
+unchanged=N
+changed=false
+```
+
+A changed education requirement, required language, stated sponsorship need or
+gained skill recomputes the decisions it affects. A changed telephone number,
+GitHub URL, portfolio link, availability date or mobility recomputes nothing:
+none of them is read by a rule, so none of them is in the digest.
+
+**The output is counters, ids, versions and reason codes.** No posting's words
+and no person's reach stdout or the structured log — not a description, not an
+evidence fragment, not a skill or language name, and not the address the command
+was given. There is no flag that prints a verdict as a percentage, and nothing
+to build one from: the answer is one of three words.
+
+What this slice does **not** do: no match score, no skill-similarity score, no
+TF-IDF, no cosine similarity, no embedding, no fuzzy matching, no ranking, no
+priority, no recommendation, no notification and no auto-apply. It writes to
+nothing upstream — not `opportunities`, not any `profile_*` table, not the
+Phase 3.5 projections — and it leaves the historical
+`opportunities.eligibility_score` column untouched, because a categorical
+verdict is not a number. It opens no network connection, downloads no model and
+calls no LLM, and there is no web interface or HTTP endpoint for any of it.

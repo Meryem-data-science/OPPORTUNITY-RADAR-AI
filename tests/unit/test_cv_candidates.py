@@ -123,7 +123,7 @@ def test_the_same_parsed_cv_always_yields_the_same_candidates(synthetic_pdf) -> 
 def test_the_result_and_every_candidate_carry_the_extractor_version(extract) -> None:
     result = extract(HEADER, BODY)
 
-    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v2"
+    assert result.extractor_version == CANDIDATE_EXTRACTOR_VERSION == "cv-candidates-v7"
     assert result.extractor_version != result.parser_version
     assert result.candidates
     assert all(
@@ -1180,6 +1180,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0011_profile_preferences_availability_mobility.sql",
         "0012_opportunity_constraints.sql",
         "0013_opportunity_requirements.sql",
+        "0014_opportunity_eligibility.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications
@@ -1224,3 +1225,117 @@ def test_the_summary_never_quotes_the_cv(extract) -> None:
     for secret in ("jeanne", "example.invalid", "+33", "exemple-compte"):
         assert secret not in rendered.casefold()
     assert result.as_dict()["candidates"]
+
+# --------------------------------------------------------------------------
+# Parser v5 / candidates v6: professional-development boundary and labels
+# --------------------------------------------------------------------------
+
+
+def test_professional_development_terminates_skills_and_preserves_content() -> None:
+    parsed = parsed_from_pages(
+        "SKILLS\nPython\nSQL\nPROFESSIONAL DEVELOPMENT\nPeer mentoring circle"
+    )
+
+    assert [section.section_type for section in parsed.sections] == [
+        SectionType.SKILLS,
+        SectionType.PROFESSIONAL_DEVELOPMENT,
+    ]
+    assert parsed.sections[1].content == "Peer mentoring circle"
+    result = extract_candidates(parsed)
+    assert _texts(result, CandidateType.SKILL) == ["Python", "SQL"]
+    assert _texts(result, CandidateType.CERTIFICATION_ENTRY) == []
+
+
+def test_planned_certifications_are_explicit_proposals_with_planned_provenance() -> None:
+    result = extract_candidates(
+        parsed_from_pages(
+            "PROFESSIONAL DEVELOPMENT\n"
+            "Planned certifications: Alpha Certificate; Beta Certification"
+        )
+    )
+    candidates = result.of_type(CandidateType.CERTIFICATION_ENTRY)
+    assert [candidate.raw_text for candidate in candidates] == [
+        "Alpha Certificate", "Beta Certification"
+    ]
+    assert {candidate.rule_id for candidate in candidates} == {
+        ExtractionRule.CERTIFICATION_PLANNED_LIST_ITEM
+    }
+
+
+def test_generic_preparation_requires_each_items_certification_word() -> None:
+    result = extract_candidates(
+        parsed_from_pages(
+            "PROFESSIONAL DEVELOPMENT\n"
+            "Currently preparing: Python; Gamma Certified Associate; SQL"
+        )
+    )
+    candidates = result.of_type(CandidateType.CERTIFICATION_ENTRY)
+    assert [candidate.raw_text for candidate in candidates] == [
+        "Gamma Certified Associate"
+    ]
+    assert candidates[0].rule_id is ExtractionRule.CERTIFICATION_PREPARING_LIST_ITEM
+
+
+def test_generic_preparation_of_ordinary_skills_proposes_no_certification() -> None:
+    result = extract_candidates(
+        parsed_from_pages(
+            "PROFESSIONAL DEVELOPMENT\nCurrently preparing: Python; SQL"
+        )
+    )
+    assert result.of_type(CandidateType.CERTIFICATION_ENTRY) == ()
+
+
+def test_preparing_list_survives_a_punctuation_proven_physical_wrap() -> None:
+    parsed = parsed_from_pages(
+        "PROFESSIONAL DEVELOPMENT\n"
+        "Currently preparing: Certificate Alpha; Certified Beta\n"
+        "Advanced Track; Certificate Gamma.\n"
+        "Languages: Alder, Birch"
+    )
+
+    first = extract_candidates(parsed)
+    second = extract_candidates(parsed)
+    assert first == second
+    assert _texts(first, CandidateType.CERTIFICATION_ENTRY) == [
+        "Certificate Alpha",
+        "Certified Beta\nAdvanced Track",
+        "Certificate Gamma.",
+    ]
+    assert _texts(first, CandidateType.LANGUAGE_ENTRY) == ["Alder", "Birch"]
+    assert _texts(first, CandidateType.SKILL) == []
+
+
+def test_certification_list_never_carries_across_a_section_boundary() -> None:
+    result = extract_candidates(
+        parsed_from_pages(
+            "PROFESSIONAL DEVELOPMENT\n"
+            "Currently preparing: Certificate Alpha; Certified Beta\n"
+            "PROJECTS\nAdvanced Track; Certificate Gamma."
+        )
+    )
+
+    assert _texts(result, CandidateType.CERTIFICATION_ENTRY) == [
+        "Certificate Alpha", "Certified Beta"
+    ]
+    assert _texts(result, CandidateType.PROJECT_ENTRY) == [
+        "Advanced Track; Certificate Gamma."
+    ]
+
+
+def test_labelled_languages_work_in_any_section_and_never_leak_as_skills() -> None:
+    result = extract_candidates(
+        parsed_from_pages("SKILLS\nPython\nLanguages: Alder, Birch; Cedar")
+    )
+    assert _texts(result, CandidateType.LANGUAGE_ENTRY) == ["Alder", "Birch", "Cedar"]
+    assert _texts(result, CandidateType.SKILL) == ["Python"]
+    assert all(
+        candidate.rule_id is ExtractionRule.LANGUAGES_LABELLED_LIST_ITEM
+        for candidate in result.of_type(CandidateType.LANGUAGE_ENTRY)
+    )
+
+
+def test_unlabelled_and_colonless_language_text_is_not_inferred() -> None:
+    result = extract_candidates(
+        parsed_from_pages("PROFESSIONAL DEVELOPMENT\nLanguages Alder, Birch\nAlder")
+    )
+    assert result.of_type(CandidateType.LANGUAGE_ENTRY) == ()

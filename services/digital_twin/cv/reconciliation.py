@@ -93,8 +93,17 @@ from services.digital_twin.facts.repository import (
 #: as arguments, and neither reads these constants. Version strings are
 #: technical identifiers — no CV content and no personal data is hardcoded
 #: anywhere in this module.
-PREVIOUS_PARSER_VERSION = "cv-parser-v1"
-PREVIOUS_EXTRACTOR_VERSION = "cv-candidates-v1"
+#:
+#: They name the campaign currently persisted and reviewed in the profile; they
+#: do not mechanically move one implementation version behind the checkout.
+#: An operator reconciling from a different campaign names it explicitly. That
+#: is the only thing that changes here — nothing about *how*
+#: two campaigns are compared depends on which versions they are, and no fact
+#: is re-decided by a bump: a reading the new campaign produces identically is
+#: still the same reading and keeps the human decision already made on it,
+#: while a reading that changed is still a `PROPOSED` fact a human answers.
+PREVIOUS_PARSER_VERSION = "cv-parser-v4"
+PREVIOUS_EXTRACTOR_VERSION = "cv-candidates-v5"
 
 __all__ = [
     "ALREADY_REJECTED",

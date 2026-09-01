@@ -7,19 +7,47 @@ unreadable document is ever silently turned into an empty CV.
 
 There is no OCR in this slice. A scanned CV — a page image with no text layer —
 raises `EmptyPdfTextError` instead of producing invented content.
+
+The text layer is read once, through `pypdf`'s `visitor_text` callback. That
+callback is what `pypdf` calls each time it flushes a run of output, and it
+hands over the text state that produced it — the current transformation matrix,
+the text matrix, the font resource dictionary and the font size — so the
+extraction gets both the string `extract_text()` returns and where each of its
+lines physically sat, from a single pass over one document. Nothing is inferred
+from the geometry here: this module records it and stops.
+
+Only the public `visitor_text` signature is used. The font resource `pypdf`
+hands over is the page's own `/Font` entry for the run being flushed, and
+`pypdf` flushes what it has accumulated *before* selecting a new font, so each
+run is reported under exactly the font that rendered it. That is what makes the
+typeface a line *opens* in readable: it is the font of the first run that put
+text on that line, whatever the line changes to afterwards. No private pypdf
+attribute is touched, and a font resource stating no `/BaseFont` yields no
+signature rather than a made-up one.
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 
 from pypdf import PdfReader
 from pypdf.errors import DependencyError, PyPdfError
 
-from services.digital_twin.cv.models import ExtractedPage
-from services.digital_twin.cv.normalization import normalize_text
+from services.digital_twin.cv.models import (
+    ExtractedLine,
+    ExtractedPage,
+    LineLayout,
+)
+from services.digital_twin.cv.normalization import (
+    kept_line_indexes,
+    normalize_line,
+    normalize_text,
+    split_raw_lines,
+)
 
 
 class PdfExtractionError(RuntimeError):
@@ -50,7 +78,7 @@ class EmptyPdfTextError(PdfExtractionError):
     """Raised when the PDF is readable but carries no extractable text.
 
     This is what a scanned CV looks like from here. OCR is out of scope for
-    `cv-parser-v2`, so the parser reports the absence instead of inventing one.
+    `cv-parser-v5`, so the parser reports the absence instead of inventing one.
     """
 
 
@@ -81,6 +109,191 @@ def content_sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+#: A matrix component this close to zero is zero. PDF producers write exact
+#: zeros for an upright, unrotated line; anything larger is a real rotation or
+#: skew, and a rotated line's x/y are not comparable with an upright one's.
+_MATRIX_EPSILON = 1e-9
+
+
+@dataclass(frozen=True)
+class _TextChunk:
+    """One `visitor_text` call: the text `pypdf` flushed, and where it started.
+
+    `layout` is `None` when the text state was rotated, skewed or mirrored. That
+    is not a failure — it is the honest reading of a line whose position cannot
+    be compared with an upright one's — and it propagates as an absent layout
+    rather than as a guessed position.
+    """
+
+    text: str
+    layout: LineLayout | None
+
+
+def _font_signature(font_resource: object) -> str | None:
+    """Return the `/BaseFont` name of a font resource, verbatim, or `None`.
+
+    The value is copied out of the PDF and not touched: a subset prefix stays
+    on, case stays as written, and nothing is stripped, folded or parsed. Two
+    signatures are therefore equal exactly when the document named the same
+    font program, and the caller can compare them without ever having to decide
+    what a name *means*.
+
+    Leaving a subset prefix on is deliberate. Two subsets of one typeface read
+    as two different signatures here, which can only ever cost a merge that was
+    not made; inferring that they are "really" the same font would be the kind
+    of guess this package refuses, and its error would go the other way.
+
+    `None` covers every case where the PDF does not state a name: no font
+    resource at all (a content stream selecting a font the page's resources do
+    not declare), a resource with no `/BaseFont` — a Type 3 font has none — and
+    a reference this reader cannot resolve.
+    """
+    if not isinstance(font_resource, dict):
+        return None
+    base_font = font_resource.get("/BaseFont")
+    resolve = getattr(base_font, "get_object", None)
+    if callable(resolve):
+        try:
+            base_font = resolve()
+        except (PyPdfError, KeyError, ValueError, RecursionError):
+            return None
+    # `pypdf` models a PDF name as a `str` subclass; anything else is not a
+    # name this reader can compare, so it is no signature at all.
+    if not isinstance(base_font, str) or not base_font:
+        return None
+    return str(base_font)
+
+
+def _layout_of(
+    cm: Sequence[float],
+    tm: Sequence[float],
+    font_size: float,
+    font_signature: str | None,
+) -> LineLayout | None:
+    """Return the device-space position of a text-space origin, or `None`.
+
+    The two matrices are composed, and the result is kept only when it is a
+    plain translation and scale: a rotated or skewed line has no single "left
+    edge" or "baseline" that could be compared with the lines around it, and a
+    mirrored or degenerate scale has no reliable reading order, so both give
+    `None`. What comes back is therefore always directly comparable with the
+    other lines of the same page, or absent.
+    """
+    if len(cm) != 6 or len(tm) != 6:
+        return None
+    if any(abs(value) > _MATRIX_EPSILON for value in (cm[1], cm[2], tm[1], tm[2])):
+        return None
+    horizontal_scale, vertical_scale = cm[0] * tm[0], cm[3] * tm[3]
+    if horizontal_scale <= 0 or vertical_scale <= 0:
+        return None
+    size = font_size * vertical_scale
+    if size <= 0:
+        return None
+    return LineLayout(
+        x_start=cm[0] * tm[4] + cm[4],
+        y=cm[3] * tm[5] + cm[5],
+        font_size=size,
+        start_font_signature=font_signature,
+    )
+
+
+def _collector(record: Callable[[_TextChunk], None]) -> Callable[..., None]:
+    """Return the `visitor_text` callback that records one chunk per call.
+
+    `pypdf` calls it with the text it is flushing and the text state that
+    produced it — matrices, font resource and font size; the concatenation of
+    those strings is what `extract_text()` returns. The callback therefore
+    records the stream without interpreting it, and `_aligned_lines` is the only
+    place that turns it into lines.
+    """
+
+    def visit(
+        text: object,
+        cm: object,
+        tm: object,
+        font_dictionary: object,
+        font_size: object,
+    ) -> None:
+        if not isinstance(text, str) or not text:
+            return
+        layout: LineLayout | None = None
+        if isinstance(cm, Sequence) and isinstance(tm, Sequence):
+            try:
+                layout = _layout_of(
+                    [float(value) for value in cm],
+                    [float(value) for value in tm],
+                    float(font_size),  # type: ignore[arg-type]
+                    _font_signature(font_dictionary),
+                )
+            except (TypeError, ValueError):
+                # A text state this callback cannot read as numbers is a text
+                # state with no position, which is exactly what `None` says.
+                layout = None
+        record(_TextChunk(text=text, layout=layout))
+
+    return visit
+
+
+def _aligned_lines(
+    chunks: Sequence[_TextChunk], text: str
+) -> tuple[ExtractedLine, ...]:
+    """Return one `ExtractedLine` per line of `text`, or nothing at all.
+
+    The chunks are cut on their line breaks and normalized through exactly the
+    steps `normalize_text` applies, so the sequence that comes out should be the
+    lines of `text`, position for position. That is then *checked*, line by
+    line, and a single mismatch drops the whole page's layout: absent evidence
+    is safe, and evidence attached to the wrong line is not. The check is what
+    lets every reader downstream trust the correspondence without re-deriving
+    it.
+
+    A line's layout is the layout of the first chunk that contributed text to
+    it, which is where the line starts — position, size and the typeface the
+    line opened in alike. A chunk that contributes no text, such as the bare
+    newline `pypdf` flushes when a font changes at a line boundary, never
+    becomes a line's layout, so a line's signature is always the font that put
+    its first glyph on the page. A chunk `pypdf` could not place leaves the
+    lines it opened without layout.
+    """
+    if not text:
+        return ()
+    raw_texts: list[str] = []
+    raw_layouts: list[LineLayout | None] = []
+    pending = ""
+    pending_layout: LineLayout | None = None
+    started = False
+    for chunk in chunks:
+        pieces = split_raw_lines(chunk.text)
+        for position, piece in enumerate(pieces):
+            if position:
+                raw_texts.append(pending)
+                raw_layouts.append(pending_layout)
+                pending, pending_layout, started = "", None, False
+            if piece:
+                pending += piece
+                if not started:
+                    pending_layout, started = chunk.layout, True
+    raw_texts.append(pending)
+    raw_layouts.append(pending_layout)
+
+    normalized = [normalize_line(raw) for raw in raw_texts]
+    kept = kept_line_indexes(normalized)
+    expected = text.split("\n")
+    if len(kept) != len(expected):
+        return ()
+    lines: list[ExtractedLine] = []
+    for index, line_text in zip(kept, expected, strict=True):
+        if normalized[index] != line_text:
+            return ()
+        lines.append(
+            ExtractedLine(
+                text=line_text,
+                layout=raw_layouts[index] if line_text else None,
+            )
+        )
+    return tuple(lines)
+
+
 def extract_pages(content: bytes) -> tuple[ExtractedPage, ...]:
     """Return one normalized `ExtractedPage` per page, in document order.
 
@@ -109,20 +322,27 @@ def extract_pages(content: bytes) -> tuple[ExtractedPage, ...]:
 
     pages: list[ExtractedPage] = []
     for page_number, page in enumerate(page_objects, start=1):
+        chunks: list[_TextChunk] = []
         try:
-            raw_text = page.extract_text() or ""
+            visitor = _collector(chunks.append)
+            raw_text = page.extract_text(visitor_text=visitor) or ""
         except (PyPdfError, DependencyError, ValueError) as error:
             raise InvalidPdfError(
                 f"text extraction failed on page {page_number}: "
                 f"{type(error).__name__}"
             ) from error
+        text = normalize_text(raw_text)
         pages.append(
-            ExtractedPage(page_number=page_number, text=normalize_text(raw_text))
+            ExtractedPage(
+                page_number=page_number,
+                text=text,
+                lines=_aligned_lines(chunks, text),
+            )
         )
 
     if all(page.is_empty for page in pages):
         raise EmptyPdfTextError(
             "the PDF carries no extractable text; a scanned CV needs OCR, "
-            "which cv-parser-v2 does not perform"
+            "which cv-parser-v5 does not perform"
         )
     return tuple(pages)

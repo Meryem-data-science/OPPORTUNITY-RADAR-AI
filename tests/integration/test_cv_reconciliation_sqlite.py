@@ -69,8 +69,8 @@ TEST_ONLY_SHA256 = "ab" * 32
 
 OLD_PARSER = "cv-parser-v1"
 OLD_EXTRACTOR = "cv-candidates-v1"
-NEW_PARSER = "cv-parser-v2"
-NEW_EXTRACTOR = "cv-candidates-v2"
+NEW_PARSER = "cv-parser-v5"
+NEW_EXTRACTOR = "cv-candidates-v7"
 
 # TEST ONLY CV content. Every line below is invented and describes nobody.
 NAME = "Alex Test-Only"
@@ -626,6 +626,53 @@ def test_a_boundary_change_becomes_a_new_proposal(migrated, profile_id, seeded):
             migrated, profile_id, ProfileFactType.EXPERIENCE, fragment
         )
         assert old_fragment.status is FactStatus.ACCEPTED
+
+
+def test_a_block_the_layout_rule_grouped_is_still_only_a_proposal(
+    migrated, profile_id, seeded
+):
+    """A `SECTION_LAYOUT_CONTINUATION_BLOCK` reading answers to the same rules.
+
+    The rule that cut a block takes no part in whether two readings are the same
+    reading — only the profile, the document, the campaign, the type and the
+    text do — so a block the newer parser grouped from the page's layout arrives
+    exactly like any other regrouping: as a `PROPOSED` fact a human answers,
+    with the accepted fragments it would replace left untouched until they do.
+    """
+    grouped = make_candidate(
+        CandidateType.EDUCATION_ENTRY,
+        f"{FRAGMENT_ONE}\n{FRAGMENT_TWO}",
+        extractor_version=NEW_EXTRACTOR,
+        parser_version=NEW_PARSER,
+        rule_id=ExtractionRule.SECTION_LAYOUT_CONTINUATION_BLOCK,
+        section_type=SectionType.EDUCATION,
+    )
+
+    preparation = prepare_cv_fact_reconciliation(
+        migrated,
+        profile_id=profile_id,
+        extraction=new_extraction(grouped),
+        old_parser_version=OLD_PARSER,
+        old_extractor_version=OLD_EXTRACTOR,
+    )
+
+    proposed = [
+        entry
+        for entry in preparation.proposed
+        if entry.fact.fact_type == ProfileFactType.EDUCATION.value
+        and entry.fact.value == GROUPED_ROLE
+    ]
+    assert len(proposed) == 1
+    assert proposed[0].fact.status is FactStatus.PROPOSED
+    assert proposed[0].fact.decided_at is None
+    # Nothing the old campaign read was replaced, rewritten or deleted.
+    for fragment in (FRAGMENT_ONE, FRAGMENT_TWO):
+        assert (
+            fact_for(
+                migrated, profile_id, ProfileFactType.EXPERIENCE, fragment
+            ).status
+            is FactStatus.ACCEPTED
+        )
 
 
 def test_prepare_accepts_nothing(migrated, profile_id, seeded):

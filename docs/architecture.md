@@ -128,20 +128,44 @@ function of the file, deliberately kept apart from the opportunity collectors:
 local PDF ─ pdf.py ─ normalization.py ─ sections.py ─ parser.py ─ ParsedCv
    (bytes)  extract    conservative      lexicon       assemble    (frozen)
             + SHA-256  text clean-up     headings
+            + layout   (layout carried
+              per line  through, per line)
 ```
 
 - `models.py` holds the frozen result vocabulary: `ExtractedPage`,
-  `DetectedSection`, `ParserWarning`, `ParsedCv`, and the `PARSER_VERSION`
-  (`cv-parser-v2`) every result carries. `pypdf` is pinned to an exact
-  version in `pyproject.toml` because the extracted text depends on it:
-  changing that pin, or any extraction, normalization or segmentation rule, is
-  a change of the rules `cv-parser-v2` names, so it requires deciding whether
-  `PARSER_VERSION` must move with it. Without that, two different outputs could
-  claim the same provenance.
+  `ExtractedLine`, `LineLayout`, `DetectedSection`, `ParserWarning`, `ParsedCv`,
+  and the `PARSER_VERSION` (`cv-parser-v5`) every result carries. `pypdf` is
+  pinned to an exact version in `pyproject.toml` because the extracted text
+  depends on it: changing that pin, or any extraction, normalization or
+  segmentation rule, is a change of the rules `cv-parser-v5` names, so it
+  requires deciding whether `PARSER_VERSION` must move with it. Without that,
+  two different outputs could claim the same provenance. `cv-parser-v2` became
+  `cv-parser-v3` when pages started carrying their layout, and `cv-parser-v3`
+  became `cv-parser-v4` when `LineLayout` started carrying the typographic
+  signature a line opens in: the text is unchanged, character for character, in
+  both steps, but each result is observably richer than the last and a stored
+  parse must never claim to be one of the newer ones.
 - `pdf.py` extracts each page's existing text layer with `pypdf`, hashes the
   file, and raises one explicit error per failure mode: missing path, path that
   is not a file, unreadable PDF, encrypted PDF, and a PDF with no extractable
-  text at all.
+  text at all. It reads the layer once, through `pypdf`'s `visitor_text`
+  callback, which hands over the text state behind each flushed line — so the
+  page comes back both as the string `extract_text()` returns and as one
+  `ExtractedLine` per line of it, carrying that line's left edge, baseline and
+  font size in PDF points plus the `/BaseFont` name of the font that set its
+  first glyph (`LineLayout`, `start_font_signature`). That signature is copied
+  out verbatim and kept opaque: `pypdf` flushes accumulated text *before* a
+  `Tf` selects a new font, so each run is reported under the font that rendered
+  it, and a line whose typeface changes part-way therefore carries the one it
+  opened in. Nothing here decides that a signature means bold, regular, heading
+  or emphasis, and a font resource stating no `/BaseFont` yields `None` rather
+  than a default. Nothing is inferred from the geometry
+  here and nothing is invented: a rotated, skewed or mirrored line has no
+  comparable position and gets `layout=None`, and a page whose lines cannot be
+  matched to its text one-for-one — the correspondence is *checked*, not assumed
+  — carries no lines at all rather than lines attached to the wrong text.
+  `ExtractedPage.text` is unchanged by any of this and remains the page's
+  primary representation.
 - `normalization.py` normalizes exactly one closed list of text-layer
   artefacts and nothing else: line-ending conventions become `\n`, space-like
   and zero-width characters are folded away, runs of spaces inside a line and
@@ -176,7 +200,8 @@ in the Digital Twin, adds no migration and no table, and no value it extracts is
 a verified fact about the person.
 
 `sections.py` exposes its segmentation twice, from one implementation:
-`segment_document` returns each section with the page of every line it holds,
+`segment_document` returns each section with the page — and the layout, where
+the PDF stated it — of every line it holds,
 and `detect_sections` is the flattened view the `ParsedCv` carries. Phase 3.2B
 reads the first, so there is exactly one answer in the codebase to "where does a
 section start". `export.py` holds the one writer both CV commands use for a
@@ -202,8 +227,36 @@ found this text at this place in this document*. It carries the text as written
 `None` everywhere else), the pages it covers, the canonical section and its
 index, the `rule_id` that produced it, a stable `fingerprint`, and the
 `cv_sha256`, `parser_version` and `extractor_version` it was produced under.
-`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v2` and moves independently of
-`PARSER_VERSION`.
+`CANDIDATE_EXTRACTOR_VERSION` is `cv-candidates-v7` and moves independently of
+`PARSER_VERSION`. It became `v3` with `SECTION_LAYOUT_CONTINUATION_BLOCK`, `v4`
+with `SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`, and `v5` when the right-hand
+boundary those two rules test against stopped being a count of characters and
+became a reach measured in the size each line is set at — each of which changes
+how some section bodies are cut and therefore which candidates come out.
+`PARSER_VERSION` did not move with `v5`: a `ParsedCv` holds exactly the same
+fields, read exactly the same way, and only the cut downstream of it changed.
+
+Parser v5 adds the exact lexicon headings `professional development` and
+`developpement professionnel` as the structural
+`PROFESSIONAL_DEVELOPMENT` boundary. The section terminates a preceding
+`SKILLS` run, but does not classify arbitrary prose as certification.
+Candidates v6 reads exact `Language(s):` and `Langue(s):` lists after their
+colon, in source order. Inside professional development, a planned-
+certification label is sufficient evidence; a generic preparation label also
+requires every proposed item to carry a word from the closed certification
+lexicon. Separate planned and preparing rule IDs preserve the source meaning
+without claiming either was obtained. Spacing continuation can retain a
+physically wrapped labelled certification; typography continuation is not
+extended to this structural section.
+
+Candidates v7 also scans those exact professional-development labels locally.
+When the labelled line already contains a certification-list separator, ends
+with an unfinished item, and the immediately following physical line supplies
+another supported separator, that next line remains in the same list. Blank
+separation, another exact label, terminal punctuation, or the section boundary
+stops the carry. Generic preparing items are filtered for their closed
+certification lexicon only after this punctuation-proven reconstruction;
+planned items retain their label-only evidence contract.
 
 The taxonomy is `NAME_CANDIDATE`, `PROFESSIONAL_TITLE`, `EMAIL`, `PHONE`,
 `GITHUB_URL`, `LINKEDIN_URL`, `PORTFOLIO_URL`, `PROFESSIONAL_URL`,
@@ -245,8 +298,8 @@ What the rules refuse to do is the design:
   a portfolio on a guess.
 - **Entries.** Education, experience, project, certification and language
   sections are cut into blocks on the separator the section actually uses —
-  blank lines, else list markers, else one entry per line — and the block is
-  kept as written. One narrower separator comes first, in an `EXPERIENCE`
+  blank lines, else list markers, else the page's own layout, else one entry per
+  line — and the block is kept as written. One narrower separator comes first, in an `EXPERIENCE`
   section only: where the body opens on a line written as three or more
   non-empty parts separated by `|`, and holds at least two such lines, those
   lines are the separator (`EXPERIENCE_PIPE_DELIMITED_BLOCK`) and everything
@@ -258,6 +311,60 @@ What the rules refuse to do is the design:
   fails either precondition is cut exactly as before. No institution, employer,
   role, date, duration or diploma level is derived anywhere: that reading is
   Phase 3.4.
+- **Wrapped entries.** A body with no blank line and no list marker used to
+  become one entry per line, which turns a single entry the layout engine broke
+  across two baselines into two candidates — a human then corrects the first and
+  rejects the second. `candidates/layout.py` reads that break off the page
+  instead (`SECTION_LAYOUT_CONTINUATION_BLOCK`), in `EDUCATION`, `EXPERIENCE`,
+  `PROJECTS` and `CERTIFICATIONS` only. Nothing is compared against a constant:
+  the document is asked what *its own* spacings are, and a line joins the line
+  above it only where all of this holds — the document repeats a tightest
+  baseline step and also shows a step clearly looser than it, the two lines are
+  on one page at one font size and one left edge, their step is that tightest
+  one, and the first line reaches the right-hand boundary its own column
+  describes, so the next line's first token could not have fitted on it. A
+  document whose lines are evenly spaced demonstrates no distinction between
+  "next line" and "next entry", and then nothing is merged anywhere: that is the
+  conservative state, and it is also the state of every `ParsedCv` built from
+  text alone. Failing to merge a wrapped entry is visible in review; merging two
+  real entries silently deletes one, so every threshold leans the first way. The
+  rule reads geometry and, for the boundary, a proxy for width — never a word, a
+  keyword or a lexicon: replace every letter of a body line and the answer is
+  identical. That proxy is a line's character count carried into the PDF point
+  size the line is set at, in *character-points*, and every term of the boundary
+  comparison is in it. A raw count would not do: a column tolerates a half-point
+  size difference, and 132 characters set half a point smaller do not reach as
+  far as 121 set at the column's own size, so counting both as characters let a
+  smaller line describe a boundary the column does not have. It is a proxy and
+  not a measurement — `pypdf`'s public API states no glyph metrics for the text
+  it extracts, and inventing them is the guess this package refuses — so eight
+  narrow letters and eight wide ones measure alike. The error that leaves is
+  bounded and points the safe way: the boundary is the *widest* line the column
+  shows, so an unmeasured glyph shape can only make the rule ask more of a line
+  before calling it full, and a merge is refused rather than invented.
+- **Wrapped entries a document's spacing cannot show.** Some CVs put so nearly
+  the same baseline step between two entries as inside a wrapped one — a
+  fraction of a point apart — that the rule above correctly refuses to conclude
+  anything, and every line becomes its own entry again. `candidates/typography.py`
+  reads a second physical signal for exactly that case
+  (`SECTION_LAYOUT_STYLE_CONTINUATION_BLOCK`), in `EDUCATION` only for now: the
+  typeface a column is seen to *open* its entries in. Which typeface that is, is
+  never assumed — a column demonstrates it by repeating the alternation
+  `A … B … A`, one signature opening the run, another appearing between two of
+  its occurrences — so a document opening in its lighter face is read exactly as
+  correctly as one opening in its heavier face, and neither "bold" nor any other
+  interpretation of a `/BaseFont` name appears anywhere in the code. `A B`,
+  `A A`, `B B` and `A B C` all demonstrate nothing and merge nothing. The
+  typeface is never the only evidence either: a line joins the block above only
+  when that block was itself opened in the column's opening signature, the line
+  is set in a different one, the two are on one page at one size and one left
+  edge on adjacent baselines, and the line above reaches the right-hand boundary
+  its own column describes. A run whose signatures the PDF does not fully state
+  demonstrates nothing, so the whole mechanism is inert on a document that
+  states no typography, exactly as it is on one built from text alone. The two
+  rules are named separately on purpose: a reader of a candidate's provenance
+  must be able to tell whether spacing or typography grouped its lines. The
+  spacing rule is tried first and a body is only ever cut by one of them.
 - **Skills.** Mentions come only from a recognised `SKILLS` section, split on
   the separators the CV used. There is no level of any kind in the model — no
   proficiency, no confidence, no score — so "Azure Data Platform (avancé)" is
@@ -366,7 +473,8 @@ PDF ─ parse_cv_pdf ─ extract_candidates ─ fact_bridge ─ PROPOSED fact
                                                             │
                                               human review ─┴─ ACCEPT / REJECT
                                               (review_cli)     CORRECT / SKIP
-                                                               / QUIT
+                                              fact by fact,    / QUIT
+                                              or by group
 ```
 
 The bridge exists so that neither side has to know about the other. The
@@ -427,6 +535,29 @@ profile and never creates one, and it offers exactly five answers. Any other
 input prints a notice and asks again rather than falling through to a default.
 Quitting is safe and resuming is expected: undecided facts stay `PROPOSED`,
 decided ones are never offered again, and a second run re-imports nothing.
+
+`--grouped` is a second shape of that same review, and only a shape:
+`services/digital_twin/cv/grouped_review.py` says which group a fact type is
+shown in and what a typed command means, and decides nothing; `review_cli.py`
+remains the one place a decision is taken.
+
+```text
+still-PROPOSED facts ─ build_review_groups ─ printed group ─ human ─ a / a 1,3-5
+   (3.3B import)         (canonical type)     (values +              r 2 / c 3
+                                               provenance)           s / q
+```
+
+A group is read off the canonical fact type alone — no line of the module looks
+inside a value, which would make grouping a second, unreviewed classifier — and
+a type this version does not know lands in `OTHER` rather than disappearing. The
+scope of `a` is one printed group: the session keeps the ids of the facts the
+last printed group offered and refuses to decide anything outside them, and any
+decision that changes a group reprints it before the next command, so a stale
+index cannot move a fact twice. A selection naming an unknown or already-decided
+index refuses the whole command, a malformed command decides nothing, and there
+is no command whose scope is the CV. A group decided at once is decided in one
+transaction — `decide_profile_facts` — so a batch either lands whole or not at
+all.
 
 Phase 3.3B reuses the `0007` schema and adds no migration and no table. It
 generates no Master CV PDF, no cover letter, no application and no adapted CV,
@@ -1215,7 +1346,11 @@ certifications and languages added by Phase 3.4B2, and the availability,
 mobility, preferences and career objectives a person states, added by Phase
 3.4C, all described above. Phase 3.5A adds the constraints an **opportunity**
 states and Phase 3.5B the skills and languages it asks for, which are the offer
-side of the same future comparison and are joined to no profile. No
+side of the comparison Phase 3.6 makes. Phase 3.6 makes exactly that comparison
+and no other: whether a person could apply, as `ELIGIBLE`, `INELIGIBLE` or
+`UNKNOWN`, from an explicit demand contradicted by a reliable fact — never from
+an absent one, never from a required skill, never from an ambiguity Phase 3.5B
+declined to represent, and never from a nationality or a location. No
 matching, ranking or scoring is derived
 from any of them, no CV candidate is ever imported as anything but a proposal,
 no skill level is inferred from anything, no role, employer, duration or
@@ -1228,3 +1363,80 @@ no stale-`RUNNING` detection, no automatic retry, and no self-healing collector.
 Those possible later capabilities must not be inferred from the implemented
 qualification taxonomy, the recorded run history, the source health read model,
 or reserved package names.
+
+## Eligibility (Phase 3.6)
+
+`services/eligibility/` is the first package that reads both sides of the
+database, and the only one that may. Phases 3.4 and 3.5 were each built to
+answer one half of a question and were kept apart on purpose; this one joins
+them and answers:
+
+    given what a posting explicitly demands, and what a person's reliable facts
+    state, is there a KNOWN reason they could not apply?
+
+    ELIGIBLE    nothing known stands in the way
+    INELIGIBLE  a hard requirement was contradicted by a reliable fact
+    UNKNOWN     a hard requirement applies and the fact needed is missing
+
+The layering is the same one every slice before it uses, and the seam that
+matters is between the rules and the database:
+
+```text
+    models.py       the vocabulary, and the two inputs a rule may read
+    comparison.py   the two comparisons v1 will make, and their limits
+    explanations.py deterministic sentences for the reason codes
+    fingerprint.py  the digest over exactly what the rules read
+    engine.py       the rules, pure
+    inputs.py       reading both sides out of SQLite, and what is not there
+    repository.py   transactional persistence
+    service.py      idempotent synchronization
+    audit.py        checking the stored rows against this phase's promises
+    cli.py          status, sync, audit
+```
+
+**The two input dataclasses are the contract of the whole phase.** A rule may
+read a field of `OpportunityEligibilityInput` or `ProfileEligibilityInput` and
+nothing else. There is no connection to reach through, no lazy loader and no
+`extra` dict, so a rule cannot quietly start depending on a nationality, an
+address or a telephone number — and the fingerprint, computed over exactly those
+two objects plus the engine version, therefore covers exactly what was read. A
+field added to a rule without being added to the contract does not compile, and
+a field added to the contract without being serialized fails a test rather than
+breaking idempotence silently.
+
+`engine.py` opens no database, reads no clock and touches no network, which is
+what makes the whole truth table testable in memory and the digest a promise
+rather than a hope. `inputs.py` is the only module that runs a query, and it
+reads through the repositories Phases 3.4 and 3.5 already own rather than
+issuing its own SQL over their tables.
+
+**A contradiction is not a gap.** `VIOLATED` requires all six of: an explicit
+`REQUIRED` demand; that demand not being one Phase 3.5B refused to represent;
+the dimension being one of the six this version supports; the person's side
+holding the fact; the two being genuinely comparable; and the comparison coming
+out against. Miss any one and the answer is `UNKNOWN`, `NOT_APPLICABLE` or
+`NOT_EVALUATED`. `RuleResult` refuses to construct a result breaking that, and
+`migrations/0014` refuses to store one — a guarantee worth having is worth
+having twice.
+
+**Comparison is refused unless somebody else already put the two sides on one
+scale.** CEFR is compared where both sides wrote CEFR, because `B2` *is* the
+label rather than a mapping of one; `courant`, `fluent` and `native` are not
+CEFR and answer "not comparable", which the rules turn into `UNKNOWN`. Education
+levels are compared within one ladder — `BAC_PLUS_2..5`, or
+`BACHELOR/MASTER/PHD` — and never across them, because `0012` says in its own
+comment that merging `BAC_PLUS_5` and `MASTER` "would be an equivalence nobody
+stated".
+
+**Where the schema cannot support a comparison, the phase says so rather than
+inventing one.** Education level, current enrolment and experience duration are
+each unrepresentable today, each for a reason named as a constant in
+`inputs.py`, and each answers `UNKNOWN` or `NOT_APPLICABLE`. The rules for all
+three are written and tested; they will decide the day the Digital Twin records
+what they need.
+
+Eligibility and matching stay two concepts. Phase 4 will be able to read a
+verdict, its rule results, its reason codes and its evidence pointers, and
+nothing in this phase anticipates it: there is no score, no similarity, no
+ranking and no priority, and a posting can be `ELIGIBLE` and a poor fit or
+`INELIGIBLE` and an excellent one.
