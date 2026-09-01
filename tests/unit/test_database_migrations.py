@@ -20,6 +20,9 @@ EXPECTED_TABLES = {
     "profiles",
     "profile_facts",
     "profile_fact_provenance",
+    "matching_runs",
+    "matching_assessments",
+    "matching_profile_state",
 }
 
 
@@ -51,6 +54,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0012",
             "0013",
             "0014",
+            "0015",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -68,6 +72,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0012",),
         ("0013",),
         ("0014",),
+        ("0015",),
     ]
 
 
@@ -88,6 +93,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0012",
             "0013",
             "0014",
+            "0015",
         ]
         assert apply_migrations(connection) == []
 
@@ -122,6 +128,9 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
                 "opportunity_requirement_extraction_state",
                 "opportunity_eligibilities",
                 "eligibility_rule_results",
+                "matching_runs",
+                "matching_assessments",
+                "matching_profile_state",
             )
         }
         migration_count = connection.execute(
@@ -157,8 +166,11 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "opportunity_requirement_extraction_state": 0,
         "opportunity_eligibilities": 0,
         "eligibility_rule_results": 0,
+        "matching_runs": 0,
+        "matching_assessments": 0,
+        "matching_profile_state": 0,
     }
-    assert migration_count == 14
+    assert migration_count == 15
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
