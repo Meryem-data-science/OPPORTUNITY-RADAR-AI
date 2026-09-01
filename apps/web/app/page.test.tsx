@@ -29,6 +29,13 @@ async function renderHome() {
 describe("Home", () => {
   beforeEach(() => loadOpportunitiesMock.mockReset());
 
+  it("links to the matching read surface", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    const html = await renderHome();
+    expect(html).toContain('href="/matching"');
+    expect(html).toContain("Voir mon matching");
+  });
+
   it("renders API opportunity fields and the exact original URL", async () => {
     loadOpportunitiesMock.mockResolvedValue(fixture);
     const html = await renderHome();

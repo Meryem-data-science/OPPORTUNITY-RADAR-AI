@@ -129,6 +129,25 @@ h1 {
 .status-panel h2 { margin: 0 0 0.6rem; font-size: 1.25rem; }
 .status-panel p { margin: 0; color: #617068; }
 
+.matching-summary, .technical-details, .matching-lane-collapsible { margin-top: 2rem; }
+.matching-summary dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.matching-summary dl div, .matching-card { padding: 1.5rem; border: 1px solid #dce4e0; border-radius: 14px; background: #fff; }
+.matching-summary dt { color: #53615a; }
+.matching-summary dd { margin: .5rem 0 0; font-size: 1.8rem; font-weight: 700; }
+.matching-card h3 { margin: 0; font-size: 1.35rem; }
+.matching-badge { display: inline-block; margin-top: 1rem; padding: .3rem .65rem; border-radius: 999px; background: #e4f1eb; font-size: .78rem; font-weight: 700; }
+.matching-scores { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; margin: 1rem 0; }
+.matching-scores p { display: flex; flex-direction: column; gap: .3rem; margin: 0; }
+.matching-details { margin: .5rem 0 1rem; }
+.matching-details summary, .technical-details summary, .matching-lane-collapsible > summary { cursor: pointer; font-weight: 700; }
+.matching-details div { margin-top: 1rem; }
+.matching-details div > span { margin-left: .75rem; }
+.matching-details pre { overflow-x: auto; padding: .6rem; background: #f4f7f5; font-size: .72rem; white-space: pre-wrap; }
+.technical-details { padding: 1.5rem; border: 1px solid #dce4e0; border-radius: 14px; background: #fff; }
+.technical-details dl { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1rem; overflow-wrap: anywhere; }
+.technical-details dd { margin: 0; }
+.matching-lane-collapsible { padding: 1rem; border: 1px solid #dce4e0; border-radius: 14px; }
+
 .table-scroll {
   overflow-x: auto;
   border: 1px solid #dce4e0;
@@ -197,4 +216,5 @@ h1 {
   .opportunity-card { min-height: 220px; }
   .source-health-table { font-size: 0.85rem; }
   .source-health-table th, .source-health-table td { padding: 0.7rem; }
+  .matching-summary dl, .matching-scores { grid-template-columns: 1fr; }
 }
