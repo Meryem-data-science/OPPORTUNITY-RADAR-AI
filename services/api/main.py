@@ -16,6 +16,12 @@ from services.api.source_health import (
     SourceHealthReadError,
     read_source_health,
 )
+from services.api.matching import (
+    MatchingApiReadError,
+    MatchingResponse,
+    PUBLIC_MATCHING_ERROR,
+    read_matching_surface,
+)
 
 
 app = FastAPI(title="Opportunity Radar API", version="1.5.0")
@@ -44,4 +50,16 @@ def list_source_health() -> SourceHealthListResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_SOURCE_HEALTH_ERROR,
+        ) from None
+
+
+@app.get("/api/matching", response_model=MatchingResponse)
+def get_matching() -> MatchingResponse:
+    """Return the audited persisted matching snapshot for the server profile."""
+    try:
+        return read_matching_surface()
+    except MatchingApiReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_MATCHING_ERROR,
         ) from None
