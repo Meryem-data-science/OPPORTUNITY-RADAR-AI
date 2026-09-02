@@ -48,6 +48,27 @@ from .persistence_fingerprint import (
     priority_run_fingerprint,
 )
 from .sync import PrioritySyncError, PrioritySyncResult, sync_priority
+from .read_model import (
+    PriorityAssessmentReadModel,
+    PriorityProfileReadModel,
+    PriorityProfileReadStatus,
+    PriorityReadError,
+    PriorityRunReadModel,
+    PriorityRunSummary,
+    list_priority_runs,
+    read_current_priority,
+    read_priority_run,
+)
+from .audit import (
+    PriorityAuditIssue,
+    PriorityAuditIssueCode,
+    PriorityAuditStatus,
+    PriorityProfileAuditResult,
+    PriorityProfileAuditStatus,
+    PriorityRunAuditResult,
+    audit_current_priority,
+    audit_priority_run,
+)
 
 __all__ = [
     "FRESHNESS_WEIGHT",
@@ -79,6 +100,18 @@ __all__ = [
     "PriorityStoreResult",
     "PrioritySyncError",
     "PrioritySyncResult",
+    "PriorityReadError",
+    "PriorityAssessmentReadModel",
+    "PriorityRunReadModel",
+    "PriorityRunSummary",
+    "PriorityProfileReadStatus",
+    "PriorityProfileReadModel",
+    "PriorityAuditStatus",
+    "PriorityProfileAuditStatus",
+    "PriorityAuditIssueCode",
+    "PriorityAuditIssue",
+    "PriorityRunAuditResult",
+    "PriorityProfileAuditResult",
     "build_priority_assessment",
     "assemble_priority_inputs",
     "canonical_priority_assessment_payload",
@@ -88,4 +121,9 @@ __all__ = [
     "priority_run_fingerprint",
     "store_priority_batch",
     "sync_priority",
+    "read_priority_run",
+    "list_priority_runs",
+    "read_current_priority",
+    "audit_priority_run",
+    "audit_current_priority",
 ]
