@@ -148,6 +148,26 @@ def store_priority_batch(
     if not _sha(matching_run_fingerprint):
         raise PriorityPersistenceError("invalid matching run fingerprint")
     prepared = _prepare(profile_id, assessments)
+    owner = connection.execute(
+        "SELECT user_id FROM profiles WHERE id=?", (profile_id,)
+    ).fetchone()
+    if owner is None or owner[0] != user_id:
+        raise PriorityPersistenceError(
+            "Priority profile/user provenance is inconsistent"
+        )
+    matching_run = connection.execute(
+        "SELECT profile_id,run_fingerprint FROM matching_runs WHERE id=?",
+        (matching_run_id,),
+    ).fetchone()
+    if (
+        matching_run is None
+        or matching_run[0] != profile_id
+        or not _sha(matching_run[1])
+        or matching_run[1] != matching_run_fingerprint
+    ):
+        raise PriorityPersistenceError(
+            "Priority matching run provenance is inconsistent"
+        )
     run_values = dict(
         input_assembly_version=PRIORITY_INPUT_ASSEMBLY_VERSION,
         profile_id=profile_id,

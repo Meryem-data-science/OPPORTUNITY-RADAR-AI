@@ -100,6 +100,16 @@ def store(connection, arguments):
         raise
 
 
+def priority_snapshot(connection):
+    return (
+        connection.execute("SELECT COUNT(*) FROM priority_runs").fetchone()[0],
+        connection.execute("SELECT COUNT(*) FROM priority_assessments").fetchone()[0],
+        connection.execute(
+            "SELECT * FROM priority_profile_state ORDER BY profile_id"
+        ).fetchall(),
+    )
+
+
 def test_first_store_and_identical_reuse_are_idempotent(tmp_path):
     connection, _, _, arguments = priority_fixture(tmp_path)
     first = store(connection, arguments)
@@ -172,6 +182,72 @@ def test_store_requires_active_transaction(tmp_path):
     connection, _, _, arguments = priority_fixture(tmp_path)
     with pytest.raises(PriorityPersistenceError, match="active transaction"):
         store_priority_batch(connection, **arguments)
+
+
+def test_profile_owner_provenance_supports_distinct_ids_and_rejects_wrong_user(
+    tmp_path,
+):
+    connection, identity, _, arguments = priority_fixture(tmp_path)
+    assert identity.profile_id != identity.user_id
+    correct = store(connection, arguments)
+    assert correct.created is True
+
+    before = priority_snapshot(connection)
+    other_user_id = connection.execute(
+        "SELECT id FROM users WHERE id != ? ORDER BY id LIMIT 1", (identity.user_id,)
+    ).fetchone()[0]
+    with pytest.raises(
+        PriorityPersistenceError, match="profile/user provenance is inconsistent"
+    ):
+        store(connection, arguments | {"user_id": other_user_id})
+    assert priority_snapshot(connection) == before
+
+
+@pytest.mark.parametrize(
+    "override",
+    (
+        {"matching_run_fingerprint": "f" * 64},
+        {"matching_run_id": 999_999},
+    ),
+    ids=("valid-but-wrong-fingerprint", "missing-run"),
+)
+def test_matching_run_provenance_mismatch_is_rejected_without_mutation(
+    tmp_path, override
+):
+    connection, _, _, arguments = priority_fixture(tmp_path)
+    before = priority_snapshot(connection)
+    with pytest.raises(
+        PriorityPersistenceError, match="matching run provenance is inconsistent"
+    ):
+        store(connection, arguments | override)
+    assert priority_snapshot(connection) == before
+
+
+def test_matching_run_from_another_profile_is_rejected_without_mutation(tmp_path):
+    connection, _, opportunity_ids, arguments = priority_fixture(tmp_path)
+    second = ensure_user_profile(connection, "second-owner@example.invalid")
+    item = _batch(second.profile_id, opportunity_ids[0]).assessments[0]
+    batch = MatchingBatchResult((item,), "a" * 64, "b" * 64, 1)
+    batch = replace(batch, batch_fingerprint=matching_batch_fingerprint(batch))
+    foreign_run = store_matching_batch(
+        connection,
+        second.profile_id,
+        batch,
+        selection_version=MATCHING_SELECTION_VERSION,
+    )
+    before = priority_snapshot(connection)
+    with pytest.raises(
+        PriorityPersistenceError, match="matching run provenance is inconsistent"
+    ):
+        store(
+            connection,
+            arguments
+            | {
+                "matching_run_id": foreign_run.run_id,
+                "matching_run_fingerprint": foreign_run.run_fingerprint,
+            },
+        )
+    assert priority_snapshot(connection) == before
 
 
 def test_new_snapshot_never_updates_existing_runs_or_assessments(tmp_path):
