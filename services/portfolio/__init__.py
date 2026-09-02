@@ -35,6 +35,27 @@ from .persistence_fingerprint import (
     portfolio_run_fingerprint,
 )
 from .sync import PortfolioSyncError, PortfolioSyncResult, sync_portfolio
+from .read_model import (
+    PortfolioAssessmentReadModel,
+    PortfolioProfileReadModel,
+    PortfolioProfileReadStatus,
+    PortfolioReadError,
+    PortfolioRunReadModel,
+    PortfolioRunSummary,
+    list_portfolio_runs,
+    read_current_portfolio,
+    read_portfolio_run,
+)
+from .audit import (
+    PortfolioAuditIssue,
+    PortfolioAuditIssueCode,
+    PortfolioAuditStatus,
+    PortfolioProfileAuditResult,
+    PortfolioProfileAuditStatus,
+    PortfolioRunAuditResult,
+    audit_current_portfolio,
+    audit_portfolio_run,
+)
 
 __all__ = [
     "PORTFOLIO_ENGINE_VERSION",
@@ -56,6 +77,18 @@ __all__ = [
     "PortfolioStoreResult",
     "PortfolioSyncError",
     "PortfolioSyncResult",
+    "PortfolioAssessmentReadModel",
+    "PortfolioProfileReadModel",
+    "PortfolioProfileReadStatus",
+    "PortfolioReadError",
+    "PortfolioRunReadModel",
+    "PortfolioRunSummary",
+    "PortfolioAuditIssue",
+    "PortfolioAuditIssueCode",
+    "PortfolioAuditStatus",
+    "PortfolioProfileAuditResult",
+    "PortfolioProfileAuditStatus",
+    "PortfolioRunAuditResult",
     "assemble_portfolio_inputs",
     "build_portfolio_assessment",
     "build_portfolio_assessments",
@@ -66,4 +99,9 @@ __all__ = [
     "portfolio_run_fingerprint",
     "store_portfolio_batch",
     "sync_portfolio",
+    "list_portfolio_runs",
+    "read_current_portfolio",
+    "read_portfolio_run",
+    "audit_current_portfolio",
+    "audit_portfolio_run",
 ]
