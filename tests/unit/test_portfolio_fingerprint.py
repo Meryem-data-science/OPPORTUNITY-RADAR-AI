@@ -22,6 +22,33 @@ def test_fingerprint_is_deterministic_lowercase_sha256_and_ignores_ids() -> None
 
 
 @pytest.mark.parametrize(
+    ("integer_score", "matched_count"),
+    [(1, 3), (0, 0)],
+)
+def test_equivalent_integer_and_float_scores_have_identical_semantics(
+    integer_score: int, matched_count: int
+) -> None:
+    integer_assessment = build_portfolio_assessment(
+        portfolio_input(
+            required_skill_score=integer_score,
+            required_skill_matched_count=matched_count,
+        )
+    )
+    float_assessment = build_portfolio_assessment(
+        portfolio_input(
+            required_skill_score=float(integer_score),
+            required_skill_matched_count=matched_count,
+        )
+    )
+
+    assert integer_assessment.required_skill_score == float(integer_score)
+    assert isinstance(integer_assessment.required_skill_score, float)
+    assert integer_assessment.assessment_fingerprint == (
+        float_assessment.assessment_fingerprint
+    )
+
+
+@pytest.mark.parametrize(
     "changes",
     [
         {"required_skill_matched_count": 2, "required_skill_score": round(2 / 3, 12)},

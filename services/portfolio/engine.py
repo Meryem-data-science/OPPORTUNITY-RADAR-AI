@@ -132,8 +132,15 @@ def build_portfolio_assessment(value: PortfolioInput) -> PortfolioAssessment:
             if len(reasons) > 1:
                 bucket = PortfolioBucket.TARGET
                 safe_cap_applied = True
+    assessment_values = value.__dict__ | {
+        "required_skill_score": (
+            None
+            if value.required_skill_score is None
+            else float(value.required_skill_score)
+        )
+    }
     assessment = PortfolioAssessment(
-        **value.__dict__,
+        **assessment_values,
         disposition=disposition,
         bucket=bucket,
         safe_cap_applied=safe_cap_applied,
