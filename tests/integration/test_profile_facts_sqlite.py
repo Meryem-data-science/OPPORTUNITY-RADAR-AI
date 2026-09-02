@@ -164,7 +164,6 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
     ).fetchall()
 
     assert recorded[-1] == ("0017",)
-    "0017",
     assert _counts(migrated) == (0, 0)
 
 
