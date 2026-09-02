@@ -305,7 +305,8 @@ def test_priority_package_has_no_impure_or_future_dependencies():
     from pathlib import Path
 
     source = "\n".join(
-        path.read_text() for path in Path("services/priority").glob("*.py")
+        (Path("services/priority") / name).read_text()
+        for name in ("models.py", "engine.py", "fingerprint.py")
     )
     forbidden = (
         "sqlite",

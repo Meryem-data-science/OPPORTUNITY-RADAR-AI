@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 
-from services.collector.matching import MatchLane, MatchingAssessment
+from services.collector.matching import MatchLane
 from services.collector.qualification.taxonomy import ListingQuality
-from services.eligibility import EligibilityDecision, GlobalStatus
+from services.eligibility import GlobalStatus
 
 PRIORITY_ENGINE_VERSION = "priority-engine-v1"
 PRIORITY_RULES_VERSION = "priority-rules-v1"
@@ -64,9 +64,31 @@ class PriorityReasonCode(StrEnum):
 
 
 @dataclass(frozen=True)
+class PriorityMatchingSnapshot:
+    profile_id: int
+    opportunity_id: int
+    match_quality: float | None
+    evidence_coverage: float
+    lane: MatchLane
+    assessment_fingerprint: str
+    matching_engine_version: str
+    matching_rules_version: str
+    semantic_percentile_version: str
+
+
+@dataclass(frozen=True)
+class PriorityEligibilitySnapshot:
+    profile_id: int
+    opportunity_id: int
+    status: GlobalStatus
+    input_fingerprint: str
+    engine_version: str
+
+
+@dataclass(frozen=True)
 class PriorityInput:
-    matching: MatchingAssessment
-    eligibility: EligibilityDecision
+    matching: PriorityMatchingSnapshot
+    eligibility: PriorityEligibilitySnapshot
     publication_quality: ListingQuality | None
     published_at: date | None
     deadline: date | None
