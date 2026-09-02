@@ -22,6 +22,12 @@ from services.api.matching import (
     PUBLIC_MATCHING_ERROR,
     read_matching_surface,
 )
+from services.api.priority import (
+    PUBLIC_PRIORITY_ERROR,
+    PriorityApiReadError,
+    PriorityResponse,
+    read_priority_surface,
+)
 
 
 app = FastAPI(title="Opportunity Radar API", version="1.5.0")
@@ -62,4 +68,16 @@ def get_matching() -> MatchingResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_MATCHING_ERROR,
+        ) from None
+
+
+@app.get("/api/priority", response_model=PriorityResponse)
+def get_priority() -> PriorityResponse:
+    """Return the audited persisted Priority snapshot for the server profile."""
+    try:
+        return read_priority_surface()
+    except PriorityApiReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_PRIORITY_ERROR,
         ) from None
