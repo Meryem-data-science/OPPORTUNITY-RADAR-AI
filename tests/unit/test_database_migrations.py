@@ -23,6 +23,12 @@ EXPECTED_TABLES = {
     "matching_runs",
     "matching_assessments",
     "matching_profile_state",
+    "priority_runs",
+    "priority_assessments",
+    "priority_profile_state",
+    "portfolio_runs",
+    "portfolio_assessments",
+    "portfolio_profile_state",
 }
 
 
@@ -56,6 +62,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0014",
             "0015",
             "0016",
+            "0017",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -75,6 +82,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0014",),
         ("0015",),
         ("0016",),
+        ("0017",),
     ]
 
 
@@ -97,6 +105,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0014",
             "0015",
             "0016",
+            "0017",
         ]
         assert apply_migrations(connection) == []
 
@@ -137,6 +146,9 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
                 "priority_runs",
                 "priority_assessments",
                 "priority_profile_state",
+                "portfolio_runs",
+                "portfolio_assessments",
+                "portfolio_profile_state",
             )
         }
         migration_count = connection.execute(
@@ -178,8 +190,11 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "priority_runs": 0,
         "priority_assessments": 0,
         "priority_profile_state": 0,
+        "portfolio_runs": 0,
+        "portfolio_assessments": 0,
+        "portfolio_profile_state": 0,
     }
-    assert migration_count == 16
+    assert migration_count == 17
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
