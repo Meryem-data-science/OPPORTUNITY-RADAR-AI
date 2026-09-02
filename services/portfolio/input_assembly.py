@@ -124,7 +124,10 @@ def _required_skill(payload: Mapping[str, Any]) -> tuple[float | None, int, int]
         or not 0 <= score <= 1
     ):
         return None
-    return float(score), matched, total
+    stable_score = float(score)
+    if round(stable_score, 12) != round(matched / total, 12):
+        return None
+    return stable_score, matched, total
 
 
 def assemble_portfolio_inputs(
