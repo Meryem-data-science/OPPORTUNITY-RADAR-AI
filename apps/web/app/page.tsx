@@ -34,6 +34,9 @@ export default async function Home() {
           </p>
         </div>
         <nav className="hero-links" aria-label="Pages de supervision">
+          <Link className="health-link" href="/priority">
+            Voir mes priorités
+          </Link>
           <Link className="health-link" href="/matching">
             Voir mon matching
           </Link>
