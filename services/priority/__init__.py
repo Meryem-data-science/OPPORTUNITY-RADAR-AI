@@ -37,6 +37,17 @@ from .models import (
     PriorityMatchingSnapshot,
     PriorityReasonCode,
 )
+from .persistence import (
+    PriorityPersistenceError,
+    PriorityStoreResult,
+    store_priority_batch,
+)
+from .persistence_fingerprint import (
+    PRIORITY_PERSISTENCE_VERSION,
+    canonical_priority_run_payload,
+    priority_run_fingerprint,
+)
+from .sync import PrioritySyncError, PrioritySyncResult, sync_priority
 
 __all__ = [
     "FRESHNESS_WEIGHT",
@@ -48,6 +59,7 @@ __all__ = [
     "PRIORITY_QUALITY_VERSION",
     "PRIORITY_RULES_VERSION",
     "PRIORITY_INPUT_ASSEMBLY_VERSION",
+    "PRIORITY_PERSISTENCE_VERSION",
     "ComponentStatus",
     "DeadlineStatus",
     "PriorityAssessment",
@@ -63,9 +75,17 @@ __all__ = [
     "PriorityEligibilitySnapshot",
     "PriorityMatchingSnapshot",
     "PriorityReasonCode",
+    "PriorityPersistenceError",
+    "PriorityStoreResult",
+    "PrioritySyncError",
+    "PrioritySyncResult",
     "build_priority_assessment",
     "assemble_priority_inputs",
     "canonical_priority_assessment_payload",
     "freshness_score",
     "priority_assessment_fingerprint",
+    "canonical_priority_run_payload",
+    "priority_run_fingerprint",
+    "store_priority_batch",
+    "sync_priority",
 ]
