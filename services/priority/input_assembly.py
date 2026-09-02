@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import numbers
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -102,6 +103,32 @@ def parse_persisted_date(value: object) -> date | None:
 
 def _issue(code, message, opportunity_id=None):
     return PriorityReadinessIssue(code, message, opportunity_id)
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _valid_matching_numbers(match_quality: object, evidence_coverage: object) -> bool:
+    if (
+        isinstance(evidence_coverage, bool)
+        or not isinstance(evidence_coverage, numbers.Real)
+        or not math.isfinite(evidence_coverage)
+        or not 0.0 <= evidence_coverage <= 1.0
+    ):
+        return False
+    if match_quality is not None and (
+        isinstance(match_quality, bool)
+        or not isinstance(match_quality, numbers.Real)
+        or not math.isfinite(match_quality)
+        or not 0.0 <= match_quality <= 1.0
+    ):
+        return False
+    return (evidence_coverage == 0.0) == (match_quality is None)
 
 
 def _incomplete(profile_id, evaluation_date, issues, user_id=None, run_id=None):
@@ -272,9 +299,11 @@ def assemble_priority_inputs(
                     )
                 )
         stored = None
+        eligibility_invalid = False
         try:
             stored = read_eligibility(connection, user_id, opportunity_id)
         except (ValueError, TypeError):
+            eligibility_invalid = True
             issues.append(
                 _issue(
                     PriorityReadinessIssueCode.INVALID_UPSTREAM_VALUE,
@@ -282,7 +311,7 @@ def assemble_priority_inputs(
                     opportunity_id,
                 )
             )
-        if stored is None:
+        if stored is None and not eligibility_invalid:
             issues.append(
                 _issue(
                     PriorityReadinessIssueCode.ELIGIBILITY_SNAPSHOT_MISSING,
@@ -290,7 +319,7 @@ def assemble_priority_inputs(
                     opportunity_id,
                 )
             )
-        elif stored.engine_version != ELIGIBILITY_ENGINE_VERSION:
+        elif stored is not None and stored.engine_version != ELIGIBILITY_ENGINE_VERSION:
             issues.append(
                 _issue(
                     PriorityReadinessIssueCode.ELIGIBILITY_VERSION_STALE,
@@ -300,8 +329,10 @@ def assemble_priority_inputs(
             )
         try:
             lane = MatchLane(assessment.lane)
-            if not assessment.assessment_fingerprint or not math.isfinite(
-                assessment.evidence_coverage
+            if not _is_sha256(
+                assessment.assessment_fingerprint
+            ) or not _valid_matching_numbers(
+                assessment.match_quality, assessment.evidence_coverage
             ):
                 raise ValueError
         except (ValueError, TypeError):
@@ -338,7 +369,7 @@ def assemble_priority_inputs(
                 )
         if stored is None or quality is None or lane is None:
             continue
-        if not stored.input_fingerprint or not stored.engine_version:
+        if not _is_sha256(stored.input_fingerprint) or not stored.engine_version:
             issues.append(
                 _issue(
                     PriorityReadinessIssueCode.INVALID_UPSTREAM_VALUE,
