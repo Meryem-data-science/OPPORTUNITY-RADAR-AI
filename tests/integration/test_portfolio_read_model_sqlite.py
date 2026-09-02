@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 import pytest
 
+from services.digital_twin.repository import ensure_user_profile
 from services.portfolio import (
     PortfolioProfileReadStatus,
     PortfolioReadError,
@@ -82,6 +83,115 @@ def test_strict_corruption_rejection(tmp_path, statement):
     connection.commit()
     with pytest.raises(PortfolioReadError):
         read_portfolio_run(connection, stored.run_id)
+
+
+@pytest.mark.parametrize(
+    ("disposition", "bucket"),
+    [
+        ("INCLUDED", None),
+        ("EXCLUDED", "SAFE"),
+        ("EXCLUDED", "TARGET"),
+        ("EXCLUDED", "AMBITIOUS"),
+    ],
+)
+def test_disposition_bucket_invariants_are_explicitly_rejected(
+    tmp_path, disposition, bucket
+):
+    connection, _, _, stored = _ready(tmp_path)
+    connection.execute("PRAGMA ignore_check_constraints=ON")
+    connection.execute(
+        "UPDATE portfolio_assessments SET disposition=?,bucket=? WHERE run_id=? LIMIT 1",
+        (disposition, bucket, stored.run_id),
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="disposition/bucket"):
+        read_portfolio_run(connection, stored.run_id)
+
+
+@pytest.mark.parametrize(
+    ("score", "matched", "total"),
+    [(0.5, 1, 3), (0.5, 0, 0), (0.5, 2, 1)],
+    ids=("ratio-mismatch", "zero-total-non-null-score", "matched-over-total"),
+)
+def test_required_skill_invariants_are_explicitly_rejected(
+    tmp_path, score, matched, total
+):
+    connection, _, _, stored = _ready(tmp_path)
+    connection.execute("PRAGMA ignore_check_constraints=ON")
+    connection.execute(
+        """UPDATE portfolio_assessments SET required_skill_score=?,
+        required_skill_matched_count=?,required_skill_total_count=?
+        WHERE run_id=? LIMIT 1""",
+        (score, matched, total, stored.run_id),
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="required-skill"):
+        read_portfolio_run(connection, stored.run_id)
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "assessment_count",
+        "included_count",
+        "excluded_count",
+        "safe_count",
+        "target_count",
+        "ambitious_count",
+    ],
+)
+def test_each_persisted_run_count_is_checked(tmp_path, column):
+    connection, _, _, stored = _ready(tmp_path)
+    connection.execute("PRAGMA ignore_check_constraints=ON")
+    connection.execute(
+        f"UPDATE portfolio_runs SET {column}={column}+1 WHERE id=?", (stored.run_id,)
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="count"):
+        read_portfolio_run(connection, stored.run_id)
+
+
+def _disable_foreign_keys(connection):
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+
+
+def test_missing_current_run_is_rejected(tmp_path):
+    connection, identity, _, _ = _ready(tmp_path)
+    _disable_foreign_keys(connection)
+    connection.execute(
+        "UPDATE portfolio_profile_state SET current_run_id=999999 WHERE profile_id=?",
+        (identity.profile_id,),
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="does not exist"):
+        read_current_portfolio(connection, identity.profile_id)
+
+
+def test_current_run_from_another_profile_is_rejected(tmp_path):
+    connection, identity, _, stored = _ready(tmp_path)
+    other = ensure_user_profile(connection, "foreign-portfolio@example.invalid")
+    _disable_foreign_keys(connection)
+    connection.execute(
+        "UPDATE portfolio_runs SET profile_id=? WHERE id=?",
+        (other.profile_id, stored.run_id),
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="another profile"):
+        read_current_portfolio(connection, identity.profile_id)
+
+
+@pytest.mark.parametrize("column", ["persistence_version", "input_assembly_version"])
+def test_each_state_version_mismatch_is_rejected(tmp_path, column):
+    connection, identity, _, _ = _ready(tmp_path)
+    connection.execute(
+        f"UPDATE portfolio_profile_state SET {column}='corrupt' WHERE profile_id=?",
+        (identity.profile_id,),
+    )
+    connection.commit()
+    with pytest.raises(PortfolioReadError, match="versions"):
+        read_current_portfolio(connection, identity.profile_id)
 
 
 def test_state_missing_and_version_mismatch_are_rejected(tmp_path):
