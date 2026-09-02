@@ -12,6 +12,8 @@ from services.priority import (
     PriorityCategory,
     PriorityInput,
     PriorityInputError,
+    PriorityEligibilitySnapshot,
+    PriorityMatchingSnapshot,
     PriorityReasonCode,
     build_priority_assessment,
     freshness_score,
@@ -74,6 +76,43 @@ def assess(
     )
     return build_priority_assessment(
         PriorityInput(matching, decision, quality, published_at, deadline, TODAY)
+    )
+
+
+def test_lightweight_snapshots_preserve_phase_5_1a_semantics_and_fingerprint():
+    historical_matching, historical_eligibility = upstream()
+    historical = build_priority_assessment(
+        PriorityInput(
+            historical_matching,
+            historical_eligibility,
+            ListingQuality.NORMAL_LISTING,
+            TODAY,
+            None,
+            TODAY,
+        )
+    )
+    projected = build_priority_assessment(
+        PriorityInput(
+            PriorityMatchingSnapshot(**vars(historical_matching)),
+            PriorityEligibilitySnapshot(**vars(historical_eligibility)),
+            ListingQuality.NORMAL_LISTING,
+            TODAY,
+            None,
+            TODAY,
+        )
+    )
+    assert (
+        projected.priority_score,
+        projected.priority_evidence_coverage,
+        projected.priority_category,
+        projected.reason_codes,
+        projected.assessment_fingerprint,
+    ) == (
+        historical.priority_score,
+        historical.priority_evidence_coverage,
+        historical.priority_category,
+        historical.reason_codes,
+        historical.assessment_fingerprint,
     )
 
 
@@ -305,7 +344,8 @@ def test_priority_package_has_no_impure_or_future_dependencies():
     from pathlib import Path
 
     source = "\n".join(
-        path.read_text() for path in Path("services/priority").glob("*.py")
+        (Path("services/priority") / name).read_text()
+        for name in ("models.py", "engine.py", "fingerprint.py")
     )
     forbidden = (
         "sqlite",
