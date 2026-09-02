@@ -27,6 +27,42 @@ def _codes(result):
     return {issue.code for issue in result.issues}
 
 
+def _corrupt_with_foreign_keys_disabled(connection, statement, parameters):
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = OFF")
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+    try:
+        connection.execute(statement, parameters)
+        connection.commit()
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+    assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_audit_issue_codes_cover_the_complete_phase_5_1d_contract():
+    assert {code.value for code in PriorityAuditIssueCode} == {
+        "INVALID_RUN_JSON",
+        "NON_CANONICAL_RUN_JSON",
+        "RUN_FINGERPRINT_MISMATCH",
+        "RUN_METADATA_MISMATCH",
+        "ASSESSMENT_COUNT_MISMATCH",
+        "INVALID_ASSESSMENT_JSON",
+        "NON_CANONICAL_ASSESSMENT_JSON",
+        "ASSESSMENT_FINGERPRINT_MISMATCH",
+        "ASSESSMENT_COLUMNS_MISMATCH",
+        "RUN_COHORT_MISMATCH",
+        "PROFILE_MISSING",
+        "PROFILE_USER_PROVENANCE_MISMATCH",
+        "MATCHING_RUN_MISSING",
+        "MATCHING_PROFILE_MISMATCH",
+        "MATCHING_FINGERPRINT_MISMATCH",
+        "STATE_MISSING_WITH_HISTORY",
+        "STATE_RUN_MISSING",
+        "STATE_RUN_PROFILE_MISMATCH",
+        "STATE_VERSION_MISMATCH",
+    }
+
+
 def test_clean_run_and_current_profile_are_ready_and_deterministic(tmp_path):
     connection, identity, _, _, run = _ready(tmp_path)
     first = audit_priority_run(connection, run.run_id)
@@ -111,6 +147,27 @@ def test_noncanonical_assessment_json_does_not_imply_fingerprint_mismatch(tmp_pa
     assert PriorityAuditIssueCode.ASSESSMENT_FINGERPRINT_MISMATCH not in codes
 
 
+def test_invalid_assessment_json_is_structured_with_opportunity_context(tmp_path):
+    connection, _, opportunity_ids, _, run = _ready(tmp_path)
+    opportunity_id = opportunity_ids[0]
+    connection.execute(
+        """UPDATE priority_assessments SET assessment_payload_json='not-json'
+        WHERE run_id=? AND opportunity_id=?""",
+        (run.run_id, opportunity_id),
+    )
+    connection.commit()
+
+    result = audit_priority_run(connection, run.run_id)
+
+    assert result.status is PriorityAuditStatus.CORRUPT
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code is PriorityAuditIssueCode.INVALID_ASSESSMENT_JSON
+    )
+    assert (issue.run_id, issue.opportunity_id) == (run.run_id, opportunity_id)
+
+
 def test_missing_assessment_breaks_count_and_cohort(tmp_path):
     connection, _, opportunity_ids, _, run = _ready(tmp_path)
     connection.execute(
@@ -152,6 +209,40 @@ def test_matching_fingerprint_provenance(tmp_path):
     )
 
 
+def test_missing_matching_run_is_structured_corruption(tmp_path):
+    connection, _, _, _, run = _ready(tmp_path)
+    _corrupt_with_foreign_keys_disabled(
+        connection,
+        "UPDATE priority_runs SET matching_run_id=? WHERE id=?",
+        (999_999, run.run_id),
+    )
+
+    result = audit_priority_run(connection, run.run_id)
+
+    assert result.status is PriorityAuditStatus.CORRUPT
+    assert PriorityAuditIssueCode.MATCHING_RUN_MISSING in _codes(result)
+
+
+def test_matching_run_from_another_profile_is_structured_corruption(tmp_path):
+    connection, _, _, arguments, run = _ready(tmp_path)
+    connection.execute("INSERT INTO users(email) VALUES ('matching-b@example.invalid')")
+    user_b = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.execute("INSERT INTO profiles(user_id) VALUES (?)", (user_b,))
+    profile_b = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.commit()
+    _corrupt_with_foreign_keys_disabled(
+        connection,
+        "UPDATE matching_runs SET profile_id=? WHERE id=?",
+        (profile_b, arguments["matching_run_id"]),
+    )
+
+    result = audit_priority_run(connection, run.run_id)
+
+    assert result.status is PriorityAuditStatus.CORRUPT
+    assert PriorityAuditIssueCode.MATCHING_PROFILE_MISMATCH in _codes(result)
+    assert PriorityAuditIssueCode.MATCHING_RUN_MISSING not in _codes(result)
+
+
 def test_history_without_state_is_profile_corruption(tmp_path):
     connection, identity, _, _, _ = _ready(tmp_path)
     connection.execute(
@@ -161,6 +252,59 @@ def test_history_without_state_is_profile_corruption(tmp_path):
     result = audit_current_priority(connection, identity.profile_id)
     assert result.status is PriorityProfileAuditStatus.CORRUPT
     assert _codes(result) == {PriorityAuditIssueCode.STATE_MISSING_WITH_HISTORY}
+
+
+def test_missing_current_state_run_is_structured_corruption(tmp_path):
+    connection, identity, _, _, _ = _ready(tmp_path)
+    _corrupt_with_foreign_keys_disabled(
+        connection,
+        "UPDATE priority_profile_state SET current_run_id=? WHERE profile_id=?",
+        (999_999, identity.profile_id),
+    )
+
+    result = audit_current_priority(connection, identity.profile_id)
+
+    assert result.status is PriorityProfileAuditStatus.CORRUPT
+    assert _codes(result) == {PriorityAuditIssueCode.STATE_RUN_MISSING}
+    assert result.run_audit is None
+
+
+def test_current_state_run_from_another_profile_is_structured_corruption(tmp_path):
+    connection, identity, _, _, first = _ready(tmp_path)
+    second = sync_priority(connection, identity.profile_id, date(2026, 9, 3))
+    connection.execute("INSERT INTO users(email) VALUES ('priority-b@example.invalid')")
+    user_b = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.execute("INSERT INTO profiles(user_id) VALUES (?)", (user_b,))
+    profile_b = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.commit()
+    _corrupt_with_foreign_keys_disabled(
+        connection,
+        "UPDATE priority_runs SET profile_id=? WHERE id=?",
+        (profile_b, second.run_id),
+    )
+    assert first.run_id != second.run_id
+
+    result = audit_current_priority(connection, identity.profile_id)
+
+    assert result.status is PriorityProfileAuditStatus.CORRUPT
+    assert PriorityAuditIssueCode.STATE_RUN_PROFILE_MISMATCH in _codes(result)
+    assert result.run_audit is None
+
+
+def test_current_state_version_mismatch_is_structured_corruption(tmp_path):
+    connection, identity, _, _, _ = _ready(tmp_path)
+    connection.execute(
+        """UPDATE priority_profile_state SET persistence_version=?
+        WHERE profile_id=?""",
+        ("different-persistence-version", identity.profile_id),
+    )
+    connection.commit()
+
+    result = audit_current_priority(connection, identity.profile_id)
+
+    assert result.status is PriorityProfileAuditStatus.CORRUPT
+    assert _codes(result) == {PriorityAuditIssueCode.STATE_VERSION_MISMATCH}
+    assert result.run_audit is None
 
 
 def test_current_old_historical_run_is_valid(tmp_path):
