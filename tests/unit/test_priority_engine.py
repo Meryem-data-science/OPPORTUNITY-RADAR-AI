@@ -29,6 +29,9 @@ def upstream(
     eligibility=GlobalStatus.ELIGIBLE,
     matching_fp="match-fp",
     eligibility_fp="eligibility-fp",
+    matching_engine_version="matching-engine-v1",
+    matching_rules_version="matching-rules-v1",
+    semantic_percentile_version="semantic-percentile-v1",
 ):
     matching = SimpleNamespace(
         profile_id=7,
@@ -37,9 +40,9 @@ def upstream(
         evidence_coverage=coverage,
         lane=lane,
         assessment_fingerprint=matching_fp,
-        matching_engine_version="matching-engine-v1",
-        matching_rules_version="matching-rules-v1",
-        semantic_percentile_version="semantic-percentile-v1",
+        matching_engine_version=matching_engine_version,
+        matching_rules_version=matching_rules_version,
+        semantic_percentile_version=semantic_percentile_version,
     )
     decision = SimpleNamespace(
         profile_id=7,
@@ -108,6 +111,42 @@ def test_matching_lanes_preserve_score(lane):
     if lane is MatchLane.OUTSIDE_PREFERENCES:
         assert result.priority_category is PriorityCategory.LOW
         assert result.outside_preferences_cap_applied
+        assert (
+            PriorityReasonCode.MATCHING_LANE_OUTSIDE_PREFERENCES in result.reason_codes
+        )
+        assert PriorityReasonCode.OUTSIDE_PREFERENCES_CAP in result.reason_codes
+
+
+def test_outside_preferences_already_low_does_not_report_cap():
+    result = assess(
+        match=0.0,
+        quality=None,
+        published_at=None,
+        lane=MatchLane.OUTSIDE_PREFERENCES,
+    )
+    assert result.priority_category is PriorityCategory.LOW
+    assert not result.outside_preferences_cap_applied
+    assert PriorityReasonCode.MATCHING_LANE_OUTSIDE_PREFERENCES in result.reason_codes
+    assert PriorityReasonCode.OUTSIDE_PREFERENCES_CAP not in result.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("eligibility", "deadline"),
+    [
+        (GlobalStatus.INELIGIBLE, None),
+        (GlobalStatus.ELIGIBLE, TODAY - timedelta(days=1)),
+    ],
+)
+def test_outside_preferences_blocked_does_not_report_cap(eligibility, deadline):
+    result = assess(
+        lane=MatchLane.OUTSIDE_PREFERENCES,
+        eligibility=eligibility,
+        deadline=deadline,
+    )
+    assert result.priority_category is PriorityCategory.IGNORE
+    assert not result.outside_preferences_cap_applied
+    assert PriorityReasonCode.MATCHING_LANE_OUTSIDE_PREFERENCES in result.reason_codes
+    assert PriorityReasonCode.OUTSIDE_PREFERENCES_CAP not in result.reason_codes
 
 
 def test_uncertain_eligibility_has_no_penalty_and_ineligible_blocks_without_zeroing():
@@ -240,6 +279,22 @@ def test_identity_mismatch_and_missing_provenance_are_rejected():
         )
     with pytest.raises(PriorityInputError, match="fingerprint"):
         assess(matching_fp="")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("matching_engine_version", ""),
+        ("matching_rules_version", ""),
+        ("semantic_percentile_version", ""),
+        ("matching_engine_version", "   "),
+        ("matching_rules_version", "\t"),
+        ("semantic_percentile_version", "\n"),
+    ],
+)
+def test_empty_matching_provenance_versions_are_rejected(field, value):
+    with pytest.raises(PriorityInputError, match="matching provenance versions"):
+        assess(**{field: value})
 
 
 def replace_compat(value, **changes):

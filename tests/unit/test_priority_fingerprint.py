@@ -7,6 +7,7 @@ from services.eligibility import GlobalStatus
 from services.priority import (
     PRIORITY_RULES_VERSION,
     PriorityInput,
+    PriorityReasonCode,
     build_priority_assessment,
     canonical_priority_assessment_payload,
     priority_assessment_fingerprint,
@@ -39,11 +40,36 @@ def test_same_semantic_input_is_deterministic():
     assert len(make().assessment_fingerprint) == 64
 
 
+def test_technical_identity_does_not_change_fingerprint():
+    result = make()
+    different_ids = replace(result, profile_id=700, opportunity_id=1100)
+    assert (
+        priority_assessment_fingerprint(different_ids) == result.assessment_fingerprint
+    )
+
+
 def test_reason_order_is_canonicalized():
     result = make()
     reordered = replace(result, reason_codes=tuple(reversed(result.reason_codes)))
     assert priority_assessment_fingerprint(result) == priority_assessment_fingerprint(
         reordered
+    )
+
+
+def test_outside_preferences_cap_reason_affects_fingerprint():
+    result = make(lane=MatchLane.OUTSIDE_PREFERENCES)
+    assert PriorityReasonCode.OUTSIDE_PREFERENCES_CAP in result.reason_codes
+    without_cap_reason = replace(
+        result,
+        reason_codes=tuple(
+            reason
+            for reason in result.reason_codes
+            if reason is not PriorityReasonCode.OUTSIDE_PREFERENCES_CAP
+        ),
+    )
+    assert (
+        priority_assessment_fingerprint(without_cap_reason)
+        != result.assessment_fingerprint
     )
 
 
@@ -71,6 +97,9 @@ def test_priority_version_changes_fingerprint():
 
 
 def test_canonical_payload_excludes_runtime_and_persistence_metadata():
-    payload_text = str(canonical_priority_assessment_payload(make())).casefold()
+    payload = canonical_priority_assessment_payload(make())
+    assert "profile_id" not in payload
+    assert "opportunity_id" not in payload
+    payload_text = str(payload).casefold()
     for forbidden in ("database_row_id", "priority_run_id", "created_at", "memory"):
         assert forbidden not in payload_text

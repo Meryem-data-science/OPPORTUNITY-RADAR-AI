@@ -86,6 +86,13 @@ def build_priority_assessment(inputs: PriorityInput) -> PriorityAssessment:
         raise PriorityInputError("matching and eligibility identity mismatch")
     if not matching.assessment_fingerprint:
         raise PriorityInputError("matching assessment fingerprint must be non-empty")
+    matching_versions = (
+        matching.matching_engine_version,
+        matching.matching_rules_version,
+        matching.semantic_percentile_version,
+    )
+    if any(not version.strip() for version in matching_versions):
+        raise PriorityInputError("matching provenance versions must be non-empty")
     if not eligibility.input_fingerprint or not eligibility.engine_version:
         raise PriorityInputError("eligibility provenance must be non-empty")
 
@@ -139,7 +146,9 @@ def build_priority_assessment(inputs: PriorityInput) -> PriorityAssessment:
         {
             MatchLane.PRIMARY: PriorityReasonCode.MATCHING_LANE_PRIMARY,
             MatchLane.UNCERTAIN: PriorityReasonCode.MATCHING_LANE_UNCERTAIN,
-            MatchLane.OUTSIDE_PREFERENCES: PriorityReasonCode.OUTSIDE_PREFERENCES_CAP,
+            MatchLane.OUTSIDE_PREFERENCES: (
+                PriorityReasonCode.MATCHING_LANE_OUTSIDE_PREFERENCES
+            ),
         }[matching.lane],
     ]
     if score is None:
@@ -185,6 +194,7 @@ def build_priority_assessment(inputs: PriorityInput) -> PriorityAssessment:
     )
     if outside_cap:
         category = PriorityCategory.LOW
+        reasons.append(PriorityReasonCode.OUTSIDE_PREFERENCES_CAP)
 
     urgent = (
         hard_blocker is None

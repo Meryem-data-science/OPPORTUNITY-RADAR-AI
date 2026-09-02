@@ -15,8 +15,6 @@ def canonical_priority_assessment_payload(
 ) -> dict[str, Any]:
     """Return all business-relevant content and no runtime/persistence metadata."""
     return {
-        "profile_id": assessment.profile_id,
-        "opportunity_id": assessment.opportunity_id,
         "versions": {
             "priority_engine": assessment.priority_engine_version,
             "priority_rules": assessment.priority_rules_version,
