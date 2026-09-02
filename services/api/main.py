@@ -28,6 +28,12 @@ from services.api.priority import (
     PriorityResponse,
     read_priority_surface,
 )
+from services.api.portfolio import (
+    PUBLIC_PORTFOLIO_ERROR,
+    PortfolioApiReadError,
+    PortfolioResponse,
+    read_portfolio_surface,
+)
 
 
 app = FastAPI(title="Opportunity Radar API", version="1.5.0")
@@ -80,4 +86,16 @@ def get_priority() -> PriorityResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_PRIORITY_ERROR,
+        ) from None
+
+
+@app.get("/api/portfolio", response_model=PortfolioResponse)
+def get_portfolio() -> PortfolioResponse:
+    """Return the audited persisted Portfolio snapshot for the server profile."""
+    try:
+        return read_portfolio_surface()
+    except PortfolioApiReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_PORTFOLIO_ERROR,
         ) from None
