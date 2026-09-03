@@ -20,22 +20,35 @@ genuinely new, and otherwise reports the one movement it can actually attest
 to: cursor to current.
 
 That is why the state carries two pointers. ``last_processed`` is the snapshot
-last observed; ``highest_seen`` is the greatest run id ever walked, and it
-never moves backwards. From them each sync takes one of three shapes:
+last observed. ``highest_seen`` is the greatest Portfolio run id that *existed*
+when this service last looked — not the greatest one it was ever pointed at —
+and it never moves backwards.
 
-* ``current == cursor`` — nothing moved, and nothing is written.
-* ``current <= highest_seen`` — the Portfolio came back to a snapshot already
-  walked. That is one direct transition, cursor to current; the runs numbered
-  in between were processed in an earlier sync and are never replayed as if
-  they had just happened.
-* ``current > highest_seen`` — runs were appended since the last sync. Those,
-  and only those, are replayed in ascending order: cursor to the first new run,
-  then new run to new run, up to current.
+The distinction matters because the Portfolio can append a run and then move
+the pointer back to an older snapshot before the next sync ever runs. A mark
+derived from the pointer would leave that run below the mark forever, so it
+would either be missed or, worse, resurface later as if it were new. So each
+sync looks for appended runs on its own terms, never conditioned on where the
+pointer happens to sit:
+
+1. Every run id above the mark is new, whatever ``current`` is. Those are
+   replayed in ascending order, starting from the cursor: cursor to the first
+   new run, then new run to new run.
+2. If ``current`` is not where that walk ended — the pointer moved back to an
+   older snapshot — one final direct transition closes the gap, from the last
+   run walked to ``current``.
+3. With no new runs at all, the sync is either the direct movement cursor to
+   ``current``, or nothing when the pointer never moved.
+
+The runs numbered below the mark are never replayed as if they had just
+happened; only the two movements above are ever claimed.
 
 The first sync of a profile is deliberately silent: the Portfolio snapshot the
-profile already has becomes the baseline, both pointers are planted on it, and
-no event is produced. A user who turns notifications on does not get told about
-every opportunity they already know about.
+profile already has becomes the baseline and the cursor, the mark is planted on
+the greatest run id that profile already has, and no event is produced. A user
+who turns notifications on does not get told about every opportunity they
+already know about — and no historical run is left below the pointer waiting to
+be mistaken for news.
 
 Everything is one transaction. A corrupt Portfolio run, a broken provenance, or
 any other failure rolls the whole sync back: no event, no outbox row, and
@@ -198,33 +211,38 @@ def _positions(run) -> dict[int, PortfolioPosition]:
     return positions
 
 
-def _chain(
-    connection: sqlite3.Connection,
-    profile_id: int,
-    highest_seen: int,
-    current: int,
+def _appended_runs(
+    connection: sqlite3.Connection, profile_id: int, highest_seen: int
 ) -> tuple[int, ...]:
-    """Return the runs to step through from the cursor, oldest first.
+    """Return this profile's Portfolio runs appended above the mark, oldest first.
 
-    Only run ids above the high-water mark are genuinely new, so only those are
-    replayed. Anything at or below it was already walked in an earlier sync;
-    landing back on one of those snapshots is a single direct movement from the
-    cursor, not a re-run of the ids numbered in between. The walk always starts
-    at the cursor, so the first step is cursor to the first id returned here.
+    Discovery never looks at the current pointer. A run appended since the last
+    sync is new even when the Portfolio has already moved back off it, and a
+    run at or below the mark is never new again.
     """
-    if current > highest_seen:
-        rows = connection.execute(
-            "SELECT id FROM portfolio_runs WHERE profile_id=? AND id>? AND id<=?"
-            " ORDER BY id ASC",
-            (profile_id, highest_seen, current),
-        ).fetchall()
-        chain = tuple(int(row[0]) for row in rows)
-        if not chain or chain[-1] != current:
-            raise NotificationSyncError(
-                "appended Portfolio runs are inconsistent with this profile's history"
-            )
-        return chain
-    return (current,)
+    rows = connection.execute(
+        "SELECT id FROM portfolio_runs WHERE profile_id=? AND id>? ORDER BY id ASC",
+        (profile_id, highest_seen),
+    ).fetchall()
+    appended = tuple(int(row[0]) for row in rows)
+    if any(run_id <= highest_seen for run_id in appended) or appended != tuple(
+        sorted(set(appended))
+    ):
+        raise NotificationSyncError(
+            "appended Portfolio runs are inconsistent with this profile's history"
+        )
+    return appended
+
+
+def _chain(cursor: int, appended: tuple[int, ...], current: int) -> tuple[int, ...]:
+    """Return the runs to step through from the cursor, in the order walked.
+
+    The appended runs come first, oldest to newest. If the pointer then sits
+    somewhere else — it moved back to a snapshot already stored — one direct
+    transition closes the gap to it.
+    """
+    walked = appended[-1] if appended else cursor
+    return appended if current == walked else (*appended, current)
 
 
 def _records(
@@ -320,7 +338,20 @@ def sync_notification_policy(
             raise NotificationSyncError("audited Portfolio state has no current run")
         if state is None:
             # First activation: today's audited snapshot becomes the baseline,
-            # and everything already inside it counts as already known.
+            # and everything already inside it counts as already known. The
+            # mark starts at the greatest run this profile already has, not at
+            # the pointer, so a snapshot the Portfolio came back to cannot
+            # leave newer historical runs below the mark to be replayed later.
+            highest_seen = int(
+                connection.execute(
+                    "SELECT MAX(id) FROM portfolio_runs WHERE profile_id=?",
+                    (profile_id,),
+                ).fetchone()[0]
+            )
+            if highest_seen < current_run_id:
+                raise NotificationSyncError(
+                    "current Portfolio run is missing from this profile's history"
+                )
             connection.execute(
                 """INSERT INTO notification_policy_state
                 (profile_id,baseline_portfolio_run_id,last_processed_portfolio_run_id,
@@ -329,7 +360,7 @@ def sync_notification_policy(
                     profile_id,
                     current_run_id,
                     current_run_id,
-                    current_run_id,
+                    highest_seen,
                     NOTIFICATION_POLICY_VERSION,
                 ),
             )
@@ -340,7 +371,7 @@ def sync_notification_policy(
                 NOTIFICATION_POLICY_VERSION,
                 current_run_id,
                 current_run_id,
-                current_run_id,
+                highest_seen,
                 (),
                 (),
                 0,
@@ -353,7 +384,8 @@ def sync_notification_policy(
             raise NotificationSyncError(
                 "notification high-water mark is behind the pointers it bounds"
             )
-        if cursor == current_run_id:
+        appended = _appended_runs(connection, profile_id, highest_seen)
+        if not appended and cursor == current_run_id:
             return _idle(
                 connection,
                 profile_id,
@@ -364,7 +396,7 @@ def sync_notification_policy(
             )
         previous = _audited_run(connection, cursor, profile_id)
         previous_positions = _positions(previous)
-        chain = _chain(connection, profile_id, highest_seen, current_run_id)
+        chain = _chain(cursor, appended, current_run_id)
         steps = []
         for run_id in chain:
             run = _audited_run(connection, run_id, profile_id)
@@ -382,9 +414,10 @@ def sync_notification_policy(
         stored = store_notification_events(
             connection, _records(connection, profile_id, tuple(steps))
         )
-        # The cursor follows the pointer wherever it went; the high-water mark
-        # only ever rises, so a snapshot already walked is never new again.
-        highest_seen = max(highest_seen, current_run_id)
+        # The cursor follows the pointer wherever it went; the mark rises to
+        # cover every run that existed at this sync, so none of them can be
+        # discovered as new again — whatever the pointer does next.
+        highest_seen = max(highest_seen, *appended) if appended else highest_seen
         connection.execute(
             """UPDATE notification_policy_state
             SET last_processed_portfolio_run_id=?,highest_seen_portfolio_run_id=?,

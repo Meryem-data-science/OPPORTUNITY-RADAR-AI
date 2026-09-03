@@ -807,3 +807,163 @@ def test_a_mark_forced_behind_its_cursor_fails_the_sync_closed(tmp_path):
     assert before[2][0][2] == run3.run_id and before[2][0][3] == run1.run_id
     assert snapshot(connection) == before
     assert connection.in_transaction is False
+
+
+def ladder(connection, identity, ids):
+    """Store run1 MEDIUM, run2 LOW, run3 HIGH on ids[0], without any sync."""
+    return tuple(
+        store_run(
+            connection, identity.profile_id, {ids[0]: included(priority=priority)}
+        )
+        for priority in (MEDIUM, LOW, HIGH)
+    )
+
+
+def repoint(connection, identity, ids, priority):
+    """Move the Portfolio pointer back onto an already stored snapshot."""
+    reused = store_run(
+        connection, identity.profile_id, {ids[0]: included(priority=priority)}
+    )
+    assert reused.created is False
+    return reused
+
+
+def test_baseline_marks_every_run_that_already_exists_not_just_the_pointer(tmp_path):
+    """History run1/run2/run3, pointer sent back to run1 before first activation.
+
+    The mark has to cover run3, or run2 and run3 would look appended later and
+    be replayed as news the user never asked for.
+    """
+    connection, identity, ids = fixture(tmp_path)
+    run1, run2, run3 = ladder(connection, identity, ids)
+    repoint(connection, identity, ids, MEDIUM)
+    first = sync_notification_policy(connection, identity.profile_id)
+
+    assert first.status is NotificationSyncStatus.BASELINE_INITIALIZED
+    assert first.baseline_portfolio_run_id == run1.run_id
+    assert first.last_processed_portfolio_run_id == run1.run_id
+    assert first.highest_seen_portfolio_run_id == run3.run_id
+    assert (first.event_count, first.outbox_count) == (0, 0)
+    assert snapshot(connection) == (
+        0,
+        0,
+        [
+            (
+                identity.profile_id,
+                run1.run_id,
+                run1.run_id,
+                run3.run_id,
+                NOTIFICATION_POLICY_VERSION,
+            )
+        ],
+    )
+
+    repoint(connection, identity, ids, HIGH)
+    forward = sync_notification_policy(connection, identity.profile_id)
+
+    assert forward.processed_run_ids == (run3.run_id,)
+    assert forward.event_count == 1
+    assert announced(connection) == [("ATTENTION_ESCALATED", ids[0])]
+    assert events(connection)[0][2:4] == (run1.run_id, run3.run_id)
+    assert run2.run_id not in {row[2] for row in events(connection)}
+
+
+def walked_ladder(connection, identity, ids):
+    """The three-run ladder, fully walked: cursor and mark both on run3."""
+    run1, run2, run3 = ladder(connection, identity, ids)
+    baseline_result = sync_notification_policy(connection, identity.profile_id)
+    assert baseline_result.status is NotificationSyncStatus.BASELINE_INITIALIZED
+    assert baseline_result.highest_seen_portfolio_run_id == run3.run_id
+    assert state(connection)[0][2:4] == (run3.run_id, run3.run_id)
+    return run1, run2, run3
+
+
+def test_a_run_appended_then_hidden_by_a_pointer_return_is_still_discovered(tmp_path):
+    """run4 is created, then the pointer goes back to run1 before the sync.
+
+    Discovery must not be conditioned on where the pointer sits, or run4 would
+    stay below nothing and resurface as news later.
+    """
+    connection, identity, ids = fixture(tmp_path)
+    run1, _, run3 = walked_ladder(connection, identity, ids)
+    fourth = store_run(
+        connection, identity.profile_id, {ids[0]: included(priority=URGENT)}
+    )
+    repoint(connection, identity, ids, MEDIUM)
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert fourth.created is True
+    assert result.processed_run_ids == (fourth.run_id, run1.run_id)
+    assert result.last_processed_portfolio_run_id == run1.run_id
+    assert result.highest_seen_portfolio_run_id == fourth.run_id
+    # run3 HIGH -> run4 URGENT is announced; run4 URGENT -> run1 MEDIUM is not.
+    assert result.event_count == 1
+    assert announced(connection) == [("ATTENTION_ESCALATED", ids[0])]
+    assert events(connection)[0][2:4] == (run3.run_id, fourth.run_id)
+
+    dump = tuple(connection.iterdump())
+    again = sync_notification_policy(connection, identity.profile_id)
+    assert again.status is NotificationSyncStatus.UP_TO_DATE
+    assert (again.event_count, again.outbox_count) == (0, 0)
+    assert again.state_changed is False
+    assert tuple(connection.iterdump()) == dump
+
+
+def test_several_appended_runs_are_walked_before_the_final_pointer_return(tmp_path):
+    """cursor -> run4 -> run5 -> run1, with the mark ending on run5."""
+    connection, identity, ids = fixture(tmp_path)
+
+    def positions(first, second=None):
+        return {ids[0]: first, ids[1]: second or excluded(), ids[2]: excluded()}
+
+    def store(first, second=None):
+        return store_run(connection, identity.profile_id, positions(first, second))
+
+    run1 = store(included(priority=MEDIUM))
+    store(included(priority=LOW))
+    run3 = store(included(priority=HIGH))
+    planted = sync_notification_policy(connection, identity.profile_id)
+    assert planted.status is NotificationSyncStatus.BASELINE_INITIALIZED
+    assert state(connection)[0][2:4] == (run3.run_id, run3.run_id)
+
+    fourth = store(included(priority=URGENT))
+    fifth = store(included(priority=URGENT), included(priority=MEDIUM))
+    returned = store(included(priority=MEDIUM))
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert (fourth.created, fifth.created) == (True, True)
+    assert returned.run_id == run1.run_id and returned.created is False
+    assert result.processed_run_ids == (fourth.run_id, fifth.run_id, run1.run_id)
+    assert result.last_processed_portfolio_run_id == run1.run_id
+    assert result.highest_seen_portfolio_run_id == fifth.run_id
+    assert announced(connection) == [
+        ("ATTENTION_ESCALATED", ids[0]),
+        ("NEW_ACTIONABLE_OPPORTUNITY", ids[1]),
+    ]
+    assert [row[2:4] for row in events(connection)] == [
+        (run3.run_id, fourth.run_id),
+        (fourth.run_id, fifth.run_id),
+    ]
+
+
+def test_a_hidden_appended_run_is_never_rediscovered_after_the_mark_covers_it(
+    tmp_path,
+):
+    connection, identity, ids = fixture(tmp_path)
+    walked_ladder(connection, identity, ids)
+    fourth = store_run(
+        connection, identity.profile_id, {ids[0]: included(priority=URGENT)}
+    )
+    repoint(connection, identity, ids, MEDIUM)
+    sync_notification_policy(connection, identity.profile_id)
+    before = snapshot(connection)
+
+    # Coming back onto run4 is a movement, never a rediscovery of a new run.
+    repoint(connection, identity, ids, URGENT)
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert before[2][0][3] == fourth.run_id
+    assert result.processed_run_ids == (fourth.run_id,)
+    assert result.highest_seen_portfolio_run_id == fourth.run_id
+    assert result.event_count == 1
+    assert announced(connection)[-1] == ("ATTENTION_ESCALATED", ids[0])
