@@ -16,6 +16,8 @@ from services.notifications import subscribe_push_subscription
 from tests.integration.test_push_subscriptions_sqlite import (
     AUTH,
     ENDPOINT,
+    MALFORMED_AUTH,
+    MALFORMED_P256DH,
     P256DH,
     push_fixture,
 )
@@ -311,5 +313,57 @@ def test_the_push_surface_sends_no_notification(tmp_path, monkeypatch):
             )
         }
         assert not any("notification" in table or "outbox" in table for table in tables)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("p256dh", MALFORMED_P256DH)
+def test_a_malformed_p256dh_is_refused_before_any_write(tmp_path, monkeypatch, p256dh):
+    connection, _, _, _ = prepared(tmp_path, monkeypatch)
+    try:
+        response = TestClient(app).post(
+            "/api/push/subscriptions", json=body(p256dh=p256dh)
+        )
+        assert response.status_code == 400
+        assert response.json() == {"detail": PUBLIC_PUSH_REQUEST_ERROR}
+        assert stored(connection) == []
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("auth", MALFORMED_AUTH)
+def test_a_malformed_auth_secret_is_refused_before_any_write(
+    tmp_path, monkeypatch, auth
+):
+    connection, _, _, _ = prepared(tmp_path, monkeypatch)
+    try:
+        response = TestClient(app).post("/api/push/subscriptions", json=body(auth=auth))
+        assert response.status_code == 400
+        assert response.json() == {"detail": PUBLIC_PUSH_REQUEST_ERROR}
+        assert stored(connection) == []
+    finally:
+        connection.close()
+
+
+def test_a_refused_credential_never_appears_in_the_response_or_the_logs(
+    tmp_path, monkeypatch, caplog
+):
+    connection, _, _, _ = prepared(tmp_path, monkeypatch)
+    secret = "BN" + "s3cr3tvalue" + "a" * 74
+    try:
+        with caplog.at_level("DEBUG"):
+            response = TestClient(app).post(
+                "/api/push/subscriptions",
+                json=body(p256dh=secret, auth="c" * 21),
+            )
+        assert response.status_code == 400
+        emitted = "\n".join(
+            [record.getMessage() for record in caplog.records]
+            + [str(record.__dict__) for record in caplog.records]
+        )
+        for value in (secret, "s3cr3tvalue", "c" * 21):
+            assert value not in response.text
+            assert value not in emitted
+        assert stored(connection) == []
     finally:
         connection.close()

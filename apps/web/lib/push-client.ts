@@ -6,6 +6,14 @@
  * this module runs on render.
  */
 
+import {
+  SERVICE_WORKER_PATH,
+  detectServiceWorkerSupport,
+  ensureServiceWorkerRegistration,
+} from "@/lib/service-worker";
+
+export { SERVICE_WORKER_PATH };
+
 export type PushStatus =
   | "unsupported"
   | "not-configured"
@@ -25,7 +33,6 @@ export type PushSupport = {
 
 export const CONFIG_PATH = "/api/push/config";
 export const SUBSCRIPTIONS_PATH = "/api/push/subscriptions";
-export const SERVICE_WORKER_PATH = "/sw.js";
 
 type Scope = Record<string, unknown>;
 
@@ -49,13 +56,11 @@ export function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
 /** Return the browser APIs this feature needs, or null when any is missing. */
 export function detectPushSupport(scope: unknown = globalThis): PushSupport | null {
   const candidate = scope as Scope;
-  const navigatorApi = candidate.navigator as Navigator | undefined;
+  const serviceWorker = detectServiceWorkerSupport(scope);
   const notification = candidate.Notification as PushSupport["notification"] | undefined;
   const fetchApi = candidate.fetch as typeof fetch | undefined;
   if (
-    !navigatorApi ||
-    !("serviceWorker" in navigatorApi) ||
-    !navigatorApi.serviceWorker ||
+    serviceWorker === null ||
     typeof candidate.PushManager !== "function" ||
     !notification ||
     typeof notification.requestPermission !== "function" ||
@@ -63,11 +68,7 @@ export function detectPushSupport(scope: unknown = globalThis): PushSupport | nu
   ) {
     return null;
   }
-  return {
-    serviceWorker: navigatorApi.serviceWorker,
-    notification,
-    fetch: fetchApi.bind(candidate),
-  };
+  return { serviceWorker, notification, fetch: fetchApi.bind(candidate) };
 }
 
 async function loadConfig(support: PushSupport): Promise<string | null> {
@@ -132,9 +133,10 @@ export async function enablePush(support: PushSupport | null): Promise<PushStatu
       if (permission !== "granted") return "denied";
     }
 
-    const registration = await support.serviceWorker.register(SERVICE_WORKER_PATH, {
-      scope: "/",
-    });
+    // The service worker is registered on page load, independently of this
+    // opt-in; this reuses that registration and only falls back to making one
+    // when the page-load registration has not landed.
+    const registration = await ensureServiceWorkerRegistration(support.serviceWorker);
     let subscription = await registration.pushManager.getSubscription();
     if (subscription === null) {
       subscription = await registration.pushManager.subscribe({

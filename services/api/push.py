@@ -11,7 +11,6 @@ can only ever be attached to the profile this deployment owns.
 
 from __future__ import annotations
 
-import base64
 import os
 import sqlite3
 from pathlib import Path
@@ -25,10 +24,15 @@ from services.collector.logging_config import get_logger
 from services.notifications import (
     MAX_ENDPOINT_LENGTH,
     MAX_KEY_LENGTH,
+    P256DH_BYTE_LENGTH,
+    P256DH_UNCOMPRESSED_PREFIX,
     PushSubscriptionError,
     PushSubscriptionOwnershipError,
+    decode_base64url,
     subscribe_push_subscription,
     unsubscribe_push_subscription,
+    valid_auth,
+    valid_p256dh,
 )
 
 
@@ -40,7 +44,6 @@ PUBLIC_PUSH_CONFLICT_ERROR = "Push subscription cannot be registered."
 
 VAPID_PUBLIC_KEY_VARIABLE = "WEB_PUSH_VAPID_PUBLIC_KEY"
 REQUIRED_MIGRATION_VERSION = "0018"
-_UNCOMPRESSED_P256_LENGTH = 65
 
 
 class PushApiError(RuntimeError):
@@ -64,23 +67,20 @@ class PushSubscriptionStateResponse(BaseModel):
     status: Literal["ACTIVE", "REVOKED"]
 
 
-def _decode_base64url(value: str) -> bytes | None:
-    padded = value + "=" * (-len(value) % 4)
-    try:
-        return base64.urlsafe_b64decode(padded)
-    except (ValueError, TypeError):
-        return None
-
-
 def _valid_public_key(value: str) -> bool:
-    """Accept only a base64url uncompressed P-256 point, the VAPID key shape."""
-    if value != value.strip() or not 80 <= len(value) <= 100 or "=" in value:
+    """Accept only a base64url uncompressed P-256 point, the VAPID key shape.
+
+    This is the same shape as a subscription's ``p256dh``, decoded through the
+    same strict base64url reader: an application server key that is not exactly
+    65 bytes starting with 0x04 is not one.
+    """
+    if value != value.strip() or len(value) > MAX_KEY_LENGTH:
         return False
-    decoded = _decode_base64url(value)
+    decoded = decode_base64url(value)
     return (
         decoded is not None
-        and len(decoded) == _UNCOMPRESSED_P256_LENGTH
-        and decoded[0] == 0x04
+        and len(decoded) == P256DH_BYTE_LENGTH
+        and decoded[0] == P256DH_UNCOMPRESSED_PREFIX
     )
 
 
@@ -131,11 +131,13 @@ def parse_subscription_request(body: Any) -> tuple[str, str, str]:
     endpoint = _required_text(payload, "endpoint", MAX_ENDPOINT_LENGTH)
     if not endpoint.startswith("https://"):
         raise PushRequestError(PUBLIC_PUSH_REQUEST_ERROR)
-    return (
-        endpoint,
-        _required_text(keys, "p256dh", MAX_KEY_LENGTH),
-        _required_text(keys, "auth", MAX_KEY_LENGTH),
-    )
+    p256dh = _required_text(keys, "p256dh", MAX_KEY_LENGTH)
+    auth = _required_text(keys, "auth", MAX_KEY_LENGTH)
+    # Refused here, before a connection is opened, and refused by shape rather
+    # than by length alone: the rejection never names or echoes the value.
+    if not valid_p256dh(p256dh) or not valid_auth(auth):
+        raise PushRequestError(PUBLIC_PUSH_REQUEST_ERROR)
+    return endpoint, p256dh, auth
 
 
 def parse_unsubscribe_request(body: Any) -> str:

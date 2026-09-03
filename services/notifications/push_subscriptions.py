@@ -12,7 +12,11 @@ Nothing here logs an endpoint or a key: those values are the credential.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
@@ -24,6 +28,15 @@ LOGGER = get_logger("services.collector.notifications.push_subscriptions")
 
 MAX_ENDPOINT_LENGTH = 2048
 MAX_KEY_LENGTH = 256
+
+# A Web Push client key is an uncompressed P-256 point, and the auth secret is
+# 16 raw bytes. Both arrive base64url-encoded and unpadded, so their encoded
+# lengths are fixed too.
+P256DH_BYTE_LENGTH = 65
+P256DH_UNCOMPRESSED_PREFIX = 0x04
+AUTH_BYTE_LENGTH = 16
+
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+")
 
 
 class PushSubscriptionStatus(str, Enum):
@@ -63,6 +76,40 @@ class UnsubscribeResult:
     revoked: bool
 
 
+def decode_base64url(value: str) -> bytes | None:
+    """Decode strict unpadded base64url, or return None.
+
+    ``base64.urlsafe_b64decode`` silently drops characters outside the
+    alphabet, so "not a key!!" would decode to *something*. The alphabet is
+    checked first, and so is the length: a remainder of one leaves a byte that
+    cannot exist, and any "=" means the caller sent padding we do not accept.
+    """
+    if not isinstance(value, str) or not _BASE64URL.fullmatch(value):
+        return None
+    if len(value) % 4 == 1:
+        return None
+    try:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (binascii.Error, ValueError):
+        return None
+
+
+def valid_p256dh(value: str) -> bool:
+    """Accept only an uncompressed P-256 public point, base64url encoded."""
+    decoded = decode_base64url(value)
+    return (
+        decoded is not None
+        and len(decoded) == P256DH_BYTE_LENGTH
+        and decoded[0] == P256DH_UNCOMPRESSED_PREFIX
+    )
+
+
+def valid_auth(value: str) -> bool:
+    """Accept only a 16-byte auth secret, base64url encoded."""
+    decoded = decode_base64url(value)
+    return decoded is not None and len(decoded) == AUTH_BYTE_LENGTH
+
+
 def _positive_int(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise PushSubscriptionError(f"{field} must be a positive integer")
@@ -75,6 +122,14 @@ def _text(value: object, field: str, maximum: int) -> str:
     if value != value.strip() or not value or len(value) > maximum:
         raise PushSubscriptionError(f"{field} is not a valid {field}")
     return value
+
+
+def _credential(value: object, field: str, accepted: Callable[[str], bool]) -> str:
+    """Validate one credential without ever putting it in the error."""
+    text = _text(value, field, MAX_KEY_LENGTH)
+    if not accepted(text):
+        raise PushSubscriptionError(f"{field} is not a valid {field}")
+    return text
 
 
 def _endpoint(value: object) -> str:
@@ -114,8 +169,8 @@ def subscribe_push_subscription(
     """
     _positive_int(profile_id, "profile_id")
     endpoint = _endpoint(endpoint)
-    p256dh = _text(p256dh, "p256dh", MAX_KEY_LENGTH)
-    auth = _text(auth, "auth", MAX_KEY_LENGTH)
+    p256dh = _credential(p256dh, "p256dh", valid_p256dh)
+    auth = _credential(auth, "auth", valid_auth)
 
     connection.execute("BEGIN IMMEDIATE")
     try:

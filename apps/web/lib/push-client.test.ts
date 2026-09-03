@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { detectServiceWorkerSupport } from "./service-worker";
 import {
   detectPushSupport,
   disablePush,
@@ -123,7 +124,7 @@ describe("urlBase64ToUint8Array", () => {
 describe("detectPushSupport", () => {
   it("returns null when any required API is missing", () => {
     const complete = {
-      navigator: { serviceWorker: {} },
+      navigator: { serviceWorker: { register: () => {}, getRegistration: () => {} } },
       PushManager: function PushManager() {},
       Notification: { permission: "default", requestPermission: async () => "granted" },
       fetch: async () => new Response("{}"),
@@ -136,6 +137,17 @@ describe("detectPushSupport", () => {
       expect(detectPushSupport(partial)).toBeNull();
     }
     expect(detectPushSupport({ ...complete, navigator: {} })).toBeNull();
+  });
+
+  it("a browser without PushManager keeps its service worker support", () => {
+    const scope = {
+      navigator: { serviceWorker: { register: () => {}, getRegistration: () => {} } },
+      Notification: { permission: "default", requestPermission: async () => "granted" },
+      fetch: async () => new Response("{}"),
+    };
+
+    expect(detectPushSupport(scope)).toBeNull();
+    expect(detectServiceWorkerSupport(scope)).toBe(scope.navigator.serviceWorker);
   });
 });
 
@@ -174,7 +186,7 @@ describe("enablePush", () => {
     await expect(enablePush(support)).resolves.toBe("active");
 
     expect(notification.requestPermission).toHaveBeenCalledTimes(1);
-    expect(serviceWorker.register).toHaveBeenCalledWith("/sw.js", { scope: "/" });
+    expect(serviceWorker.getRegistration).toHaveBeenCalledWith("/sw.js");
     const [options] = pushManager.subscribe.mock.calls[0];
     expect(options.userVisibleOnly).toBe(true);
     expect(
@@ -193,6 +205,23 @@ describe("enablePush", () => {
 
     expect(Object.keys(posted(fetchMock))).toEqual(["endpoint", "keys"]);
     expect(Object.keys(posted(fetchMock).keys)).toEqual(["p256dh", "auth"]);
+  });
+
+  it("reuses the registration the app made on page load", async () => {
+    const { support, serviceWorker } = harness({ registered: true });
+
+    await expect(enablePush(support)).resolves.toBe("active");
+
+    expect(serviceWorker.getRegistration).toHaveBeenCalledWith("/sw.js");
+    expect(serviceWorker.register).not.toHaveBeenCalled();
+  });
+
+  it("registers the worker itself when the page-load registration is missing", async () => {
+    const { support, serviceWorker } = harness({ registered: false });
+
+    await expect(enablePush(support)).resolves.toBe("active");
+
+    expect(serviceWorker.register).toHaveBeenCalledWith("/sw.js", { scope: "/" });
   });
 
   it("stops at a blocked permission without registering anything", async () => {

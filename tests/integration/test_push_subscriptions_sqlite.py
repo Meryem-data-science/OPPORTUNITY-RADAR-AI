@@ -12,12 +12,17 @@ from services.collector.database.migrations import (
 )
 from services.digital_twin.repository import ensure_user_profile
 from services.notifications import (
+    AUTH_BYTE_LENGTH,
     MAX_ENDPOINT_LENGTH,
     MAX_KEY_LENGTH,
+    P256DH_BYTE_LENGTH,
     PushSubscriptionError,
     PushSubscriptionOwnershipError,
+    decode_base64url,
     subscribe_push_subscription,
     unsubscribe_push_subscription,
+    valid_auth,
+    valid_p256dh,
 )
 
 ENDPOINT = "https://push.example.invalid/subscription/abc"
@@ -241,20 +246,80 @@ def test_invalid_endpoints_are_refused_and_store_nothing(tmp_path, endpoint):
         connection.close()
 
 
+# Every case is a credential a browser cannot have produced: a wrong alphabet,
+# padding we do not accept, or a payload that does not decode to the exact key
+# size Web Push defines.
+MALFORMED_P256DH = [
+    "",
+    " ",
+    "BN" + "a" * 84,  # 64 bytes: one short of an uncompressed P-256 point
+    "BN" + "a" * 86,  # 66 bytes: one too many
+    "AA" + "a" * 85,  # right length, but not an uncompressed point (0x00)
+    "BN" + "a" * 83,  # remainder of one: no such base64url string
+    ("BN" + "a" * 83) + "==",  # padding is refused outright
+    "BN+a" + "a" * 83,  # "+" and "/" belong to base64, not base64url
+    "BN/a" + "a" * 83,
+    "BN a" + "a" * 83,
+    "BN" + "a" * 84 + "!",
+    "BN" + "é" * 85,
+    "c" * 22,  # a valid auth secret is not a valid public key
+    "a" * (MAX_KEY_LENGTH + 1),
+    None,
+    7,
+]
+
+MALFORMED_AUTH = [
+    "",
+    " ",
+    "c" * 21,  # 15 bytes
+    "c" * 23,  # 17 bytes
+    "c" * 21 + "=",  # padding is refused outright
+    "c" * 17,  # remainder of one
+    "c+cc" + "c" * 18,
+    "c/cc" + "c" * 18,
+    "c c" + "c" * 19,
+    "cc!" + "c" * 19,
+    "BN" + "a" * 85,  # a valid public key is not a valid auth secret
+    "a" * (MAX_KEY_LENGTH + 1),
+    None,
+    7,
+]
+
+
+def test_the_shipped_fixtures_are_real_web_push_credentials():
+    """The fixtures the rest of the suite uses decode to the real key shapes."""
+    assert valid_p256dh(P256DH) and valid_auth(AUTH)
+    assert len(decode_base64url(P256DH)) == P256DH_BYTE_LENGTH
+    assert decode_base64url(P256DH)[0] == 0x04
+    assert len(decode_base64url(AUTH)) == AUTH_BYTE_LENGTH
+
+
 @pytest.mark.parametrize(
-    "keys",
+    "value",
     [
-        ("", AUTH),
-        (" ", AUTH),
-        (P256DH, ""),
-        (P256DH, " " + AUTH),
-        ("a" * (MAX_KEY_LENGTH + 1), AUTH),
-        (P256DH, "a" * (MAX_KEY_LENGTH + 1)),
-        (None, AUTH),
-        (P256DH, 7),
+        "",
+        "a=",
+        "aa==",
+        "a" * 5 + "=",
+        "abc!",
+        "ab cd",
+        "ab+cd",
+        "ab/cd",
+        "abcde",  # remainder of one leaves a byte that cannot exist
+        "é" * 4,
+        None,
+        7,
     ],
 )
-def test_invalid_keys_are_refused_and_store_nothing(tmp_path, keys):
+def test_strict_base64url_refuses_malformed_input(value):
+    """Padding, foreign alphabets and impossible lengths all decode to None."""
+    assert decode_base64url(value) is None
+    assert valid_p256dh(value) is False
+    assert valid_auth(value) is False
+
+
+@pytest.mark.parametrize("p256dh", MALFORMED_P256DH)
+def test_malformed_p256dh_keys_are_refused_and_store_nothing(tmp_path, p256dh):
     connection, profile_id, _ = push_fixture(tmp_path)
     try:
         with pytest.raises(PushSubscriptionError):
@@ -262,10 +327,47 @@ def test_invalid_keys_are_refused_and_store_nothing(tmp_path, keys):
                 connection,
                 profile_id=profile_id,
                 endpoint=ENDPOINT,
-                p256dh=keys[0],
-                auth=keys[1],
+                p256dh=p256dh,
+                auth=AUTH,
             )
         assert rows(connection) == []
+        assert connection.in_transaction is False
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("auth", MALFORMED_AUTH)
+def test_malformed_auth_secrets_are_refused_and_store_nothing(tmp_path, auth):
+    connection, profile_id, _ = push_fixture(tmp_path)
+    try:
+        with pytest.raises(PushSubscriptionError):
+            subscribe_push_subscription(
+                connection,
+                profile_id=profile_id,
+                endpoint=ENDPOINT,
+                p256dh=P256DH,
+                auth=auth,
+            )
+        assert rows(connection) == []
+        assert connection.in_transaction is False
+    finally:
+        connection.close()
+
+
+def test_a_refused_credential_is_never_named_in_the_error(tmp_path):
+    connection, profile_id, _ = push_fixture(tmp_path)
+    secret = "BN" + "s3cr3t" + "a" * 79
+    try:
+        with pytest.raises(PushSubscriptionError) as refusal:
+            subscribe_push_subscription(
+                connection,
+                profile_id=profile_id,
+                endpoint=ENDPOINT,
+                p256dh=secret,
+                auth="c" * 21,
+            )
+        assert secret not in str(refusal.value)
+        assert "s3cr3t" not in str(refusal.value)
     finally:
         connection.close()
 
