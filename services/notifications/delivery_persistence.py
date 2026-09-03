@@ -17,12 +17,19 @@ subscription at that instant gets a batch that is terminal on the spot —
 ``NO_ACTIVE_SUBSCRIPTIONS`` — rather than a batch that waits forever for a
 recipient it will never acquire.
 
-Sending is a claim, not a read. A drain takes the targets that are due by
-moving them to ``IN_FLIGHT`` under a token of its own, inside one
-``BEGIN IMMEDIATE``, and only then goes to the network. Two drains running at
-the same time therefore partition the work: SQLite serializes the two
-transactions, the second sees the rows the first already claimed, and no
-target is ever handed to both.
+Sending is a claim, not a read. A drain takes a target by moving it to
+``IN_FLIGHT`` under a token of its own, inside one ``BEGIN IMMEDIATE``, and
+only then goes to the network. Two drains running at the same time therefore
+partition the work: SQLite serializes the two transactions, the second sees
+the rows the first already claimed, and no target is ever handed to both.
+
+A claim is taken for the target about to be worked on, not for a backlog. A
+drain that claimed a hundred targets up front would still be on the tenth when
+the ninetieth aged past its lease, and a second drain would then legitimately
+recover a row the first was about to send — the exact overlap the claim is
+meant to prevent. So ``claimed_at`` is always the moment that target is
+actually picked up, and the lease measures the work on one message rather than
+on a queue.
 
 What that does *not* buy is exactly-once. An HTTP request to a push service
 and a SQLite write cannot be one atomic act, so a process that dies between a
@@ -561,6 +568,56 @@ def recover_stale_claims(
     return tuple(recovered)
 
 
+def release_delivery_claim(
+    connection: sqlite3.Connection,
+    *,
+    target_id: int,
+    claim_token: str,
+    now: datetime | None = None,
+) -> bool:
+    """Hand one claim back unused, leaving the target exactly as it was found.
+
+    A drain that cannot even build the message — a stored event it refuses to
+    project — has nothing to record: no request was made, so no attempt
+    happened. Releasing puts the target straight back in the queue instead of
+    stranding a claim for a whole lease over a failure that is immediate and
+    knowable.
+
+    Only the holder of the claim can release it, and nothing else about the row
+    changes: not ``attempt_count``, not the last error, not the delivery.
+    """
+    if connection.in_transaction:
+        raise NotificationDeliveryError(
+            "release_delivery_claim requires a connection without an active transaction"
+        )
+    if isinstance(target_id, bool) or not isinstance(target_id, int) or target_id <= 0:
+        raise NotificationDeliveryError("target_id must be a positive integer")
+    token = _claim_token(claim_token)
+    moment = now_timestamp(now)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        preflight(connection)
+        released = connection.execute(
+            """UPDATE notification_delivery_targets
+            SET status=?,next_attempt_at=?,claim_token=NULL,claimed_at=NULL,
+                updated_at=? WHERE id=? AND status=? AND claim_token=?""",
+            (
+                DeliveryTargetStatus.PENDING.value,
+                moment,
+                moment,
+                target_id,
+                DeliveryTargetStatus.IN_FLIGHT.value,
+                token,
+            ),
+        ).rowcount
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    return released == 1
+
+
 def claim_due_targets(
     connection: sqlite3.Connection,
     *,
@@ -569,7 +626,7 @@ def claim_due_targets(
     now: datetime | None = None,
     limit: int | None = None,
 ) -> tuple[ClaimedTarget, ...]:
-    """Take exclusive ownership of every target that is due, then let go.
+    """Take exclusive ownership of the targets that are due, then let go.
 
     Selecting and claiming happen inside one ``BEGIN IMMEDIATE``, so a second
     drain either waits for this transaction or sees the rows already
@@ -577,7 +634,10 @@ def claim_due_targets(
     committed before the caller sends anything, so no SQLite lock is ever held
     across a network request.
 
-    Only the rows this call actually moved to ``IN_FLIGHT`` are returned.
+    Only the rows this call actually moved to ``IN_FLIGHT`` are returned. A
+    drain claims one target at a time — see :func:`claim_next_due_target` —
+    because a claim is a promise to work on that message now; ``limit`` exists
+    so a caller can say how many at once and mean it.
     """
     if connection.in_transaction:
         raise NotificationDeliveryError(
@@ -665,6 +725,26 @@ def claim_due_targets(
         )
         for row in claimed
     )
+
+
+def claim_next_due_target(
+    connection: sqlite3.Connection,
+    *,
+    claim_token: str,
+    profile_id: int | None = None,
+    now: datetime | None = None,
+) -> ClaimedTarget | None:
+    """Claim the single oldest due target, or return None when none is due.
+
+    This is what a drain loops on. Claiming one message at a time is what keeps
+    ``claimed_at`` honest: the lease starts when the work on that message
+    starts, so a long queue cannot leave a target aging under a claim while the
+    drain is busy elsewhere.
+    """
+    claimed = claim_due_targets(
+        connection, claim_token=claim_token, profile_id=profile_id, now=now, limit=1
+    )
+    return claimed[0] if claimed else None
 
 
 def _complete_batch_if_settled(

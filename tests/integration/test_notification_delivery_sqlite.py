@@ -27,6 +27,7 @@ from services.notifications import (
     DeliveryOutcome,
     DeliveryTargetStatus,
     NotificationDeliveryError,
+    NotificationPayloadError,
     NotificationSyncStatus,
     WebPushDeliverySender,
     WebPushResponse,
@@ -42,6 +43,7 @@ from services.notifications import (
     read_delivery_status,
     record_delivery_attempt,
     recover_stale_claims,
+    release_delivery_claim,
     subscribe_push_subscription,
     sync_notification_policy,
     transport_failure,
@@ -1399,5 +1401,236 @@ def test_no_sql_transaction_is_open_during_the_claim_or_the_send(tmp_path):
         assert seen == [(False, "IN_FLIGHT"), (False, "SENT")]
         assert [row[3] for row in targets(connection)] == ["SENT", "SENT"]
         assert all(row[10] is None and row[11] is None for row in targets(connection))
+    finally:
+        connection.close()
+
+
+def test_a_long_backlog_is_never_claimed_ahead_of_being_sent(tmp_path):
+    """One claim per message, taken when that message's turn actually comes.
+
+    Claiming the whole backlog up front would let the last targets age past
+    their lease while the drain is still on the first, so another drain could
+    legitimately recover a row this one was about to send.
+    """
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        for number in (1, 2, 3, 4):
+            subscribe(connection, identity.profile_id, number)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        connection.commit()
+        seen = []
+
+        def send(target, payload):
+            # Only this target is claimed; every other one is still waiting.
+            seen.append([(row[0], row[3]) for row in targets(connection)])
+            return DeliveryOutcome(True)
+
+        result = drain_notification_deliveries(
+            connection, send, profile_id=identity.profile_id
+        )
+
+        assert result.claimed == 4 and result.sent == 4
+        assert len(seen) == 4
+        for index, snapshot in enumerate(seen):
+            statuses = [status for _, status in snapshot]
+            # Everything before this one is already delivered, this one is the
+            # only claim outstanding, and nothing after it has been touched.
+            assert statuses[:index] == ["SENT"] * index
+            assert statuses[index] == "IN_FLIGHT"
+            assert statuses[index + 1 :] == ["PENDING"] * (len(statuses) - index - 1)
+            assert statuses.count("IN_FLIGHT") == 1
+        assert [row[3] for row in targets(connection)] == ["SENT"] * 4
+        assert all(row[10] is None and row[11] is None for row in targets(connection))
+    finally:
+        connection.close()
+
+
+def test_a_second_drain_takes_a_different_target_but_never_the_one_in_flight(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    path = database_path(connection)
+    try:
+        for number in (1, 2, 3):
+            subscribe(connection, identity.profile_id, number)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        connection.commit()
+        other = sqlite3.connect(path)
+        other.execute("PRAGMA foreign_keys = ON")
+        taken = []
+
+        def send(target, payload):
+            # A rival drain runs while this message is on the wire. It may
+            # take work — just never this target.
+            stolen, held = claim(other, identity.profile_id)
+            taken.append((target.target_id, [item.target_id for item in held]))
+            assert target.target_id not in [item.target_id for item in held]
+            assert stolen != target.claim_token
+            return DeliveryOutcome(True)
+
+        try:
+            result = drain_notification_deliveries(
+                connection, send, profile_id=identity.profile_id
+            )
+        finally:
+            other.close()
+
+        # The rival took the two the first drain had not reached yet, so the
+        # first drain sent exactly one and then found nothing due.
+        assert len(taken) == 1
+        mine, theirs = taken[0]
+        assert len(theirs) == 2 and mine not in theirs
+        assert (result.claimed, result.sent) == (1, 1)
+        statuses = {row[0]: row[3] for row in targets(connection)}
+        assert statuses[mine] == "SENT"
+        assert all(statuses[target_id] == "IN_FLIGHT" for target_id in theirs)
+    finally:
+        connection.close()
+
+
+def test_limit_bounds_the_attempts_and_leaves_nothing_claimed_behind(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        for number in (1, 2, 3, 4, 5):
+            subscribe(connection, identity.profile_id, number)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        send, calls = outcomes(201, 201)
+
+        result = drain_notification_deliveries(
+            connection, send, profile_id=identity.profile_id, limit=2
+        )
+
+        assert (result.claimed, result.attempted, result.sent) == (2, 2, 2)
+        assert len(calls) == 2
+        statuses = [row[3] for row in targets(connection)]
+        assert statuses == ["SENT", "SENT", "PENDING", "PENDING", "PENDING"]
+        # Nothing is left claimed, so no rival drain has to wait out a lease.
+        assert not any(row[3] == "IN_FLIGHT" for row in targets(connection))
+        assert all(row[10] is None and row[11] is None for row in targets(connection))
+        report = read_delivery_status(connection, profile_id=identity.profile_id)
+        assert (report.targets_in_flight, report.targets_due) == (0, 3)
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+
+        # The next pass picks up exactly where this one stopped.
+        again, more = outcomes(201, 201, 201)
+        assert (
+            drain_notification_deliveries(
+                connection, again, profile_id=identity.profile_id
+            ).sent
+            == 3
+        )
+        assert len(more) == 3
+        assert [row[3] for row in targets(connection)] == ["SENT"] * 5
+    finally:
+        connection.close()
+
+
+def test_a_drain_that_cannot_build_a_payload_gives_the_claim_back(tmp_path):
+    """Fail closed, and without stranding the claim for a whole lease."""
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        # A stored event whose click target is not internal: nothing may be
+        # sent from it, and nothing may be invented for it either.
+        broken = json.loads(
+            connection.execute(
+                "SELECT payload_json FROM notification_events"
+            ).fetchone()[0]
+        )
+        broken["opportunity"]["target_url"] = "https://evil.example.invalid/x"
+        connection.execute(
+            "UPDATE notification_events SET payload_json=?",
+            (json.dumps(broken, separators=(",", ":"), sort_keys=True),),
+        )
+        connection.commit()
+        send, calls = outcomes(201)
+
+        with pytest.raises(NotificationPayloadError):
+            drain_notification_deliveries(
+                connection, send, profile_id=identity.profile_id
+            )
+
+        assert calls == []
+        assert connection.in_transaction is False
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[4] == 0
+        assert row[10] is None and row[11] is None
+        assert row[8] is None and row[9] is None
+    finally:
+        connection.close()
+
+
+def test_a_sender_that_raises_gives_the_claim_back_before_the_error_escapes(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+
+        def explode(target, payload):
+            raise RuntimeError("sender blew up")
+
+        with pytest.raises(RuntimeError, match="sender blew up"):
+            drain_notification_deliveries(
+                connection, explode, profile_id=identity.profile_id
+            )
+
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[4] == 0
+        assert row[10] is None and row[11] is None
+
+        # A sender that answers with nonsense is treated the same way.
+        with pytest.raises(NotificationDeliveryError, match="unusable outcome"):
+            drain_notification_deliveries(
+                connection,
+                lambda target, payload: "delivered, honest",
+                profile_id=identity.profile_id,
+            )
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[4] == 0 and row[10] is None
+
+        # And the target is still perfectly deliverable afterwards.
+        send, _ = outcomes(201)
+        assert (
+            drain_notification_deliveries(
+                connection, send, profile_id=identity.profile_id
+            ).sent
+            == 1
+        )
+    finally:
+        connection.close()
+
+
+def test_releasing_a_claim_needs_the_token_and_changes_nothing_else(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
+        target_id = held[0].target_id
+        claimed_row = targets(connection)[0]
+
+        assert (
+            release_delivery_claim(
+                connection, target_id=target_id, claim_token=new_claim_token()
+            )
+            is False
+        )
+        assert targets(connection) == [claimed_row]
+
+        assert (
+            release_delivery_claim(connection, target_id=target_id, claim_token=token)
+            is True
+        )
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[5] is not None
+        assert row[10] is None and row[11] is None
+        # Nothing about the attempt history moved.
+        history = (4, 6, 7, 8, 9)
+        assert tuple(row[index] for index in history) == tuple(
+            claimed_row[index] for index in history
+        )
+        # Releasing twice is a no-op, not an error.
+        assert (
+            release_delivery_claim(connection, target_id=target_id, claim_token=token)
+            is False
+        )
     finally:
         connection.close()

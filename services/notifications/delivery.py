@@ -7,15 +7,26 @@ transactions with the slow part strictly between them:
 1. one transaction materializes the recipients of any new outbox row;
 2. one transaction releases claims abandoned by a drain that died;
 3. one transaction closes targets whose subscription has since been revoked;
-4. one transaction **claims** the targets that are due — moving each to
-   ``IN_FLIGHT`` under a token minted for this drain — and commits;
-5. **no transaction at all** while each message is encrypted and sent;
-6. one short transaction per result, settling exactly the target this drain
-   still holds the claim on.
+
+then, repeatedly, one message at a time:
+
+4. one short transaction **claims** the single oldest due target — moving it
+   to ``IN_FLIGHT`` under this drain's token — and commits;
+5. **no transaction at all** while that message is encrypted and sent;
+6. one short transaction settling exactly that target, under that claim.
 
 Claiming, rather than reading, is what makes two drains safe together: SQLite
-serializes step 4, so the second drain either waits or sees the rows already
-claimed, and the two get disjoint sets. A target is never handed to both.
+serializes step 4, so the second drain either waits or sees the row already
+claimed, and the two get disjoint work. A target is never handed to both.
+
+Step 4 deliberately takes *one* target rather than the whole backlog. A drain
+that claimed a hundred up front would still be sending the tenth long after
+the hundredth had aged past its lease, at which point a second drain would
+recover a row the first was still about to send — two drains, one message,
+which is precisely what the claim exists to prevent. Claiming immediately
+before each send keeps the lease measuring the work on that one message.
+``limit`` therefore bounds how many targets this pass attempts, not how many
+it claims ahead of time.
 
 What no amount of care buys here is exactly-once. An HTTP request and a SQLite
 write cannot be made one atomic act, so a drain that dies between a 2xx and
@@ -55,13 +66,14 @@ from .delivery_persistence import (
     DeliveryTargetStatus,
     MaterializationResult,
     NotificationDeliveryError,
-    claim_due_targets,
+    claim_next_due_target,
     classify_status_code,
     close_targets_of_revoked_subscriptions,
     materialize_delivery_batches,
     new_claim_token,
     record_delivery_attempt,
     recover_stale_claims,
+    release_delivery_claim,
     transport_failure,
 )
 from .web_push import (
@@ -153,7 +165,12 @@ def drain_notification_deliveries(
     materialize: bool = True,
     lease_seconds: int = CLAIM_LEASE_SECONDS,
 ) -> DeliveryDrainResult:
-    """Claim every due target, send it once, and settle it under that claim."""
+    """Work the backlog one message at a time: claim, send, settle, repeat.
+
+    ``limit`` bounds how many targets this pass attempts. The pass ends when
+    nothing is due any more, or when that bound is reached — and it never
+    leaves a target claimed behind it.
+    """
     if connection.in_transaction:
         raise NotificationDeliveryError(
             "drain_notification_deliveries requires a connection without an"
@@ -174,21 +191,9 @@ def drain_notification_deliveries(
     )
     # One token for this drain. Everything it claims, only it may settle.
     claim_token = new_claim_token()
-    claimed = claim_due_targets(
-        connection,
-        claim_token=claim_token,
-        profile_id=profile_id,
-        now=now,
-        limit=limit,
-    )
-    # Every payload is built before the first request, so a corrupt stored
-    # event fails the drain closed rather than half way through it.
-    work = tuple(
-        (target, encode_push_payload(target.payload_json)) for target in claimed
-    )
-
     counts = dict.fromkeys(
         (
+            "claimed",
             "attempted",
             "sent",
             "retried",
@@ -201,9 +206,35 @@ def drain_notification_deliveries(
         ),
         0,
     )
-    for target, payload in work:
-        outcome = sender(target, payload)
+    while limit is None or counts["attempted"] < limit:
+        target = claim_next_due_target(
+            connection, claim_token=claim_token, profile_id=profile_id, now=now
+        )
+        if target is None:
+            break
+        counts["claimed"] += 1
+        try:
+            # A corrupt stored event fails closed: nothing is sent from a
+            # record we do not trust, and nothing is invented for it either.
+            payload = encode_push_payload(target.payload_json)
+            outcome = sender(target, payload)
+        except BaseException:
+            # Give the claim back rather than stranding it for a whole lease
+            # over a failure that is immediate and repeatable.
+            release_delivery_claim(
+                connection,
+                target_id=target.target_id,
+                claim_token=target.claim_token,
+                now=now,
+            )
+            raise
         if not isinstance(outcome, DeliveryOutcome):
+            release_delivery_claim(
+                connection,
+                target_id=target.target_id,
+                claim_token=target.claim_token,
+                now=now,
+            )
             raise NotificationDeliveryError("sender returned an unusable outcome")
         counts["attempted"] += 1
         result = record_delivery_attempt(
@@ -235,7 +266,7 @@ def drain_notification_deliveries(
         materialized.empty_batches,
         len(recovered),
         len(closed),
-        len(claimed),
+        counts["claimed"],
         counts["attempted"],
         counts["sent"],
         counts["retried"],

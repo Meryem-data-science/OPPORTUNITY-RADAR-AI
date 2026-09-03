@@ -94,16 +94,32 @@ def _b64(value: bytes) -> str:
 
 @dataclass(frozen=True)
 class PushTarget:
-    """The three values a push service needs, and nothing else about a user."""
+    """The three values a push service needs, and nothing else about a user.
+
+    All three are the credential, so this object refuses to render itself: it
+    can travel through a traceback, a pytest diff, or a log call without ever
+    printing what it carries.
+    """
 
     endpoint: str
     p256dh: str
     auth: str
 
+    def __repr__(self) -> str:
+        return "PushTarget(endpoint=<redacted>, p256dh=<redacted>, auth=<redacted>)"
+
+    __str__ = __repr__
+
 
 @dataclass(frozen=True)
 class WebPushRequest:
-    """One prepared, already encrypted request. The body is opaque bytes."""
+    """One prepared, already encrypted request. The body is opaque bytes.
+
+    The endpoint is a credential and the ``Authorization`` header is a signed
+    assertion, so this object does not render either. Only the header *names*
+    and the body length are ever shown, which is enough to tell two requests
+    apart in a log without disclosing what is in them.
+    """
 
     endpoint: str
     headers: tuple[tuple[str, str], ...]
@@ -111,6 +127,15 @@ class WebPushRequest:
 
     def header_map(self) -> dict[str, str]:
         return dict(self.headers)
+
+    def __repr__(self) -> str:
+        names = ",".join(name for name, _ in self.headers)
+        return (
+            f"WebPushRequest(endpoint=<redacted>, headers=<redacted: {names}>,"
+            f" body=<{len(self.body)} encrypted bytes>)"
+        )
+
+    __str__ = __repr__
 
 
 @dataclass(frozen=True)

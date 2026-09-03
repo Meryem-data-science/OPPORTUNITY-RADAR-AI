@@ -434,6 +434,40 @@ def test_an_unreadable_stored_event_is_refused_rather_than_invented():
             build_push_payload(payload_json)
 
 
+def test_a_push_target_and_a_prepared_request_never_render_their_credentials():
+    """Sentinel values that must not survive a traceback, a diff, or a log."""
+    endpoint = "https://push.example.invalid/ENDPOINT-SENTINEL-9f3a"
+    p256dh = RFC8291["ua_public"]
+    auth = RFC8291["auth"]
+    target = PushTarget(endpoint, p256dh, auth)
+    request = build_web_push_request(
+        configuration(), target, encode_push_payload(PAYLOAD)
+    )
+    authorization = request.header_map()["Authorization"]
+
+    for rendering in (
+        repr(target),
+        str(target),
+        f"{target}",
+        repr(request),
+        str(request),
+        f"{request}",
+        # A container renders its items with repr, which is how a credential
+        # usually escapes into a log line.
+        repr([target, request]),
+        repr({"target": target, "request": request}),
+    ):
+        for secret in (endpoint, p256dh, auth, authorization, PRIVATE_KEY):
+            assert secret not in rendering
+        assert "redacted" in rendering
+
+    # The request still carries everything the protocol needs.
+    assert request.endpoint == endpoint
+    assert request.header_map()["Authorization"] == authorization
+    assert "Authorization" in repr(request) and "TTL" in repr(request)
+    assert f"{len(request.body)} encrypted bytes" in repr(request)
+
+
 def test_preparing_a_message_never_opens_a_socket(monkeypatch, caplog):
     def refuse(*arguments, **keywords):
         raise AssertionError("preparing a Web Push message must not reach the network")

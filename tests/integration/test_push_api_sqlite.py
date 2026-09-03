@@ -12,17 +12,26 @@ from services.api.push import (
     PUBLIC_PUSH_REQUEST_ERROR,
     VAPID_PUBLIC_KEY_VARIABLE,
 )
-from services.notifications import subscribe_push_subscription
+from services.notifications import (
+    decode_base64url,
+    subscribe_push_subscription,
+    valid_p256dh,
+)
 from tests.integration.test_push_subscriptions_sqlite import (
     AUTH,
     ENDPOINT,
     MALFORMED_AUTH,
     MALFORMED_P256DH,
     P256DH,
+    p256dh_for,
     push_fixture,
 )
 
-VAPID_PUBLIC_KEY = (
+# A VAPID application server key is a real P-256 public point, so the fixture
+# is one: 65 bytes behind an 0x04 is a shape, not a key.
+VAPID_PUBLIC_KEY = p256dh_for(0x7A91)
+#: The right length and the right prefix, and still not a point on the curve.
+OFF_CURVE_VAPID_PUBLIC_KEY = (
     base64.urlsafe_b64encode(b"\x04" + bytes(range(64))).decode().rstrip("=")
 )
 
@@ -72,6 +81,9 @@ def test_config_reports_absent_present_and_malformed_keys(tmp_path, monkeypatch)
         VAPID_PUBLIC_KEY[:-4],
         "A" * 200,
         VAPID_PUBLIC_KEY + "==",
+        # The shape of an application server key without being one. The sender
+        # would refuse it, so this surface must not advertise it either.
+        OFF_CURVE_VAPID_PUBLIC_KEY,
     ):
         monkeypatch.setenv(VAPID_PUBLIC_KEY_VARIABLE, malformed)
         assert client.get("/api/push/config").json() == {
@@ -84,6 +96,37 @@ def test_config_reports_absent_present_and_malformed_keys(tmp_path, monkeypatch)
         "configured": True,
         "vapid_public_key": VAPID_PUBLIC_KEY,
     }
+
+
+def test_an_off_curve_vapid_public_key_is_refused_without_being_logged(
+    tmp_path, monkeypatch, caplog
+):
+    """The API and the 5.3C sender agree on what a public key is.
+
+    ``valid_p256dh`` verifies the point is on the curve, and this surface now
+    reads the application server key through exactly that check — so a browser
+    is never handed a key the sender would refuse.
+    """
+    connection, _, _, _ = prepared(tmp_path, monkeypatch)
+    connection.close()
+    monkeypatch.setenv(VAPID_PUBLIC_KEY_VARIABLE, OFF_CURVE_VAPID_PUBLIC_KEY)
+
+    with caplog.at_level("DEBUG"):
+        response = TestClient(app).get("/api/push/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"configured": False, "vapid_public_key": None}
+    # The refusal is recorded; the value that was refused is not.
+    emitted = "\n".join(
+        [record.getMessage() for record in caplog.records]
+        + [str(record.__dict__) for record in caplog.records]
+    )
+    assert OFF_CURVE_VAPID_PUBLIC_KEY not in emitted
+    assert OFF_CURVE_VAPID_PUBLIC_KEY not in response.text
+    assert len(decode_base64url(OFF_CURVE_VAPID_PUBLIC_KEY)) == 65
+    assert decode_base64url(OFF_CURVE_VAPID_PUBLIC_KEY)[0] == 0x04
+    assert not valid_p256dh(OFF_CURVE_VAPID_PUBLIC_KEY)
+    assert valid_p256dh(VAPID_PUBLIC_KEY)
 
 
 def test_config_never_exposes_a_private_key_variable(tmp_path, monkeypatch):

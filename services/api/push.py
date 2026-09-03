@@ -24,11 +24,8 @@ from services.collector.logging_config import get_logger
 from services.notifications import (
     MAX_ENDPOINT_LENGTH,
     MAX_KEY_LENGTH,
-    P256DH_BYTE_LENGTH,
-    P256DH_UNCOMPRESSED_PREFIX,
     PushSubscriptionError,
     PushSubscriptionOwnershipError,
-    decode_base64url,
     subscribe_push_subscription,
     unsubscribe_push_subscription,
     valid_auth,
@@ -68,20 +65,17 @@ class PushSubscriptionStateResponse(BaseModel):
 
 
 def _valid_public_key(value: str) -> bool:
-    """Accept only a base64url uncompressed P-256 point, the VAPID key shape.
+    """Accept only a real P-256 public point, the VAPID application server key.
 
-    This is the same shape as a subscription's ``p256dh``, decoded through the
-    same strict base64url reader: an application server key that is not exactly
-    65 bytes starting with 0x04 is not one.
+    A VAPID public key is the same object as a subscription's ``p256dh``, so it
+    is read through exactly the same check: strict base64url, 65 bytes, an 0x04
+    prefix, and — the part that matters — a point that is genuinely on the
+    curve. Anything less would let this surface advertise a key the sender will
+    refuse, so the browser and the sender agree on what a key is.
     """
     if value != value.strip() or len(value) > MAX_KEY_LENGTH:
         return False
-    decoded = decode_base64url(value)
-    return (
-        decoded is not None
-        and len(decoded) == P256DH_BYTE_LENGTH
-        and decoded[0] == P256DH_UNCOMPRESSED_PREFIX
-    )
+    return valid_p256dh(value)
 
 
 def read_push_config() -> PushConfigResponse:
