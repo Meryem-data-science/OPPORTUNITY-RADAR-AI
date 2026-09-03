@@ -300,19 +300,32 @@ def test_a_database_without_migration_0018_is_unavailable(tmp_path, monkeypatch)
 
 
 def test_the_push_surface_sends_no_notification(tmp_path, monkeypatch):
-    """5.3A stores an opt-in and nothing else: no delivery, no outbox."""
+    """The push surface stores an opt-in and nothing else: no event, no outbox.
+
+    Phase 5.3B owns the notification policy tables. Opting in and out must not
+    put anything in them, and must not deliver anything either.
+    """
     connection, _, _, _ = prepared(tmp_path, monkeypatch)
     try:
         client = TestClient(app)
         client.post("/api/push/subscriptions", json=body())
         client.request("DELETE", "/api/push/subscriptions", json={"endpoint": ENDPOINT})
-        tables = {
+        notification_tables = sorted(
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
-        }
-        assert not any("notification" in table or "outbox" in table for table in tables)
+            if "notification" in row[0] or "outbox" in row[0]
+        )
+        assert notification_tables == [
+            "notification_events",
+            "notification_outbox",
+            "notification_policy_state",
+        ]
+        assert all(
+            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+            for table in notification_tables
+        )
     finally:
         connection.close()
 
