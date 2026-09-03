@@ -1024,8 +1024,8 @@ class DeliveryStatusReport:
     batch. ``batches_without_subscriptions`` is a profile with no device;
     ``batches_without_eligible_subscriptions`` is a profile whose devices all
     opted in after the event, which is the boundary doing its job rather than a
-    delivery that went missing. A batch written before migration 0021 recorded
-    no reason and is counted with the former.
+    delivery that went missing. Migration 0021 gave every batch that predates
+    it the only reason it could have had, so nothing falls between the two.
     """
 
     profile_id: int | None

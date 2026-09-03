@@ -37,8 +37,8 @@ def rewind_to_0020(connection):
     the schema 0020 produces and the rows an operator would really have.
     """
     for trigger in (
-        "push_subscriptions_watermark_covers_existing_events",
-        "push_subscriptions_reactivation_refreshes_watermark",
+        "push_subscriptions_watermark_matches_the_event_stream",
+        "push_subscriptions_reactivation_matches_the_event_stream",
         "notification_delivery_batches_empty_reason_is_stated",
     ):
         connection.execute(f"DROP TRIGGER {trigger}")
@@ -217,12 +217,17 @@ def test_the_watermark_column_is_a_non_negative_integer_that_must_be_stated(tmp_
         connection.close()
 
 
-def test_no_row_may_activate_behind_the_event_stream_whoever_writes_it(tmp_path):
-    """The column default is 0; the triggers are what make that unusable.
+def test_an_inserted_activation_takes_the_current_event_id_and_nothing_else(
+    tmp_path,
+):
+    """The column default is 0; the trigger is what makes that unusable.
 
     SQLite can only add a column with a constant default, and 0 is the value
-    that would deliver a profile's whole history. These two triggers are the
-    reason a hand-written INSERT or reactivation cannot quietly take it.
+    that would deliver a profile's whole history. But too high is a failure of
+    its own, and a quieter one: a watermark above the stream is not a boundary,
+    it is a mute that lasts until the profile's ids climb past it, and it looks
+    exactly like a healthy subscription while it lasts. So an activation is the
+    current highest event id exactly, and every other value is refused.
     """
     connection, identity, opportunity_ids, first, second = two_runs(tmp_path)
     try:
@@ -231,15 +236,38 @@ def test_no_row_may_activate_behind_the_event_stream_whoever_writes_it(tmp_path)
         )
         connection.commit()
 
-        # An insert that relies on the default, or names anything below the
-        # stream, is refused outright.
-        for watermark in ({}, {WATERMARK: 0}, {WATERMARK: event_id - 1}):
-            with pytest.raises(sqlite3.IntegrityError, match="predates"):
+        for watermark in (
+            # Behind the stream, including the column default: replays history.
+            {},
+            {WATERMARK: 0},
+            {WATERMARK: event_id - 1},
+            # Ahead of it: silently suppresses everything up to that id.
+            {WATERMARK: event_id + 1},
+            {WATERMARK: 999999},
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match="current notification"):
                 insert_subscription(
                     connection, identity.profile_id, ENDPOINT, **watermark
                 )
             connection.rollback()
+        assert watermarks(connection) == []
 
+        subscription_id = insert_subscription(
+            connection, identity.profile_id, ENDPOINT, **{WATERMARK: event_id}
+        )
+        connection.commit()
+        assert watermarks(connection) == [(subscription_id, "ACTIVE", event_id)]
+    finally:
+        connection.close()
+
+
+def test_a_reactivation_takes_the_current_event_id_and_nothing_else(tmp_path):
+    """Coming back is opting in again, at the line the profile is on now."""
+    connection, identity, opportunity_ids, first, second = two_runs(tmp_path)
+    try:
+        event_id = announce(
+            connection, identity, opportunity_ids[0], first, second, "a" * 64
+        )
         subscription_id = insert_subscription(
             connection, identity.profile_id, ENDPOINT, **{WATERMARK: event_id}
         )
@@ -254,15 +282,27 @@ def test_no_row_may_activate_behind_the_event_stream_whoever_writes_it(tmp_path)
         )
         connection.commit()
 
-        # Coming back with the boundary it had before is coming back to the
-        # past: reactivation has to take the current one.
-        with pytest.raises(sqlite3.IntegrityError, match="predates"):
+        # Keeping the boundary it had before is coming back to the past;
+        # naming one beyond the stream is coming back to a silence.
+        for watermark in (event_id, 0, later - 1, later + 1, 999999):
+            with pytest.raises(sqlite3.IntegrityError, match="current notification"):
+                connection.execute(
+                    f"UPDATE push_subscriptions SET status='ACTIVE',revoked_at=NULL,"
+                    f" {WATERMARK}=? WHERE id=?",
+                    (watermark, subscription_id),
+                )
+            connection.rollback()
+        # A reactivation that does not restate the watermark at all is the
+        # same mistake written a shorter way.
+        with pytest.raises(sqlite3.IntegrityError, match="current notification"):
             connection.execute(
                 "UPDATE push_subscriptions SET status='ACTIVE',revoked_at=NULL"
                 " WHERE id=?",
                 (subscription_id,),
             )
         connection.rollback()
+        assert watermarks(connection) == [(subscription_id, "REVOKED", event_id)]
+
         connection.execute(
             f"UPDATE push_subscriptions SET status='ACTIVE',revoked_at=NULL,"
             f" {WATERMARK}=? WHERE id=?",

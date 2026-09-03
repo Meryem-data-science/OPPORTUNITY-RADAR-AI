@@ -31,30 +31,38 @@ SET notification_event_watermark = (
 -- SQLite can only add a column with a constant default, and the only constant
 -- available is 0 — the value that would deliver a profile's whole history to a
 -- new device. These two triggers make that default unusable rather than
--- merely discouraged: an activation may never carry a watermark that is
--- already behind the profile's event stream, whoever writes the row.
-CREATE TRIGGER push_subscriptions_watermark_covers_existing_events
+-- merely discouraged.
+--
+-- Both sides of the line are wrong, and both are refused. A watermark below
+-- the stream replays history the device never asked for. A watermark above it
+-- is quieter and worse: it is not a boundary at all but a mute, and it lasts
+-- until the profile's ids happen to climb past whatever number was written —
+-- an outage that looks exactly like a working subscription. An activation is
+-- therefore the profile's current highest event id and nothing else: equal,
+-- not merely not-behind, whoever writes the row.
+CREATE TRIGGER push_subscriptions_watermark_matches_the_event_stream
 BEFORE INSERT ON push_subscriptions
-WHEN NEW.notification_event_watermark < (
+WHEN NEW.notification_event_watermark <> (
     SELECT COALESCE(MAX(id), 0) FROM notification_events
     WHERE profile_id = NEW.profile_id
 )
 BEGIN
-    SELECT RAISE(ABORT, 'push subscription watermark predates a stored notification event');
+    SELECT RAISE(ABORT, 'push subscription watermark is not the profile current notification event id');
 END;
 
--- Only a REVOKED -> ACTIVE transition refreshes the watermark, so only that
+-- Only a REVOKED -> ACTIVE transition is an activation, so only that
 -- transition is checked. A key rotation on a live subscription keeps the
--- watermark it already earned, and revoking never moves it.
-CREATE TRIGGER push_subscriptions_reactivation_refreshes_watermark
+-- watermark it already earned — it never stopped being subscribed, so there
+-- is no new line to draw — and revoking never moves it either.
+CREATE TRIGGER push_subscriptions_reactivation_matches_the_event_stream
 BEFORE UPDATE OF status ON push_subscriptions
 WHEN OLD.status = 'REVOKED' AND NEW.status = 'ACTIVE'
- AND NEW.notification_event_watermark < (
+ AND NEW.notification_event_watermark <> (
     SELECT COALESCE(MAX(id), 0) FROM notification_events
     WHERE profile_id = NEW.profile_id
 )
 BEGIN
-    SELECT RAISE(ABORT, 'reactivated push subscription watermark predates a stored notification event');
+    SELECT RAISE(ABORT, 'reactivated push subscription watermark is not the profile current notification event id');
 END;
 
 -- A batch with no recipients was already terminal on the spot in 0020, but it
@@ -73,8 +81,10 @@ UPDATE notification_delivery_batches
 SET empty_reason = 'NO_ACTIVE_SUBSCRIPTIONS'
 WHERE status = 'NO_ACTIVE_SUBSCRIPTIONS';
 
--- Existing rows keep NULL as a legitimate "written before 0021"; a row written
--- from here on states its reason exactly when it is an empty batch.
+-- The UPDATE above already gave every empty batch that predates 0021 the only
+-- reason it could have had, so NULL now means exactly one thing: a batch that
+-- has recipients. This trigger keeps it that way — a row written from here on
+-- states its reason when, and only when, it is an empty batch.
 CREATE TRIGGER notification_delivery_batches_empty_reason_is_stated
 BEFORE INSERT ON notification_delivery_batches
 WHEN (NEW.status = 'NO_ACTIVE_SUBSCRIPTIONS') <> (NEW.empty_reason IS NOT NULL)
