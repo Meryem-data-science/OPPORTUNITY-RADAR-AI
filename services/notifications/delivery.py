@@ -5,17 +5,35 @@ open while a request is in flight, so one drain is a sequence of short, closed
 transactions with the slow part strictly between them:
 
 1. one transaction materializes the recipients of any new outbox row;
-2. one transaction closes targets whose subscription has since been revoked;
-3. one transaction reads the targets that are due, and commits;
-4. **no transaction at all** while each message is encrypted and sent;
-5. one short transaction per result, recording exactly that one attempt.
+2. one transaction releases claims abandoned by a drain that died;
+3. one transaction closes targets whose subscription has since been revoked;
+4. one transaction **claims** the targets that are due — moving each to
+   ``IN_FLIGHT`` under a token minted for this drain — and commits;
+5. **no transaction at all** while each message is encrypted and sent;
+6. one short transaction per result, settling exactly the target this drain
+   still holds the claim on.
 
-Consequences worth stating: a crash anywhere loses at most the record of the
-attempts in flight, and re-running the drain is safe because a target that is
-already terminal is never re-attempted and never overwritten. The delivery
-never recomputes Portfolio, Priority, Matching, or Eligibility, never rewrites
-what an event means, and never reads anything outside the outbox, the event it
-points at, and the subscriptions frozen for it.
+Claiming, rather than reading, is what makes two drains safe together: SQLite
+serializes step 4, so the second drain either waits or sees the rows already
+claimed, and the two get disjoint sets. A target is never handed to both.
+
+What no amount of care buys here is exactly-once. An HTTP request and a SQLite
+write cannot be made one atomic act, so a drain that dies between a 2xx and
+step 6 leaves a claim it will never settle. Such claims are released by lease
+(:data:`~services.notifications.delivery_persistence.CLAIM_LEASE_SECONDS`) and
+the target is attempted again — which is precisely where the same notification
+can be delivered twice. Stated plainly:
+
+* concurrent drains never collide, because a claim is exclusive;
+* a target that reached ``SENT`` is never sent again, by anyone, ever;
+* after a crash in that one ambiguous window, delivery is *at-least-once*,
+  with a redelivery risk bounded by the lease and by the attempt limit.
+
+Re-running the drain is otherwise safe: a terminal target is never
+re-attempted and never overwritten. The delivery never recomputes Portfolio,
+Priority, Matching, or Eligibility, never rewrites what an event means, and
+never reads anything outside the outbox, the event it points at, and the
+subscriptions frozen for it.
 
 There is no scheduler, no daemon, and no deployment here: something outside
 this process decides when a drain happens.
@@ -31,16 +49,19 @@ from services.collector.logging_config import get_logger
 
 from .delivery_payload import encode_push_payload
 from .delivery_persistence import (
+    CLAIM_LEASE_SECONDS,
+    ClaimedTarget,
     DeliveryOutcome,
     DeliveryTargetStatus,
-    DueTarget,
     MaterializationResult,
     NotificationDeliveryError,
+    claim_due_targets,
     classify_status_code,
     close_targets_of_revoked_subscriptions,
     materialize_delivery_batches,
-    read_due_targets,
+    new_claim_token,
     record_delivery_attempt,
+    recover_stale_claims,
     transport_failure,
 )
 from .web_push import (
@@ -63,7 +84,9 @@ class DeliveryDrainResult:
     materialized_batches: int
     materialized_targets: int
     empty_batches: int
+    recovered_claims: int
     closed_revoked_targets: int
+    claimed: int
     attempted: int
     sent: int
     retried: int
@@ -94,7 +117,7 @@ class WebPushDeliverySender:
         self._transport = transport
         self._ttl_seconds = ttl_seconds
 
-    def __call__(self, target: DueTarget, payload: bytes) -> DeliveryOutcome:
+    def __call__(self, target: ClaimedTarget, payload: bytes) -> DeliveryOutcome:
         request = build_web_push_request(
             self._configuration,
             PushTarget(target.endpoint, target.p256dh, target.auth),
@@ -128,8 +151,9 @@ def drain_notification_deliveries(
     now: datetime | None = None,
     limit: int | None = None,
     materialize: bool = True,
+    lease_seconds: int = CLAIM_LEASE_SECONDS,
 ) -> DeliveryDrainResult:
-    """Send every due target once, recording each result as it comes back."""
+    """Claim every due target, send it once, and settle it under that claim."""
     if connection.in_transaction:
         raise NotificationDeliveryError(
             "drain_notification_deliveries requires a connection without an"
@@ -142,13 +166,26 @@ def drain_notification_deliveries(
         if materialize
         else MaterializationResult((), 0, 0, 0)
     )
+    recovered = recover_stale_claims(
+        connection, profile_id=profile_id, now=now, lease_seconds=lease_seconds
+    )
     closed = close_targets_of_revoked_subscriptions(
         connection, profile_id=profile_id, now=now
     )
-    due = read_due_targets(connection, profile_id=profile_id, now=now, limit=limit)
+    # One token for this drain. Everything it claims, only it may settle.
+    claim_token = new_claim_token()
+    claimed = claim_due_targets(
+        connection,
+        claim_token=claim_token,
+        profile_id=profile_id,
+        now=now,
+        limit=limit,
+    )
     # Every payload is built before the first request, so a corrupt stored
     # event fails the drain closed rather than half way through it.
-    work = tuple((target, encode_push_payload(target.payload_json)) for target in due)
+    work = tuple(
+        (target, encode_push_payload(target.payload_json)) for target in claimed
+    )
 
     counts = dict.fromkeys(
         (
@@ -170,7 +207,11 @@ def drain_notification_deliveries(
             raise NotificationDeliveryError("sender returned an unusable outcome")
         counts["attempted"] += 1
         result = record_delivery_attempt(
-            connection, target_id=target.target_id, outcome=outcome, now=now
+            connection,
+            target_id=target.target_id,
+            claim_token=target.claim_token,
+            outcome=outcome,
+            now=now,
         )
         if not result.applied:
             counts["skipped"] += 1
@@ -192,7 +233,9 @@ def drain_notification_deliveries(
         materialized.created_batches,
         materialized.created_targets,
         materialized.empty_batches,
+        len(recovered),
         len(closed),
+        len(claimed),
         counts["attempted"],
         counts["sent"],
         counts["retried"],
@@ -208,6 +251,8 @@ def drain_notification_deliveries(
         extra={
             "event": "notification_delivery_drain",
             "profile_id": profile_id,
+            "recovered_claim_count": result.recovered_claims,
+            "claimed_count": result.claimed,
             "attempted_count": result.attempted,
             "sent_count": result.sent,
             "retried_count": result.retried,

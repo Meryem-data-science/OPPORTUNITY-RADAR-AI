@@ -39,6 +39,7 @@ from services.notifications import (
     retry_delay_seconds,
     transport_failure,
 )
+from services.notifications import NOTIFICATION_TARGET_PATH
 from services.notifications.web_push import RECORD_SIZE
 
 
@@ -372,6 +373,31 @@ def test_the_click_target_is_always_an_internal_path():
     kept = json.loads(PAYLOAD)
     kept["opportunity"]["target_url"] = "/portfolio?focus=7"
     assert build_push_payload(json.dumps(kept))["url"] == "/portfolio?focus=7"
+
+
+def test_a_missing_click_target_fails_closed_rather_than_defaulting():
+    """There is no fallback: a payload with no target is a payload we refuse."""
+    absent = json.loads(PAYLOAD)
+    del absent["opportunity"]["target_url"]
+    with pytest.raises(NotificationPayloadError, match="internal click target"):
+        build_push_payload(json.dumps(absent))
+
+    # The persisted /portfolio target is still accepted exactly as it is.
+    assert build_push_payload(PAYLOAD)["url"] == "/portfolio"
+    assert NOTIFICATION_TARGET_PATH == "/portfolio"
+
+
+def test_an_opportunity_id_must_be_a_positive_integer():
+    for opportunity_id in (0, -1, -7, True, False, "7", 7.0, None):
+        broken = json.loads(PAYLOAD)
+        broken["opportunity"]["opportunity_id"] = opportunity_id
+        with pytest.raises(NotificationPayloadError, match="opportunity id"):
+            build_push_payload(json.dumps(broken))
+    kept = json.loads(PAYLOAD)
+    kept["opportunity"]["opportunity_id"] = 1
+    built = build_push_payload(json.dumps(kept))
+    assert built["opportunity_id"] == 1
+    assert built["tag"].endswith(":1")
 
 
 def test_an_unreadable_stored_event_is_refused_rather_than_invented():

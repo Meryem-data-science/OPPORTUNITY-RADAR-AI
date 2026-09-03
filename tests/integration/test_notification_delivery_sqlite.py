@@ -12,6 +12,7 @@ import json
 import logging
 import socket
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -19,6 +20,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from services.collector import logging_config
 from services.notifications import (
+    CLAIM_LEASE_SECONDS,
     MAX_DELIVERY_ATTEMPTS,
     RETRY_BACKOFF_SECONDS,
     DeliveryBatchStatus,
@@ -30,14 +32,16 @@ from services.notifications import (
     WebPushResponse,
     WebPushTransportError,
     build_vapid_configuration,
+    claim_due_targets,
     classify_status_code,
     drain_notification_deliveries,
     encode_push_payload,
     load_vapid_configuration,
     materialize_delivery_batches,
+    new_claim_token,
     read_delivery_status,
-    read_due_targets,
     record_delivery_attempt,
+    recover_stale_claims,
     subscribe_push_subscription,
     sync_notification_policy,
     transport_failure,
@@ -52,23 +56,15 @@ from tests.integration.test_notification_policy_sync_sqlite import (
     included,
     store_run,
 )
+from tests.integration.test_push_subscriptions_sqlite import P256DH
 
 AUTH = "c" * 22
 SCALAR = bytes(range(1, 33))
-# A real uncompressed P-256 point, because the tests that encrypt need a key
-# that is actually on the curve, not merely one of the right shape.
-BROWSER_SCALAR = bytes(range(40, 72))
 
 
 def encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
-
-P256DH = encode(
-    ec.derive_private_key(int.from_bytes(BROWSER_SCALAR, "big"), ec.SECP256R1())
-    .public_key()
-    .public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-)
 
 PRIVATE_KEY = encode(SCALAR)
 PUBLIC_KEY = encode(
@@ -137,9 +133,18 @@ def batches(connection):
 def targets(connection):
     return connection.execute(
         """SELECT id,batch_id,subscription_id,status,attempt_count,next_attempt_at,
-        last_attempt_at,delivered_at,last_error_code,last_error_category
+        last_attempt_at,delivered_at,last_error_code,last_error_category,
+        claim_token,claimed_at
         FROM notification_delivery_targets ORDER BY id"""
     ).fetchall()
+
+
+def claim(connection, profile_id, *, token=None, now=None, limit=None):
+    """Claim the due targets the way a drain does, and hand back the token."""
+    token = new_claim_token() if token is None else token
+    return token, claim_due_targets(
+        connection, claim_token=token, profile_id=profile_id, now=now, limit=limit
+    )
 
 
 def subscriptions(connection):
@@ -425,7 +430,8 @@ def test_a_target_that_is_not_due_yet_is_never_attempted(tmp_path):
         )
 
         assert second_calls == [] and result.attempted == 0
-        assert read_due_targets(connection, profile_id=identity.profile_id) == ()
+        assert result.claimed == 0
+        assert claim(connection, identity.profile_id)[1] == ()
         assert targets(connection)[0][3] == "PENDING"
         assert targets(connection)[0][4] == 1
         report = read_delivery_status(connection, profile_id=identity.profile_id)
@@ -440,15 +446,25 @@ def test_retries_follow_the_bounded_schedule_and_end_in_a_terminal_failure(tmp_p
     connection, identity, _ = one_event(tmp_path)
     try:
         subscribe(connection, identity.profile_id, 1)
-        target_id = None
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        target_id = targets(connection)[0][0]
         for attempt in range(1, MAX_DELIVERY_ATTEMPTS + 1):
-            if target_id is None:
-                materialize_delivery_batches(connection, profile_id=identity.profile_id)
-                target_id = targets(connection)[0][0]
+            # Each attempt is a fresh claim, and each retry releases it. The
+            # clock is moved forward so the scheduled retry is due again.
+            token, held = claim(
+                connection,
+                identity.profile_id,
+                now=datetime.now(timezone.utc) + timedelta(days=attempt),
+            )
+            assert [target.target_id for target in held] == [target_id]
             result = record_delivery_attempt(
-                connection, target_id=target_id, outcome=classify_status_code(503)
+                connection,
+                target_id=target_id,
+                claim_token=token,
+                outcome=classify_status_code(503),
             )
             row = targets(connection)[0]
+            assert row[10] is None and row[11] is None
             assert row[4] == attempt
             if attempt < MAX_DELIVERY_ATTEMPTS:
                 assert result.status is DeliveryTargetStatus.PENDING
@@ -462,9 +478,13 @@ def test_retries_follow_the_bounded_schedule_and_end_in_a_terminal_failure(tmp_p
         assert batches(connection)[0][2] == DeliveryBatchStatus.COMPLETED.value
         assert subscriptions(connection) == [(1, "ACTIVE", 0)]
 
-        # A spent target is terminal: another attempt changes nothing.
+        # A spent target is terminal: it cannot even be claimed again.
+        assert claim(connection, identity.profile_id)[1] == ()
         again = record_delivery_attempt(
-            connection, target_id=target_id, outcome=classify_status_code(201)
+            connection,
+            target_id=target_id,
+            claim_token=token,
+            outcome=classify_status_code(201),
         )
         assert again.applied is False and targets(connection)[0][3] == "FAILED"
         assert read_delivery_status(connection).targets_failed == 1
@@ -516,10 +536,12 @@ def test_a_delivered_target_is_never_sent_again_however_often_the_drain_runs(tmp
         ) == after
         assert len(calls) == 1
 
-        # Even asked directly, a SENT target refuses a second attempt.
+        # Even asked directly, under a fresh claim token, a SENT target
+        # refuses a second attempt.
         applied = record_delivery_attempt(
             connection,
             target_id=targets(connection)[0][0],
+            claim_token=new_claim_token(),
             outcome=classify_status_code(500),
         )
         assert applied.applied is False
@@ -663,8 +685,9 @@ def test_a_failure_while_recording_rolls_the_whole_attempt_back(tmp_path, monkey
     try:
         subscribe(connection, identity.profile_id, 1)
         materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
         before = (batches(connection), targets(connection), subscriptions(connection))
-        target_id = targets(connection)[0][0]
+        target_id = held[0].target_id
 
         def explode(*arguments, **keywords):
             raise sqlite3.OperationalError("disk I/O error")
@@ -672,7 +695,10 @@ def test_a_failure_while_recording_rolls_the_whole_attempt_back(tmp_path, monkey
         monkeypatch.setattr(delivery_persistence, "_complete_batch_if_settled", explode)
         with pytest.raises(sqlite3.OperationalError):
             record_delivery_attempt(
-                connection, target_id=target_id, outcome=classify_status_code(410)
+                connection,
+                target_id=target_id,
+                claim_token=token,
+                outcome=classify_status_code(410),
             )
 
         assert connection.in_transaction is False
@@ -823,16 +849,16 @@ def test_the_drain_never_opens_a_socket_and_never_logs_a_credential(
         connection.close()
 
 
-def test_a_due_target_never_renders_the_credential_it_carries(tmp_path):
+def test_a_claimed_target_never_renders_the_credential_it_carries(tmp_path):
     connection, identity, _ = one_event(tmp_path)
     try:
         subscribe(connection, identity.profile_id, 1)
         materialize_delivery_batches(connection, profile_id=identity.profile_id)
 
-        due = read_due_targets(connection, profile_id=identity.profile_id)
+        _, held = claim(connection, identity.profile_id)
 
-        assert len(due) == 1 and due[0].endpoint == endpoint(1)
-        for rendering in (repr(due[0]), str(due[0]), f"{due[0]}"):
+        assert len(held) == 1 and held[0].endpoint == endpoint(1)
+        for rendering in (repr(held[0]), str(held[0]), f"{held[0]}"):
             assert endpoint(1) not in rendering
             assert P256DH not in rendering and AUTH not in rendering
             assert "redacted" in rendering
@@ -855,9 +881,13 @@ def test_delivery_refuses_an_unmigrated_database_and_a_borrowed_transaction(tmp_
         connection.execute("BEGIN IMMEDIATE")
         for call in (
             lambda: materialize_delivery_batches(connection),
-            lambda: read_due_targets(connection),
+            lambda: recover_stale_claims(connection),
+            lambda: claim_due_targets(connection, claim_token=new_claim_token()),
             lambda: record_delivery_attempt(
-                connection, target_id=1, outcome=DeliveryOutcome(True)
+                connection,
+                target_id=1,
+                claim_token=new_claim_token(),
+                outcome=DeliveryOutcome(True),
             ),
             lambda: drain_notification_deliveries(connection, send),
         ):
@@ -898,7 +928,7 @@ def test_the_status_report_distinguishes_every_stage_of_the_backlog(tmp_path):
         # Another profile's backlog is never counted in this one's.
         assert read_delivery_status(
             connection, profile_id=identity.profile_id + 99
-        ) == (type(report)(identity.profile_id + 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        ) == (type(report)(identity.profile_id + 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
     finally:
         connection.close()
 
@@ -1058,5 +1088,316 @@ def test_the_local_entry_point_can_advance_the_policy_before_delivering(
         assert payload["materialized_batches"] == 2 and payload["sent"] == 2
         connection = sqlite3.connect(path)
         assert len(outbox_ids(connection)) == 2
+    finally:
+        connection.close()
+
+
+def test_two_connections_claiming_the_same_backlog_get_disjoint_sets(tmp_path):
+    """The whole point of the claim: two drains partition the work."""
+    connection, identity, _ = one_event(tmp_path)
+    path = database_path(connection)
+    try:
+        for number in (1, 2, 3):
+            subscribe(connection, identity.profile_id, number)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        connection.commit()
+        everything = {row[0] for row in targets(connection)}
+        assert len(everything) == 3
+
+        other = sqlite3.connect(path)
+        other.execute("PRAGMA foreign_keys = ON")
+        try:
+            first_token, first = claim(connection, identity.profile_id, limit=2)
+            second_token, second = claim(other, identity.profile_id)
+
+            mine = {target.target_id for target in first}
+            theirs = {target.target_id for target in second}
+            assert len(mine) == 2 and len(theirs) == 1
+            assert mine.isdisjoint(theirs)
+            assert mine | theirs == everything
+            assert first_token != second_token
+            # Every row is claimed exactly once, by exactly one token.
+            held = {row[0]: (row[3], row[10]) for row in targets(connection)}
+            assert all(status == "IN_FLIGHT" for status, _ in held.values())
+            assert {token for _, token in held.values()} == {first_token, second_token}
+            for target_id in mine:
+                assert held[target_id][1] == first_token
+        finally:
+            other.close()
+    finally:
+        connection.close()
+
+
+def test_a_second_drain_sends_nothing_while_the_targets_are_in_flight(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
+        assert len(held) == 1
+
+        send, calls = outcomes(201)
+        result = drain_notification_deliveries(
+            connection, send, profile_id=identity.profile_id
+        )
+
+        assert calls == []
+        assert (result.claimed, result.attempted, result.sent) == (0, 0, 0)
+        row = targets(connection)[0]
+        assert row[3] == "IN_FLIGHT" and row[10] == token
+        # And the batch stays open while a claim is outstanding.
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+        report = read_delivery_status(connection, profile_id=identity.profile_id)
+        assert (report.targets_in_flight, report.targets_due) == (1, 0)
+    finally:
+        connection.close()
+
+
+def test_a_result_recorded_under_the_wrong_claim_is_refused_and_changes_nothing(
+    tmp_path,
+):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
+        target_id = held[0].target_id
+        before = targets(connection)
+
+        for wrong in (new_claim_token(), "0" * 32):
+            outcome = record_delivery_attempt(
+                connection,
+                target_id=target_id,
+                claim_token=wrong,
+                outcome=classify_status_code(201),
+            )
+            assert outcome.applied is False
+            assert outcome.status is DeliveryTargetStatus.IN_FLIGHT
+        assert targets(connection) == before
+
+        # A token that is not a token at all is refused before any write.
+        for malformed in ("", "not-hex", token.upper(), token + "0", None, 7):
+            with pytest.raises(NotificationDeliveryError, match="claim_token"):
+                record_delivery_attempt(
+                    connection,
+                    target_id=target_id,
+                    claim_token=malformed,
+                    outcome=classify_status_code(201),
+                )
+        assert targets(connection) == before
+        assert connection.in_transaction is False
+
+        # The real holder still settles it.
+        applied = record_delivery_attempt(
+            connection,
+            target_id=target_id,
+            claim_token=token,
+            outcome=classify_status_code(201),
+        )
+        assert applied.applied is True and targets(connection)[0][3] == "SENT"
+    finally:
+        connection.close()
+
+
+def test_a_retry_releases_the_claim_and_a_success_ends_it(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
+        target_id = held[0].target_id
+
+        record_delivery_attempt(
+            connection,
+            target_id=target_id,
+            claim_token=token,
+            outcome=classify_status_code(503),
+        )
+
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[4] == 1
+        assert row[5] is not None and row[10] is None and row[11] is None
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        second_token, again = claim(connection, identity.profile_id, now=later)
+        assert [target.target_id for target in again] == [target_id]
+        assert second_token != token
+        assert targets(connection)[0][3] == "IN_FLIGHT"
+
+        record_delivery_attempt(
+            connection,
+            target_id=target_id,
+            claim_token=second_token,
+            outcome=DeliveryOutcome(True),
+        )
+
+        row = targets(connection)[0]
+        assert row[3] == "SENT" and row[4] == 2 and row[7] is not None
+        assert row[5] is None and row[10] is None and row[11] is None
+        assert batches(connection)[0][2] == DeliveryBatchStatus.COMPLETED.value
+    finally:
+        connection.close()
+
+
+def test_an_abandoned_claim_is_recovered_only_once_its_lease_has_expired(tmp_path):
+    """The one window where this delivery is at-least-once, made explicit."""
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        claimed_at = datetime.now(timezone.utc)
+        token, held = claim(connection, identity.profile_id, now=claimed_at)
+        target_id = held[0].target_id
+
+        # A live claim is nobody else's to take, however often it is checked.
+        for offset in (0, 1, CLAIM_LEASE_SECONDS - 1):
+            moment = claimed_at + timedelta(seconds=offset)
+            assert (
+                recover_stale_claims(
+                    connection, profile_id=identity.profile_id, now=moment
+                )
+                == ()
+            )
+            assert claim(connection, identity.profile_id, now=moment)[1] == ()
+        row = targets(connection)[0]
+        assert row[3] == "IN_FLIGHT" and row[10] == token
+
+        expired = claimed_at + timedelta(seconds=CLAIM_LEASE_SECONDS)
+        recovered = recover_stale_claims(
+            connection, profile_id=identity.profile_id, now=expired
+        )
+
+        assert recovered == (target_id,)
+        row = targets(connection)[0]
+        assert row[3] == "PENDING" and row[5] is not None
+        assert row[10] is None and row[11] is None
+        # A claim nobody settled is not evidence of an attempt.
+        assert row[4] == 0 and row[6] is None
+        # And the abandoned holder can no longer settle it.
+        assert (
+            record_delivery_attempt(
+                connection,
+                target_id=target_id,
+                claim_token=token,
+                outcome=DeliveryOutcome(True),
+            ).applied
+            is False
+        )
+        assert targets(connection)[0][3] == "PENDING"
+
+        # It is claimable again, which is exactly the redelivery risk.
+        third, again = claim(connection, identity.profile_id, now=expired)
+        assert [target.target_id for target in again] == [target_id]
+        assert third != token
+    finally:
+        connection.close()
+
+
+def test_a_drain_recovers_a_stale_claim_and_delivers_it(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        long_ago = datetime.now(timezone.utc) - timedelta(
+            seconds=CLAIM_LEASE_SECONDS + 60
+        )
+        # A drain that claimed this target well over a lease ago, and died.
+        materialize_delivery_batches(
+            connection, profile_id=identity.profile_id, now=long_ago
+        )
+        claim(connection, identity.profile_id, now=long_ago)
+        assert targets(connection)[0][3] == "IN_FLIGHT"
+
+        send, calls = outcomes(201)
+        result = drain_notification_deliveries(
+            connection, send, profile_id=identity.profile_id
+        )
+
+        assert result.recovered_claims == 1
+        assert (result.claimed, result.sent) == (1, 1)
+        assert len(calls) == 1
+        assert targets(connection)[0][3] == "SENT"
+        assert batches(connection)[0][2] == DeliveryBatchStatus.COMPLETED.value
+    finally:
+        connection.close()
+
+
+def test_a_batch_completes_only_once_every_target_is_terminal(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        for number in (1, 2, 3):
+            subscribe(connection, identity.profile_id, number)
+        materialize_delivery_batches(connection, profile_id=identity.profile_id)
+        token, held = claim(connection, identity.profile_id)
+        assert len(held) == 3
+
+        # One delivered, one going back for a retry, one still in flight.
+        record_delivery_attempt(
+            connection,
+            target_id=held[0].target_id,
+            claim_token=token,
+            outcome=DeliveryOutcome(True),
+        )
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+        record_delivery_attempt(
+            connection,
+            target_id=held[1].target_id,
+            claim_token=token,
+            outcome=classify_status_code(503),
+        )
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+
+        settled = record_delivery_attempt(
+            connection,
+            target_id=held[2].target_id,
+            claim_token=token,
+            outcome=classify_status_code(410),
+        )
+        # The retrying target still holds the batch open.
+        assert settled.batch_completed is False
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        last_token, last = claim(connection, identity.profile_id, now=later)
+        assert [target.target_id for target in last] == [held[1].target_id]
+        assert batches(connection)[0][2] == DeliveryBatchStatus.PENDING.value
+        final = record_delivery_attempt(
+            connection,
+            target_id=held[1].target_id,
+            claim_token=last_token,
+            outcome=DeliveryOutcome(True),
+            now=later,
+        )
+
+        assert final.batch_completed is True
+        assert batches(connection)[0][2] == DeliveryBatchStatus.COMPLETED.value
+        assert batches(connection)[0][4] == 1
+        assert sorted(row[3] for row in targets(connection)) == [
+            "EXPIRED",
+            "SENT",
+            "SENT",
+        ]
+    finally:
+        connection.close()
+
+
+def test_no_sql_transaction_is_open_during_the_claim_or_the_send(tmp_path):
+    connection, identity, _ = one_event(tmp_path)
+    try:
+        subscribe(connection, identity.profile_id, 1)
+        subscribe(connection, identity.profile_id, 2)
+        seen = []
+
+        def send(target, payload):
+            # The claim is already committed and released by the time the
+            # first byte would go on the wire.
+            seen.append((connection.in_transaction, targets(connection)[0][3]))
+            return DeliveryOutcome(True)
+
+        drain_notification_deliveries(connection, send, profile_id=identity.profile_id)
+
+        assert seen == [(False, "IN_FLIGHT"), (False, "SENT")]
+        assert [row[3] for row in targets(connection)] == ["SENT", "SENT"]
+        assert all(row[10] is None and row[11] is None for row in targets(connection))
     finally:
         connection.close()

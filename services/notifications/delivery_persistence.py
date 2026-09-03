@@ -17,6 +17,29 @@ subscription at that instant gets a batch that is terminal on the spot —
 ``NO_ACTIVE_SUBSCRIPTIONS`` — rather than a batch that waits forever for a
 recipient it will never acquire.
 
+Sending is a claim, not a read. A drain takes the targets that are due by
+moving them to ``IN_FLIGHT`` under a token of its own, inside one
+``BEGIN IMMEDIATE``, and only then goes to the network. Two drains running at
+the same time therefore partition the work: SQLite serializes the two
+transactions, the second sees the rows the first already claimed, and no
+target is ever handed to both.
+
+What that does *not* buy is exactly-once. An HTTP request to a push service
+and a SQLite write cannot be one atomic act, so a process that dies between a
+2xx and the row that records it leaves a claim nobody will ever settle. Those
+claims are recovered by lease — an ``IN_FLIGHT`` target older than
+:data:`CLAIM_LEASE_SECONDS` goes back to ``PENDING`` and can be claimed again —
+and that recovery is exactly where a message can be sent twice. So the honest
+semantics are:
+
+* concurrent drains never collide, because a claim is exclusive;
+* a target that reached ``SENT`` is never sent again, by any drain, ever;
+* but after a crash in that one ambiguous window, delivery is *at-least-once*,
+  with a redelivery risk bounded by the lease and by the attempt limit.
+
+A lost claim costs no attempt: ``attempt_count`` moves only when a real send
+result is recorded, so a crash cannot silently burn a target's retries.
+
 Nothing here opens a socket. The functions are deliberately small so a caller
 can hold a SQLite write transaction for exactly one of them and hold none of
 them across a network call.
@@ -24,6 +47,7 @@ them across a network call.
 
 from __future__ import annotations
 
+import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -49,6 +73,14 @@ MAX_DELIVERY_ATTEMPTS = 5
 #: because the last attempt is never followed by a wait.
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (60, 300, 900, 3600)
 
+#: How long one drain's claim on a target is honoured. A claim older than this
+#: belonged to a drain that died, so it is released and the target becomes
+#: claimable again. Deterministic and bounded: it is the whole of the window
+#: in which a crash can cause a redelivery, so it is generous enough that a
+#: live drain never loses a claim it is still working on, and short enough
+#: that a dead one does not strand a notification.
+CLAIM_LEASE_SECONDS = 300
+
 #: SQLite's own ``CURRENT_TIMESTAMP`` format, in UTC, so a timestamp this
 #: module writes and one the database writes compare and sort identically.
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -68,6 +100,7 @@ class DeliveryBatchStatus(StrEnum):
 
 class DeliveryTargetStatus(StrEnum):
     PENDING = "PENDING"
+    IN_FLIGHT = "IN_FLIGHT"
     SENT = "SENT"
     EXPIRED = "EXPIRED"
     PERMANENT_FAILURE = "PERMANENT_FAILURE"
@@ -112,12 +145,14 @@ class DeliveryOutcome:
 
 
 @dataclass(frozen=True)
-class DueTarget:
-    """One target ready to be attempted, with the credential it needs.
+class ClaimedTarget:
+    """One target this drain holds a claim on, with the credential it needs.
 
-    The endpoint and the two subscription keys are a credential, so this object
-    refuses to render itself: it can travel through a traceback, a pytest diff,
-    or a log call without ever printing what it carries.
+    Holding the claim is what makes it safe to send: no other drain can be
+    looking at this row. The endpoint and the two subscription keys are a
+    credential, so this object refuses to render itself — it can travel
+    through a traceback, a pytest diff, or a log call without ever printing
+    what it carries.
     """
 
     target_id: int
@@ -127,6 +162,7 @@ class DueTarget:
     profile_id: int
     subscription_id: int
     attempt_count: int
+    claim_token: str
     endpoint: str
     p256dh: str
     auth: str
@@ -134,7 +170,7 @@ class DueTarget:
 
     def __repr__(self) -> str:
         return (
-            f"DueTarget(target_id={self.target_id}, batch_id={self.batch_id},"
+            f"ClaimedTarget(target_id={self.target_id}, batch_id={self.batch_id},"
             f" subscription_id={self.subscription_id},"
             f" attempt_count={self.attempt_count}, credentials=<redacted>)"
         )
@@ -154,7 +190,12 @@ class MaterializationResult:
 
 @dataclass(frozen=True)
 class AttemptResult:
-    """The persisted consequence of one attempt on one target."""
+    """The persisted consequence of one attempt on one target.
+
+    ``applied`` is false when the row was not this caller's to settle: the
+    claim had expired and been recovered, another drain owns it now, or the
+    target is already terminal. Nothing is written in that case.
+    """
 
     target_id: int
     applied: bool
@@ -163,6 +204,21 @@ class AttemptResult:
     next_attempt_at: str | None
     subscription_revoked: bool
     batch_completed: bool
+
+
+def new_claim_token() -> str:
+    """Mint one drain's claim token: unguessable, and 32 hex characters."""
+    return secrets.token_hex(16)
+
+
+def _claim_token(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 32
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise NotificationDeliveryError("claim_token must be 32 hexadecimal characters")
+    return value
 
 
 def now_timestamp(moment: datetime | None = None) -> str:
@@ -364,8 +420,9 @@ def close_targets_of_revoked_subscriptions(
 
     Nothing is sent to a revoked endpoint, and a batch cannot wait on one
     forever, so such a target is closed without any attempt: no request is
-    made, and ``attempt_count`` still moves, because refusing to send *is* the
-    disposition of this target.
+    made, and ``attempt_count`` stays where it is, because nothing was tried.
+    Only ``PENDING`` targets are closed — one already claimed belongs to a
+    drain that is mid-flight, and is left for that drain to settle.
     """
     if connection.in_transaction:
         raise NotificationDeliveryError(
@@ -379,8 +436,7 @@ def close_targets_of_revoked_subscriptions(
         preflight(connection)
         rows = connection.execute(
             f"""SELECT notification_delivery_targets.id,
-            notification_delivery_targets.batch_id,
-            notification_delivery_targets.attempt_count
+            notification_delivery_targets.batch_id
             FROM notification_delivery_targets
             JOIN push_subscriptions
               ON push_subscriptions.id=notification_delivery_targets.subscription_id
@@ -400,20 +456,19 @@ def close_targets_of_revoked_subscriptions(
             ),
         ).fetchall()
         closed: list[int] = []
-        for target_id, batch_id, attempt_count in rows:
+        for target_id, batch_id in rows:
             connection.execute(
                 """UPDATE notification_delivery_targets
-                SET status=?,attempt_count=?,next_attempt_at=NULL,last_attempt_at=?,
-                    last_error_code=?,last_error_category=?,updated_at=?
-                WHERE id=?""",
+                SET status=?,next_attempt_at=NULL,last_error_code=?,
+                    last_error_category=?,updated_at=?
+                WHERE id=? AND status=?""",
                 (
                     DeliveryTargetStatus.PERMANENT_FAILURE.value,
-                    int(attempt_count) + 1,
-                    moment,
                     SUBSCRIPTION_REVOKED_CODE,
                     DeliveryErrorCategory.PERMANENT.value,
                     moment,
                     int(target_id),
+                    DeliveryTargetStatus.PENDING.value,
                 ),
             )
             _complete_batch_if_settled(connection, int(batch_id), moment)
@@ -426,29 +481,116 @@ def close_targets_of_revoked_subscriptions(
     return tuple(closed)
 
 
-def read_due_targets(
+def recover_stale_claims(
     connection: sqlite3.Connection,
     *,
     profile_id: int | None = None,
     now: datetime | None = None,
-    limit: int | None = None,
-) -> tuple[DueTarget, ...]:
-    """Read every target that is pending, due, and still on an ACTIVE endpoint.
+    lease_seconds: int = CLAIM_LEASE_SECONDS,
+) -> tuple[int, ...]:
+    """Release claims older than the lease, so a dead drain strands nothing.
 
-    This is a read, taken inside one short transaction so the batch of work is
-    a consistent snapshot, and released before anything is sent.
+    This is the one place a message can end up delivered twice: the drain that
+    held the claim may have got its 2xx and died before writing it down. The
+    alternative — leaving the target claimed forever — loses the notification
+    outright, so the lease is deliberate, bounded, and the reason this delivery
+    is at-least-once rather than exactly-once.
+
+    A recovered target keeps its ``attempt_count``: a claim nobody settled is
+    not evidence that anything was attempted.
     """
     if connection.in_transaction:
         raise NotificationDeliveryError(
-            "read_due_targets requires a connection without an active transaction"
+            "recover_stale_claims requires a connection without an active transaction"
+        )
+    if (
+        isinstance(lease_seconds, bool)
+        or not isinstance(lease_seconds, int)
+        or lease_seconds <= 0
+    ):
+        raise NotificationDeliveryError("lease_seconds must be a positive integer")
+    clause, parameters = _profile_filter(profile_id)
+    moment = datetime.now(timezone.utc) if now is None else now
+    stamp = now_timestamp(moment)
+    expiry = now_timestamp(moment - timedelta(seconds=lease_seconds))
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        preflight(connection)
+        rows = connection.execute(
+            f"""SELECT notification_delivery_targets.id
+            FROM notification_delivery_targets
+            JOIN notification_delivery_batches
+              ON notification_delivery_batches.id=notification_delivery_targets.batch_id
+            JOIN notification_outbox
+              ON notification_outbox.id=notification_delivery_batches.outbox_id
+            JOIN notification_events
+              ON notification_events.id=notification_outbox.event_id
+            WHERE notification_delivery_targets.status=?
+              AND notification_delivery_targets.claimed_at<=?{clause}
+            ORDER BY notification_delivery_targets.id ASC""",
+            (DeliveryTargetStatus.IN_FLIGHT.value, expiry, *parameters),
+        ).fetchall()
+        recovered = [int(row[0]) for row in rows]
+        for target_id in recovered:
+            connection.execute(
+                """UPDATE notification_delivery_targets
+                SET status=?,next_attempt_at=?,claim_token=NULL,claimed_at=NULL,
+                    updated_at=? WHERE id=? AND status=?""",
+                (
+                    DeliveryTargetStatus.PENDING.value,
+                    stamp,
+                    stamp,
+                    target_id,
+                    DeliveryTargetStatus.IN_FLIGHT.value,
+                ),
+            )
+        connection.execute("COMMIT")
+    except BaseException:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    if recovered:
+        LOGGER.warning(
+            "Recovered abandoned notification delivery claims.",
+            extra={
+                "event": "notification_delivery_claims_recovered",
+                "target_count": len(recovered),
+                "lease_seconds": lease_seconds,
+            },
+        )
+    return tuple(recovered)
+
+
+def claim_due_targets(
+    connection: sqlite3.Connection,
+    *,
+    claim_token: str,
+    profile_id: int | None = None,
+    now: datetime | None = None,
+    limit: int | None = None,
+) -> tuple[ClaimedTarget, ...]:
+    """Take exclusive ownership of every target that is due, then let go.
+
+    Selecting and claiming happen inside one ``BEGIN IMMEDIATE``, so a second
+    drain either waits for this transaction or sees the rows already
+    ``IN_FLIGHT``; either way it gets a disjoint set. The transaction is
+    committed before the caller sends anything, so no SQLite lock is ever held
+    across a network request.
+
+    Only the rows this call actually moved to ``IN_FLIGHT`` are returned.
+    """
+    if connection.in_transaction:
+        raise NotificationDeliveryError(
+            "claim_due_targets requires a connection without an active transaction"
         )
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
     ):
         raise NotificationDeliveryError("limit must be a positive integer")
+    token = _claim_token(claim_token)
     clause, parameters = _profile_filter(profile_id)
     moment = now_timestamp(now)
-    connection.execute("BEGIN")
+    connection.execute("BEGIN IMMEDIATE")
     try:
         preflight(connection)
         rows = connection.execute(
@@ -482,13 +624,32 @@ def read_due_targets(
                 *(() if limit is None else (limit,)),
             ),
         ).fetchall()
+        claimed = []
+        for row in rows:
+            # Guarded by status so the claim is the write that decides
+            # ownership, not the read that preceded it.
+            changed = connection.execute(
+                """UPDATE notification_delivery_targets
+                SET status=?,next_attempt_at=NULL,claim_token=?,claimed_at=?,
+                    updated_at=? WHERE id=? AND status=?""",
+                (
+                    DeliveryTargetStatus.IN_FLIGHT.value,
+                    token,
+                    moment,
+                    moment,
+                    int(row[0]),
+                    DeliveryTargetStatus.PENDING.value,
+                ),
+            ).rowcount
+            if changed == 1:
+                claimed.append(row)
         connection.execute("COMMIT")
     except BaseException:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
     return tuple(
-        DueTarget(
+        ClaimedTarget(
             int(row[0]),
             int(row[1]),
             int(row[2]),
@@ -496,23 +657,32 @@ def read_due_targets(
             int(row[4]),
             int(row[5]),
             int(row[6]),
+            token,
             row[7],
             row[8],
             row[9],
             row[10],
         )
-        for row in rows
+        for row in claimed
     )
 
 
 def _complete_batch_if_settled(
     connection: sqlite3.Connection, batch_id: int, moment: str
 ) -> bool:
-    """Close a batch once none of its targets is pending any more."""
+    """Close a batch once every one of its targets has reached a terminal state.
+
+    A target that is merely claimed is still unfinished, so an ``IN_FLIGHT``
+    row holds the batch open exactly as a ``PENDING`` one does.
+    """
     remaining = connection.execute(
         "SELECT COUNT(*) FROM notification_delivery_targets"
-        " WHERE batch_id=? AND status=?",
-        (batch_id, DeliveryTargetStatus.PENDING.value),
+        " WHERE batch_id=? AND status IN (?,?)",
+        (
+            batch_id,
+            DeliveryTargetStatus.PENDING.value,
+            DeliveryTargetStatus.IN_FLIGHT.value,
+        ),
     ).fetchone()[0]
     if remaining:
         connection.execute(
@@ -539,16 +709,19 @@ def record_delivery_attempt(
     connection: sqlite3.Connection,
     *,
     target_id: int,
+    claim_token: str,
     outcome: DeliveryOutcome,
     now: datetime | None = None,
 ) -> AttemptResult:
     """Persist the result of one attempt, in one short transaction of its own.
 
-    A target that is no longer pending — already delivered, already terminal —
-    is left untouched and reported as not applied. That is what makes a
-    re-drain, a crash between the request and this call, or two orchestrators
+    Only the drain that holds the claim may settle a target: the row must be
+    ``IN_FLIGHT`` *and* carry this exact token. Anything else — a target that
+    is already terminal, one whose claim expired and was recovered, one another
+    drain now owns — is left completely untouched and reported as not applied.
+    That is what makes a re-drain, a recovered claim, or two orchestrators
     racing each other safe: a delivered target is never resent and never
-    downgraded.
+    downgraded, and a stale result never overwrites a fresher one.
     """
     if connection.in_transaction:
         raise NotificationDeliveryError(
@@ -557,6 +730,7 @@ def record_delivery_attempt(
         )
     if isinstance(target_id, bool) or not isinstance(target_id, int) or target_id <= 0:
         raise NotificationDeliveryError("target_id must be a positive integer")
+    token = _claim_token(claim_token)
     if not isinstance(outcome, DeliveryOutcome):
         raise NotificationDeliveryError("outcome must be a DeliveryOutcome")
     moment = now_timestamp(now)
@@ -564,20 +738,30 @@ def record_delivery_attempt(
     try:
         preflight(connection)
         row = connection.execute(
-            "SELECT batch_id,subscription_id,status,attempt_count"
+            "SELECT batch_id,subscription_id,status,attempt_count,claim_token"
             " FROM notification_delivery_targets WHERE id=?",
             (target_id,),
         ).fetchone()
         if row is None:
             raise NotificationDeliveryError("delivery target does not exist")
-        batch_id, subscription_id, status, attempt_count = (
+        batch_id, subscription_id, status, attempt_count, held = (
             int(row[0]),
             int(row[1]),
             DeliveryTargetStatus(row[2]),
             int(row[3]),
+            row[4],
         )
-        if status is not DeliveryTargetStatus.PENDING:
+        if status is not DeliveryTargetStatus.IN_FLIGHT or held != token:
+            # Fail closed: this result is not ours to write down.
             connection.execute("ROLLBACK")
+            LOGGER.warning(
+                "Discarded a delivery result whose claim no longer holds.",
+                extra={
+                    "event": "notification_delivery_claim_lost",
+                    "target_id": target_id,
+                    "delivery_status": status.value,
+                },
+            )
             return AttemptResult(
                 target_id, False, status, attempt_count, None, False, False
             )
@@ -601,11 +785,14 @@ def record_delivery_attempt(
                     (datetime.now(timezone.utc) if now is None else now)
                     + timedelta(seconds=delay)
                 )
+        # Settling always releases the claim, whether the target is terminal
+        # or going back into the queue for a later retry.
         connection.execute(
             """UPDATE notification_delivery_targets
-            SET status=?,attempt_count=?,next_attempt_at=?,last_attempt_at=?,
-                delivered_at=?,last_error_code=?,last_error_category=?,updated_at=?
-            WHERE id=? AND status=?""",
+            SET status=?,attempt_count=?,next_attempt_at=?,claim_token=NULL,
+                claimed_at=NULL,last_attempt_at=?,delivered_at=?,last_error_code=?,
+                last_error_category=?,updated_at=?
+            WHERE id=? AND status=? AND claim_token=?""",
             (
                 new_status.value,
                 attempt_count,
@@ -616,7 +803,8 @@ def record_delivery_attempt(
                 None if outcome.category is None else outcome.category.value,
                 moment,
                 target_id,
-                DeliveryTargetStatus.PENDING.value,
+                DeliveryTargetStatus.IN_FLIGHT.value,
+                token,
             ),
         )
         completed = _complete_batch_if_settled(connection, batch_id, moment)
@@ -652,8 +840,8 @@ class DeliveryStatusReport:
 
     Every counter here answers one of the questions delivery has to be able to
     answer without guessing: what has not been materialized yet, what is due,
-    what is waiting on a retry, what is done, what had nobody to go to, and
-    what will never be delivered.
+    what a drain currently holds a claim on, what is waiting on a retry, what
+    is done, what had nobody to go to, and what will never be delivered.
     """
 
     profile_id: int | None
@@ -663,6 +851,7 @@ class DeliveryStatusReport:
     batches_without_subscriptions: int
     targets_due: int
     targets_scheduled: int
+    targets_in_flight: int
     targets_sent: int
     targets_expired: int
     targets_permanent_failure: int
@@ -731,6 +920,7 @@ def read_delivery_status(
         int(batches.get(DeliveryBatchStatus.NO_ACTIVE_SUBSCRIPTIONS.value, 0)),
         int(targets.get(DeliveryTargetStatus.PENDING.value, 0)),
         int(targets.get(f"{DeliveryTargetStatus.PENDING.value}:SCHEDULED", 0)),
+        int(targets.get(DeliveryTargetStatus.IN_FLIGHT.value, 0)),
         int(targets.get(DeliveryTargetStatus.SENT.value, 0)),
         int(targets.get(DeliveryTargetStatus.EXPIRED.value, 0)),
         int(targets.get(DeliveryTargetStatus.PERMANENT_FAILURE.value, 0)),

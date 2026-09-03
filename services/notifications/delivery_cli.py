@@ -3,6 +3,13 @@
 This is a command someone runs, not a scheduler: it does one pass and exits.
 There is no daemon, no cron, no workflow, and no deployment behind it.
 
+Two of them can be run at once without harm: each pass claims the targets it
+takes, so the work is partitioned rather than duplicated. A pass that is
+killed mid-flight leaves its claims behind, and a later pass picks them up
+once the lease expires — which is where the same notification can be
+delivered twice. This delivery is at-least-once by construction, not
+exactly-once; a target that reached SENT is nevertheless never sent again.
+
 ``--dry-run`` opens the database read-only and reports the backlog without
 materializing, sending, or writing anything, which is how a real operational
 database can be inspected safely. Any other mode requires a complete, valid

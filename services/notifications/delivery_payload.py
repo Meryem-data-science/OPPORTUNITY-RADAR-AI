@@ -8,11 +8,12 @@ Priority, Matching, or Eligibility, and writes no generated prose: every word
 that is not a fixed label of this module comes verbatim from the stored
 payload.
 
-The click target is the internal path the policy already persisted. An
-external URL is never a click target, so a payload whose target is not a
-same-origin path is refused rather than quietly redirected: the stored event
-is written by our own policy, so a target that is not internal means the
-record is wrong and nothing should be sent from it.
+The click target is the internal path the policy already persisted, and it has
+to actually be there: there is no default and no fallback. A stored event with
+no ``target_url``, or one whose target is not a same-origin path, is refused
+rather than quietly redirected or silently repaired. The stored event is
+written by our own policy, so either of those means the record is wrong, and
+nothing should be sent from a record we do not trust.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from typing import Any
 
 from services.collector.matching.fingerprint import canonical_json
 
-from .policy import NOTIFICATION_TARGET_PATH, NotificationEventType
+from .policy import NotificationEventType
 
 #: Identity of this projection. A future revision of the wording or the field
 #: set is a new version, never a silent change to what a browser was shown.
@@ -51,7 +52,8 @@ def _internal_path(value: Any) -> str:
     """Accept only a same-origin absolute path, and never anything else.
 
     ``//host/path`` is a protocol-relative URL, not a path, so a single
-    leading slash is not enough on its own.
+    leading slash is not enough on its own. A missing value is refused here
+    too: no target at all is not a reason to invent one.
     """
     if (
         not isinstance(value, str)
@@ -84,13 +86,17 @@ def build_push_payload(payload_json: str) -> dict[str, Any]:
     if not isinstance(opportunity, dict):
         raise NotificationPayloadError("stored event describes no opportunity")
     opportunity_id = opportunity.get("opportunity_id")
-    if isinstance(opportunity_id, bool) or not isinstance(opportunity_id, int):
+    if (
+        isinstance(opportunity_id, bool)
+        or not isinstance(opportunity_id, int)
+        or opportunity_id <= 0
+    ):
         raise NotificationPayloadError("stored event has no opportunity id")
     title = _text(opportunity.get("title"), "title")
     organization = _text(opportunity.get("organization"), "organization")
-    # The target the policy persisted, not one derived here, and never the
-    # opportunity's outward ``original_url``.
-    target = _internal_path(opportunity.get("target_url", NOTIFICATION_TARGET_PATH))
+    # The target the policy persisted, never one derived here, never a default,
+    # and never the opportunity's outward ``original_url``.
+    target = _internal_path(opportunity.get("target_url"))
     return {
         "event_type": event_type.value,
         "opportunity_id": opportunity_id,

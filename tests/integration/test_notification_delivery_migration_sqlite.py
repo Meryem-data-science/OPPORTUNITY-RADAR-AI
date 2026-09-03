@@ -16,10 +16,10 @@ from tests.integration.test_notification_policy_migration_sqlite import (
     insert_event,
     two_runs,
 )
+from tests.integration.test_push_subscriptions_sqlite import P256DH
 
 TABLES = ("notification_delivery_batches", "notification_delivery_targets")
 ENDPOINT = "https://push.example.invalid/subscription/abc"
-P256DH = "BN" + "a" * 85
 AUTH = "c" * 22
 LATER = "2099-01-01 00:00:00"
 
@@ -53,6 +53,9 @@ def batch_arguments(outbox_id, **changes):
     } | changes
 
 
+TOKEN = "0123456789abcdef" * 2
+
+
 def target_arguments(batch_id, subscription_id, **changes):
     return {
         "batch_id": batch_id,
@@ -60,6 +63,8 @@ def target_arguments(batch_id, subscription_id, **changes):
         "status": "PENDING",
         "attempt_count": 0,
         "next_attempt_at": LATER,
+        "claim_token": None,
+        "claimed_at": None,
         "last_attempt_at": None,
         "delivered_at": None,
         "last_error_code": None,
@@ -111,6 +116,8 @@ def test_0020_creates_both_delivery_tables_empty_and_is_idempotent(tmp_path):
             "status",
             "attempt_count",
             "next_attempt_at",
+            "claim_token",
+            "claimed_at",
             "last_attempt_at",
             "delivered_at",
             "last_error_code",
@@ -242,6 +249,54 @@ def test_a_target_is_pending_with_a_schedule_or_terminal_without_one(tmp_path):
                 "UPDATE notification_delivery_targets SET next_attempt_at=NULL",
                 (),
             ),
+            # A pending target holds no claim, and half a claim is not one.
+            (
+                "UPDATE notification_delivery_targets SET claim_token=?",
+                (TOKEN,),
+            ),
+            (
+                "UPDATE notification_delivery_targets SET claimed_at=?",
+                (LATER,),
+            ),
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "next_attempt_at=NULL,claim_token=?",
+                (TOKEN,),
+            ),
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "next_attempt_at=NULL,claimed_at=?",
+                (LATER,),
+            ),
+            # An in-flight target is not also scheduled.
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "claim_token=?,claimed_at=?",
+                (TOKEN, LATER),
+            ),
+            # A claim token is 32 hexadecimal characters, and nothing else.
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "next_attempt_at=NULL,claim_token=?,claimed_at=?",
+                (TOKEN[:31], LATER),
+            ),
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "next_attempt_at=NULL,claim_token=?,claimed_at=?",
+                (TOKEN.upper(), LATER),
+            ),
+            (
+                "UPDATE notification_delivery_targets SET status='IN_FLIGHT',"
+                "next_attempt_at=NULL,claim_token=?,claimed_at=?",
+                ("z" * 32, LATER),
+            ),
+            # A terminal target releases its claim.
+            (
+                "UPDATE notification_delivery_targets SET status='SENT',"
+                "attempt_count=1,next_attempt_at=NULL,last_attempt_at=?,"
+                "delivered_at=?,claim_token=?,claimed_at=?",
+                (LATER, LATER, TOKEN, LATER),
+            ),
             (
                 "UPDATE notification_delivery_targets SET status='SENT',"
                 "attempt_count=1,last_attempt_at=?,delivered_at=?",
@@ -287,8 +342,31 @@ def test_a_target_is_pending_with_a_schedule_or_terminal_without_one(tmp_path):
                     connection.execute(statement, parameters)
             connection.rollback()
 
-        # The three legitimate terminal shapes all fit.
+        # A delivered target was necessarily attempted.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """UPDATE notification_delivery_targets SET status='SENT',
+                attempt_count=0,next_attempt_at=NULL,delivered_at=? WHERE id=?""",
+                (LATER, target_id),
+            )
+        connection.rollback()
+
+        # A claim, and the three legitimate terminal shapes, all fit.
         for changes in (
+            dict(
+                status="IN_FLIGHT",
+                next_attempt_at=None,
+                claim_token=TOKEN,
+                claimed_at=LATER,
+            ),
+            # Closed without any request: nothing was attempted, so the
+            # attempt count stays at zero and no instant is invented.
+            dict(
+                status="PERMANENT_FAILURE",
+                next_attempt_at=None,
+                last_error_code="SUBSCRIPTION_REVOKED",
+                last_error_category="PERMANENT",
+            ),
             dict(
                 status="SENT",
                 attempt_count=1,

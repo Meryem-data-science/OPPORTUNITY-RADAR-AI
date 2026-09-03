@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
+from cryptography.hazmat.primitives.asymmetric import ec
+
 from services.collector.logging_config import get_logger
 
 
@@ -95,13 +97,28 @@ def decode_base64url(value: str) -> bytes | None:
 
 
 def valid_p256dh(value: str) -> bool:
-    """Accept only an uncompressed P-256 public point, base64url encoded."""
+    """Accept only an uncompressed P-256 public point, base64url encoded.
+
+    The length and the 0x04 prefix only describe the *shape* of a point; 65
+    bytes of noise has both. Since delivery has to run an ECDH against this
+    value anyway, the point is verified to be on the curve here, at the door,
+    rather than failing much later inside an encryption nobody can retry.
+
+    Nothing about the rejection is reported: the caller gets False, and the
+    candidate — which is a credential — is never named, logged, or re-raised.
+    """
     decoded = decode_base64url(value)
-    return (
-        decoded is not None
-        and len(decoded) == P256DH_BYTE_LENGTH
-        and decoded[0] == P256DH_UNCOMPRESSED_PREFIX
-    )
+    if (
+        decoded is None
+        or len(decoded) != P256DH_BYTE_LENGTH
+        or decoded[0] != P256DH_UNCOMPRESSED_PREFIX
+    ):
+        return False
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), decoded)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def valid_auth(value: str) -> bool:
