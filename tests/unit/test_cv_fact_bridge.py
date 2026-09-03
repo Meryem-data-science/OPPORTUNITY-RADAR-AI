@@ -319,6 +319,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0018_push_subscriptions.sql",
         "0019_notification_policy_outbox.sql",
         "0020_notification_delivery.sql",
+        "0021_push_subscription_activation_watermark.sql",
     ]
 
 

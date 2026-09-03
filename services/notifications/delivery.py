@@ -46,6 +46,14 @@ Priority, Matching, or Eligibility, never rewrites what an event means, and
 never reads anything outside the outbox, the event it points at, and the
 subscriptions frozen for it.
 
+Since Phase 5.3C2 the freeze in step 1 also honours each subscription's
+activation watermark, so a device only ever receives events that happened
+after it opted in — however long after the event materialization runs. An
+outbox row whose profile has no subscription eligible for it becomes terminal
+immediately and says which kind of emptiness it was; it never waits for a
+subscription that might arrive later, because such a subscription could not be
+a recipient of it anyway.
+
 There is no scheduler, no daemon, and no deployment here: something outside
 this process decides when a drain happens.
 """
@@ -96,6 +104,7 @@ class DeliveryDrainResult:
     materialized_batches: int
     materialized_targets: int
     empty_batches: int
+    ineligible_batches: int
     recovered_claims: int
     closed_revoked_targets: int
     claimed: int
@@ -181,7 +190,7 @@ def drain_notification_deliveries(
     materialized = (
         materialize_delivery_batches(connection, profile_id=profile_id, now=now)
         if materialize
-        else MaterializationResult((), 0, 0, 0)
+        else MaterializationResult((), 0, 0, 0, 0)
     )
     recovered = recover_stale_claims(
         connection, profile_id=profile_id, now=now, lease_seconds=lease_seconds
@@ -264,6 +273,7 @@ def drain_notification_deliveries(
         materialized.created_batches,
         materialized.created_targets,
         materialized.empty_batches,
+        materialized.ineligible_batches,
         len(recovered),
         len(closed),
         counts["claimed"],

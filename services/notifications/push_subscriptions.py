@@ -7,6 +7,15 @@ mutable by design — there is no append-only history to keep — while every
 transition stays a single atomic transaction and every endpoint stays owned by
 exactly one profile.
 
+Since Phase 5.3C2 an activation also records *when* it happened, in the only
+unit that cannot disagree with itself: the highest notification event id the
+profile had at that instant. Delivery then targets a subscription only for
+events strictly above that watermark, so a device is never told what happened
+before it opted in — not even when the outbox row is materialized later. The
+watermark is read inside the very transaction that writes the activation, so
+an event and an opt-in racing each other are ordered by SQLite rather than by
+a clock: whichever commits first is the one the other one sees.
+
 Nothing here logs an endpoint or a key: those values are the credential.
 """
 
@@ -27,6 +36,12 @@ from services.collector.logging_config import get_logger
 
 
 LOGGER = get_logger("services.collector.notifications.push_subscriptions")
+
+#: Migration 0021 adds the activation watermark. Every surface that decides
+#: what a subscription may receive depends on it, so a database that stops at
+#: 0020 is refused rather than read as one with no history to exclude.
+REQUIRED_MIGRATION_VERSION = "0021"
+WATERMARK_COLUMN = "notification_event_watermark"
 
 MAX_ENDPOINT_LENGTH = 2048
 MAX_KEY_LENGTH = 256
@@ -58,12 +73,20 @@ class PushSubscriptionOwnershipError(PushSubscriptionError):
 
 @dataclass(frozen=True)
 class SubscribeResult:
-    """Outcome of one subscribe call, described without echoing credentials."""
+    """Outcome of one subscribe call, described without echoing credentials.
+
+    ``notification_event_watermark`` is the boundary this subscription now
+    carries: the highest event id its profile had when the call finished, for
+    an activation, and the one it already had for an unchanged or merely
+    re-keyed subscription. It is an id, not a credential, so it is safe to
+    report and safe to log.
+    """
 
     subscription_id: int
     created: bool
     reactivated: bool
     keys_updated: bool
+    notification_event_watermark: int
 
     @property
     def changed(self) -> bool:
@@ -169,6 +192,52 @@ def _profile_exists(connection: sqlite3.Connection, profile_id: int) -> bool:
     return row is not None
 
 
+def preflight(connection: sqlite3.Connection) -> None:
+    """Refuse a database that has not been migrated through 0021.
+
+    Without the watermark column there is no boundary to write, and an
+    activation stored on a 0020 database would be one delivery could not
+    exclude anything from. The column is checked as well as the recorded
+    version, so this fails with a sentence rather than with "no such column"
+    from somewhere deep inside a transaction.
+    """
+    try:
+        migrated = connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (REQUIRED_MIGRATION_VERSION,),
+        ).fetchone()
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(push_subscriptions)")
+        }
+    except sqlite3.Error as error:
+        raise PushSubscriptionError(
+            "push subscription schema is not ready;"
+            f" migrate through {REQUIRED_MIGRATION_VERSION} before subscribing"
+        ) from error
+    if migrated is None or WATERMARK_COLUMN not in columns:
+        raise PushSubscriptionError(
+            "push subscription schema is not ready;"
+            f" migrate through {REQUIRED_MIGRATION_VERSION} before subscribing"
+        )
+
+
+def current_notification_event_watermark(
+    connection: sqlite3.Connection, profile_id: int
+) -> int:
+    """The highest notification event id this profile has right now, or 0.
+
+    Read inside the caller's transaction and nowhere else: that is what makes
+    the boundary between an event and an activation a commit order rather than
+    a comparison of two clocks.
+    """
+    row = connection.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM notification_events WHERE profile_id = ?",
+        (profile_id,),
+    ).fetchone()
+    return int(row[0])
+
+
 def subscribe_push_subscription(
     connection: sqlite3.Connection,
     *,
@@ -183,6 +252,14 @@ def subscribe_push_subscription(
     nothing at all; rotated keys are updated in place and a revoked endpoint is
     reactivated. An endpoint already owned by another profile is refused
     without touching the stored row.
+
+    An activation — a brand new endpoint, or a revoked one coming back — takes
+    the profile's current highest event id as its watermark, so it starts
+    level with the present and can never be handed the past. A subscription
+    that is merely re-sent, or whose browser rotated its keys, keeps the
+    watermark it already has: it never stopped being subscribed, so there is
+    no new boundary to draw, and moving it would silently skip whatever
+    happened in between.
     """
     _positive_int(profile_id, "profile_id")
     endpoint = _endpoint(endpoint)
@@ -191,23 +268,28 @@ def subscribe_push_subscription(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        preflight(connection)
         if not _profile_exists(connection, profile_id):
             raise PushSubscriptionError("profile does not exist")
         row = connection.execute(
-            "SELECT id, profile_id, p256dh, auth, status FROM push_subscriptions"
-            " WHERE endpoint = ?",
+            f"""SELECT id, profile_id, p256dh, auth, status, {WATERMARK_COLUMN}
+            FROM push_subscriptions WHERE endpoint = ?""",
             (endpoint,),
         ).fetchone()
+        # Read under the same BEGIN IMMEDIATE that writes the row below, so an
+        # event committed before this transaction is inside the watermark and
+        # one committed after it is outside — decided by SQLite, not a clock.
+        watermark = current_notification_event_watermark(connection, profile_id)
         if row is None:
             inserted = connection.execute(
-                """INSERT INTO push_subscriptions
-                   (profile_id, endpoint, p256dh, auth, status)
-                   VALUES (?, ?, ?, ?, 'ACTIVE') RETURNING id""",
-                (profile_id, endpoint, p256dh, auth),
+                f"""INSERT INTO push_subscriptions
+                   (profile_id, endpoint, p256dh, auth, status, {WATERMARK_COLUMN})
+                   VALUES (?, ?, ?, ?, 'ACTIVE', ?) RETURNING id""",
+                (profile_id, endpoint, p256dh, auth, watermark),
             ).fetchone()
             if inserted is None:
                 raise PushSubscriptionError("push subscription insert returned no row")
-            result = SubscribeResult(int(inserted[0]), True, False, False)
+            result = SubscribeResult(int(inserted[0]), True, False, False, watermark)
         else:
             subscription_id = int(row[0])
             if int(row[1]) != profile_id:
@@ -216,15 +298,28 @@ def subscribe_push_subscription(
                 )
             keys_updated = (row[2], row[3]) != (p256dh, auth)
             reactivated = row[4] != PushSubscriptionStatus.ACTIVE.value
-            if keys_updated or reactivated:
+            stored_watermark = int(row[5])
+            if reactivated:
+                connection.execute(
+                    f"""UPDATE push_subscriptions
+                       SET p256dh = ?, auth = ?, status = 'ACTIVE', revoked_at = NULL,
+                           {WATERMARK_COLUMN} = ?, updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (p256dh, auth, watermark, subscription_id),
+                )
+                stored_watermark = watermark
+            elif keys_updated:
+                # A live subscription whose browser rotated its keys: the
+                # credential changes, the boundary does not.
                 connection.execute(
                     """UPDATE push_subscriptions
-                       SET p256dh = ?, auth = ?, status = 'ACTIVE', revoked_at = NULL,
-                           updated_at = CURRENT_TIMESTAMP
+                       SET p256dh = ?, auth = ?, updated_at = CURRENT_TIMESTAMP
                        WHERE id = ?""",
                     (p256dh, auth, subscription_id),
                 )
-            result = SubscribeResult(subscription_id, False, reactivated, keys_updated)
+            result = SubscribeResult(
+                subscription_id, False, reactivated, keys_updated, stored_watermark
+            )
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")
@@ -238,6 +333,7 @@ def subscribe_push_subscription(
             "subscription_created": result.created,
             "subscription_reactivated": result.reactivated,
             "subscription_keys_updated": result.keys_updated,
+            "notification_event_watermark": result.notification_event_watermark,
         },
     )
     return result

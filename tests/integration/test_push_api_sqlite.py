@@ -12,7 +12,11 @@ from services.api.push import (
     PUBLIC_PUSH_REQUEST_ERROR,
     VAPID_PUBLIC_KEY_VARIABLE,
 )
+from services.collector.database.connection import connect_database
+from services.collector.database.migrations import apply_migrations
+from services.digital_twin.repository import ensure_user_profile
 from services.notifications import (
+    PushSubscriptionError,
     decode_base64url,
     subscribe_push_subscription,
     valid_p256dh,
@@ -23,6 +27,7 @@ from tests.integration.test_push_subscriptions_sqlite import (
     MALFORMED_AUTH,
     MALFORMED_P256DH,
     P256DH,
+    migrations_below,
     p256dh_for,
     push_fixture,
 )
@@ -330,14 +335,53 @@ def test_a_missing_database_is_unavailable_and_is_never_created(tmp_path, monkey
     assert not missing.exists() and not missing.parent.exists()
 
 
-def test_a_database_without_migration_0018_is_unavailable(tmp_path, monkeypatch):
+def test_a_database_without_migration_0021_is_unavailable(tmp_path, monkeypatch):
     connection, profile_id, _, path = prepared(tmp_path, monkeypatch)
     try:
-        connection.execute("DELETE FROM schema_migrations WHERE version = '0018'")
+        connection.execute("DELETE FROM schema_migrations WHERE version = '0021'")
         connection.commit()
         response = TestClient(app).post("/api/push/subscriptions", json=body())
         assert response.status_code == 503
         assert response.json() == {"detail": PUBLIC_PUSH_ERROR}
+        assert stored(connection) == []
+    finally:
+        connection.close()
+
+
+def test_a_database_that_really_stopped_at_0020_is_refused_not_crashed(
+    tmp_path, monkeypatch
+):
+    """The upgrade an operator can actually be running: 0020, and no watermark.
+
+    A subscription stored here would carry no activation boundary at all, so
+    the surface refuses the whole request rather than discovering the missing
+    column somewhere inside the write.
+    """
+    path = tmp_path / "stopped-at-0020.db"
+    connection = connect_database(path)
+    try:
+        directory, _ = migrations_below(tmp_path, "migrations-through-0020", "0021")
+        assert apply_migrations(connection, directory)[-1] == "0020"
+        profile_id = ensure_user_profile(
+            connection, "api-0020@example.invalid"
+        ).profile.id
+        configure(monkeypatch, path, profile_id)
+
+        response = TestClient(app).post("/api/push/subscriptions", json=body())
+
+        assert response.status_code == 503
+        assert response.json() == {"detail": PUBLIC_PUSH_ERROR}
+        assert stored(connection) == []
+        # And directly, without the HTTP surface in front of it: a sentence,
+        # never "no such column".
+        with pytest.raises(PushSubscriptionError, match="schema is not ready"):
+            subscribe_push_subscription(
+                connection,
+                profile_id=profile_id,
+                endpoint=ENDPOINT,
+                p256dh=P256DH,
+                auth=AUTH,
+            )
     finally:
         connection.close()
 

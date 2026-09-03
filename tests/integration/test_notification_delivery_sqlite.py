@@ -98,13 +98,29 @@ def endpoint(number: int) -> str:
 
 
 def subscribe(connection, profile_id, number, *, auth=AUTH):
-    return subscribe_push_subscription(
+    """Register a device that was already opted in when the fixture's event ran.
+
+    ``one_event`` below produces its event first, so a plain subscribe here
+    would legitimately be too late for it: since 5.3C2 a subscription only
+    receives events above the watermark it took when it activated. These tests
+    are about claims, retries and batches, not about that boundary — which
+    ``test_notification_activation_boundary_sqlite`` covers on its own — so the
+    watermark is backdated to state what they assume: the device was there
+    before the movement happened.
+    """
+    subscription_id = subscribe_push_subscription(
         connection,
         profile_id=profile_id,
         endpoint=endpoint(number),
         p256dh=P256DH,
         auth=auth,
     ).subscription_id
+    connection.execute(
+        "UPDATE push_subscriptions SET notification_event_watermark=0 WHERE id=?",
+        (subscription_id,),
+    )
+    connection.commit()
+    return subscription_id
 
 
 def one_event(tmp_path):
@@ -871,12 +887,12 @@ def test_a_claimed_target_never_renders_the_credential_it_carries(tmp_path):
 def test_delivery_refuses_an_unmigrated_database_and_a_borrowed_transaction(tmp_path):
     connection, identity, _ = one_event(tmp_path)
     try:
-        connection.execute("DELETE FROM schema_migrations WHERE version='0020'")
+        connection.execute("DELETE FROM schema_migrations WHERE version='0021'")
         connection.commit()
         with pytest.raises(NotificationDeliveryError, match="schema is not ready"):
             materialize_delivery_batches(connection, profile_id=identity.profile_id)
         assert connection.in_transaction is False
-        connection.execute("INSERT INTO schema_migrations (version) VALUES ('0020')")
+        connection.execute("INSERT INTO schema_migrations (version) VALUES ('0021')")
         connection.commit()
 
         send, _ = outcomes(201)
@@ -930,7 +946,9 @@ def test_the_status_report_distinguishes_every_stage_of_the_backlog(tmp_path):
         # Another profile's backlog is never counted in this one's.
         assert read_delivery_status(
             connection, profile_id=identity.profile_id + 99
-        ) == (type(report)(identity.profile_id + 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        ) == (
+            type(report)(identity.profile_id + 99, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        )
     finally:
         connection.close()
 

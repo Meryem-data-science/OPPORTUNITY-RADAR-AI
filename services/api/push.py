@@ -4,6 +4,12 @@ Phase 5.3A only lets a browser opt in and out. Nothing here sends a
 notification, and no VAPID *private* key is read, stored, or exposed: the
 public application server key is the one value a browser legitimately needs.
 
+Opting in is also where Phase 5.3C2's boundary is drawn: the subscription this
+surface stores records the profile's current highest notification event id, so
+the device starts level with the present. That happens in the persistence
+layer, inside the same transaction as the write; this surface only has to
+refuse a database that cannot record it.
+
 The browser never names a profile. The server resolves the single configured
 profile exactly like every other Opportunity Radar surface, so a subscription
 can only ever be attached to the profile this deployment owns.
@@ -40,7 +46,11 @@ PUBLIC_PUSH_REQUEST_ERROR = "Push subscription request is invalid."
 PUBLIC_PUSH_CONFLICT_ERROR = "Push subscription cannot be registered."
 
 VAPID_PUBLIC_KEY_VARIABLE = "WEB_PUSH_VAPID_PUBLIC_KEY"
-REQUIRED_MIGRATION_VERSION = "0018"
+#: 0018 created the table; 0021 gave an activation the boundary that decides
+#: what it may ever receive. Storing a subscription without that boundary would
+#: leave a device that could be handed the whole history, so this surface is
+#: refused outright on a database that stops short of it.
+REQUIRED_MIGRATION_VERSION = "0021"
 
 
 class PushApiError(RuntimeError):
