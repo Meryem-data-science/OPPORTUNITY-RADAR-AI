@@ -1542,7 +1542,12 @@ to `IN_FLIGHT`.
 `--recipient` stays runtime configuration and is never persisted. It is
 normalized and fingerprinted with the same 5.4A logic, and the fingerprint is
 part of the claim predicate: a digest frozen for another mailbox is never
-claimed, never sent and never modified. It is not silently skipped either —
+claimed, never sent and never modified. That holds for stale-claim recovery
+too — `recover_stale_claims` requires a recipient fingerprint and filters on
+it, so a run configured for one mailbox leaves another's abandoned claim
+exactly as it found it (still `IN_FLIGHT`, same token, same `updated_at`);
+only a run configured for that recipient releases it. It is not silently
+skipped either —
 the drain counts it and reports `recipient_mismatched`, and `--dry-run`
 reports `recipient_matching`, `recipient_mismatched` and
 `due_recipient_mismatched`, because a due message for an address that is no

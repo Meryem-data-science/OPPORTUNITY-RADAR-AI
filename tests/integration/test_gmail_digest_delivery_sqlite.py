@@ -443,6 +443,7 @@ def test_a_result_whose_claim_was_recovered_is_discarded_not_applied(tmp_path):
     recover_stale_claims(
         connection,
         profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
         now=DAY_ONE + timedelta(seconds=CLAIM_LEASE_SECONDS + 1),
     )
 
@@ -472,6 +473,7 @@ def test_a_claim_older_than_the_lease_is_recovered(tmp_path):
     recovered = recover_stale_claims(
         connection,
         profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
         now=DAY_ONE + timedelta(seconds=CLAIM_LEASE_SECONDS + 1),
     )
 
@@ -498,6 +500,7 @@ def test_a_fresh_claim_is_never_recovered_from_under_a_live_send(tmp_path):
     recovered = recover_stale_claims(
         connection,
         profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
         now=DAY_ONE + timedelta(seconds=CLAIM_LEASE_SECONDS - 1),
     )
 
@@ -519,11 +522,203 @@ def test_recovering_a_crashed_claim_costs_the_digest_no_attempt(tmp_path):
     recover_stale_claims(
         connection,
         profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
         now=DAY_ONE + timedelta(seconds=CLAIM_LEASE_SECONDS + 1),
     )
 
     assert row(connection, outbox_id)[1] == 0
     assert row(connection, outbox_id)[5] is None
+
+
+# --------------------------------------------------------------------------
+# Recovery is scoped to one recipient, because recovery is a write
+# --------------------------------------------------------------------------
+
+
+def stale_claim(connection, profile_id, *, recipient, now=DAY_ONE):
+    """Leave one digest claimed at ``now`` by a process that then died."""
+    claimed = claim_due_digest(
+        connection,
+        claim_token=new_claim_token(),
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(recipient),
+        now=now,
+    )
+    assert claimed is not None
+    return claimed
+
+
+def full_row(connection, outbox_id):
+    """Every column a recovery could touch, including updated_at."""
+    return connection.execute(
+        """SELECT status,attempt_count,next_attempt_at,claim_token,claimed_at,
+        last_attempt_at,sent_at,gmail_message_id,last_error_code,
+        last_error_category,updated_at FROM gmail_digest_outbox WHERE id=?""",
+        (outbox_id,),
+    ).fetchone()
+
+
+AFTER_LEASE = DAY_ONE + timedelta(seconds=CLAIM_LEASE_SECONDS + 1)
+#: Late enough that a claim taken on either of the two local days is stale.
+BOTH_STALE = DAY_TWO + timedelta(seconds=CLAIM_LEASE_SECONDS + 1)
+
+
+def test_a_drain_never_recovers_a_stale_claim_of_another_recipient(tmp_path):
+    connection, profile_id, outbox_id = frozen_digest(
+        tmp_path, recipient=OTHER_RECIPIENT
+    )
+    stale_claim(connection, profile_id, recipient=OTHER_RECIPIENT)
+    before = full_row(connection, outbox_id)
+    transport = RecordingTransport()
+
+    result = drain(
+        connection,
+        profile_id,
+        GmailDigestSender(transport, recipient=RECIPIENT),
+        now=AFTER_LEASE,
+    )
+
+    assert full_row(connection, outbox_id) == before
+    assert before[0] == GmailDigestStatus.IN_FLIGHT.value
+    assert (result.recovered_claims, result.claimed, result.attempted) == (0, 0, 0)
+    assert transport.raw_messages == []
+
+
+def test_that_untouched_stale_claim_is_still_reported_rather_than_hidden(tmp_path):
+    connection, profile_id, _ = frozen_digest(tmp_path, recipient=OTHER_RECIPIENT)
+    stale_claim(connection, profile_id, recipient=OTHER_RECIPIENT)
+
+    report = read_delivery_status(
+        connection,
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
+        now=AFTER_LEASE,
+    )
+
+    assert (report.in_flight, report.stale_claims) == (1, 1)
+    assert (report.recipient_matching, report.recipient_mismatched) == (0, 1)
+
+
+def test_recovery_refuses_another_recipient_even_when_called_directly(tmp_path):
+    connection, profile_id, outbox_id = frozen_digest(
+        tmp_path, recipient=OTHER_RECIPIENT
+    )
+    stale_claim(connection, profile_id, recipient=OTHER_RECIPIENT)
+    before = full_row(connection, outbox_id)
+
+    recovered = recover_stale_claims(
+        connection,
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
+        now=AFTER_LEASE,
+    )
+
+    assert recovered == ()
+    assert full_row(connection, outbox_id) == before
+
+
+def test_recovery_requires_a_recipient_rather_than_defaulting_to_all(tmp_path):
+    connection, profile_id, _ = frozen_digest(tmp_path)
+
+    with pytest.raises(TypeError):
+        recover_stale_claims(connection, profile_id=profile_id, now=AFTER_LEASE)
+
+
+def test_a_drain_recovers_its_own_stale_claim_and_then_sends_it(tmp_path):
+    connection, profile_id, outbox_id = frozen_digest(tmp_path)
+    stale_claim(connection, profile_id, recipient=RECIPIENT)
+    assert full_row(connection, outbox_id)[0] == GmailDigestStatus.IN_FLIGHT.value
+
+    result = drain(connection, profile_id, sender(), now=AFTER_LEASE)
+
+    status, attempts, _, token, claimed_at = full_row(connection, outbox_id)[:5]
+    assert (result.recovered_claims, result.sent) == (1, 1)
+    assert status == GmailDigestStatus.SENT.value
+    # One real send result, and none for the crash that stranded the claim.
+    assert attempts == 1
+    assert (token, claimed_at) == (None, None)
+
+
+def test_recovering_its_own_stale_claim_leaves_the_attempt_count_alone(tmp_path):
+    connection, profile_id, outbox_id = frozen_digest(tmp_path)
+    drain(connection, profile_id, failing_sender(RETRYABLE, "HTTP_503"), now=DAY_ONE)
+    due = DAY_ONE + timedelta(seconds=60)
+    stale_claim(connection, profile_id, recipient=RECIPIENT, now=due)
+    assert full_row(connection, outbox_id)[1] == 1
+
+    recovered = recover_stale_claims(
+        connection,
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
+        now=due + timedelta(seconds=CLAIM_LEASE_SECONDS + 1),
+    )
+
+    status, attempts, next_attempt_at, token, claimed_at = full_row(
+        connection, outbox_id
+    )[:5]
+    assert recovered == (outbox_id,)
+    assert (status, attempts) == (GmailDigestStatus.PENDING.value, 1)
+    assert next_attempt_at is not None and (token, claimed_at) == (None, None)
+
+
+def two_recipients(tmp_path):
+    """One profile, two frozen digests on different days, different mailboxes."""
+    connection, profile_id, first = frozen_digest(tmp_path, recipient=RECIPIENT)
+    second = materialize(
+        connection, profile_id, now=DAY_TWO, recipient=OTHER_RECIPIENT
+    ).outbox_id
+    assert second is not None and second != first
+    return connection, profile_id, first, second
+
+
+def test_a_run_recovers_only_its_own_recipients_stale_claims(tmp_path):
+    connection, profile_id, mine, theirs = two_recipients(tmp_path)
+    stale_claim(connection, profile_id, recipient=RECIPIENT, now=DAY_TWO)
+    stale_claim(connection, profile_id, recipient=OTHER_RECIPIENT, now=DAY_TWO)
+    theirs_before = full_row(connection, theirs)
+
+    recovered = recover_stale_claims(
+        connection,
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint(RECIPIENT),
+        now=BOTH_STALE,
+    )
+
+    assert recovered == (mine,)
+    assert full_row(connection, mine)[0] == GmailDigestStatus.PENDING.value
+    assert full_row(connection, theirs) == theirs_before
+    assert theirs_before[0] == GmailDigestStatus.IN_FLIGHT.value
+
+
+def test_two_recipient_isolated_runs_cannot_recover_each_others_claims(tmp_path):
+    connection, profile_id, mine, theirs = two_recipients(tmp_path)
+    stale_claim(connection, profile_id, recipient=RECIPIENT, now=DAY_TWO)
+    stale_claim(connection, profile_id, recipient=OTHER_RECIPIENT, now=DAY_TWO)
+    mine_transport, theirs_transport = RecordingTransport(), RecordingTransport()
+
+    first = drain(
+        connection,
+        profile_id,
+        GmailDigestSender(mine_transport, recipient=RECIPIENT),
+        now=BOTH_STALE,
+    )
+    theirs_after_first = full_row(connection, theirs)
+    second = drain(
+        connection,
+        profile_id,
+        GmailDigestSender(theirs_transport, recipient=OTHER_RECIPIENT),
+        recipient=OTHER_RECIPIENT,
+        now=BOTH_STALE,
+    )
+
+    # Each run recovered and sent exactly its own digest, and neither run
+    # touched the other's row before its owner came for it.
+    assert (first.recovered_claims, first.sent) == (1, 1)
+    assert theirs_after_first[0] == GmailDigestStatus.IN_FLIGHT.value
+    assert (second.recovered_claims, second.sent) == (1, 1)
+    assert full_row(connection, mine)[0] == GmailDigestStatus.SENT.value
+    assert full_row(connection, theirs)[0] == GmailDigestStatus.SENT.value
+    assert len(mine_transport.raw_messages) == len(theirs_transport.raw_messages) == 1
 
 
 # --------------------------------------------------------------------------

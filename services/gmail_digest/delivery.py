@@ -28,9 +28,15 @@ and the digest is sent again. Stated plainly:
 Nothing here rebuilds a digest. The subject and both bodies come from the
 frozen row and go to Gmail unchanged: this pass never reads a Portfolio, never
 re-renders, never re-orders, and never recomputes Eligibility, Matching,
-Priority or Portfolio. A digest frozen for a different mailbox is not sent and
-not touched — it is counted and reported, because a due message for an address
-that is no longer configured is something an operator has to be told.
+Priority or Portfolio.
+
+A digest frozen for a different mailbox is not sent and not touched, and that
+holds for *every* step of the pass, recovery included. A stale claim belonging
+to another recipient stays exactly as it was found — still ``IN_FLIGHT``, same
+token, same ``claimed_at``, same ``updated_at`` — because releasing it would be
+a write to a digest this run may not send. It is counted and reported instead,
+since a due message for an address that is no longer configured is something an
+operator has to be told; only a run configured for that recipient recovers it.
 
 There is no scheduler, no daemon and no deployment here: something outside this
 process decides when a pass happens.
@@ -117,9 +123,13 @@ def drain_gmail_digests(
     # The configured address becomes a fingerprint before any row is looked at,
     # so a malformed recipient fails here rather than halfway through a queue.
     fingerprint = recipient_fingerprint(recipient)
+    # Recovery is scoped to the configured mailbox for the same reason the
+    # claim is: a run configured for one recipient may not write to a digest
+    # frozen for another, and releasing somebody else's stale claim is a write.
     recovered = recover_stale_claims(
         connection,
         profile_id=profile_id,
+        recipient_fingerprint=fingerprint,
         digest_version=digest_version,
         now=now,
         lease_seconds=lease_seconds,

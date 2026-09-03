@@ -350,11 +350,25 @@ def recover_stale_claims(
     connection: sqlite3.Connection,
     *,
     profile_id: int,
+    recipient_fingerprint: str,
     digest_version: str = DIGEST_VERSION,
     now: datetime | None = None,
     lease_seconds: int = CLAIM_LEASE_SECONDS,
 ) -> tuple[int, ...]:
-    """Release claims older than the lease, so a dead process strands nothing.
+    """Release this recipient's stale claims, so a dead process strands nothing.
+
+    The recipient fingerprint is required and is part of the query, not a
+    filter applied to the result. A delivery run is configured for exactly one
+    mailbox, and a digest frozen for a different one is none of its business:
+    recovering such a row would write to a digest this run may not send, which
+    is the same violation as claiming it. So a mismatched digest is left
+    untouched here — still ``IN_FLIGHT``, still holding its claim, still
+    carrying the same ``updated_at`` — and is reported instead. Only a run
+    configured for *that* recipient may recover it.
+
+    Making the argument required rather than optional is deliberate: an
+    accidental omission is a ``TypeError`` at the call site, not a silent
+    recovery across every mailbox in the table.
 
     A recovered digest keeps its ``attempt_count`` exactly as it was. A claim
     nobody settled is not evidence that anything was attempted — the process
@@ -368,6 +382,7 @@ def recover_stale_claims(
     is at-least-once rather than exactly-once.
     """
     profile, version = _profile_and_version(profile_id, digest_version)
+    fingerprint = _fingerprint(recipient_fingerprint, "recipient_fingerprint")
     if (
         isinstance(lease_seconds, bool)
         or not isinstance(lease_seconds, int)
@@ -387,21 +402,32 @@ def recover_stale_claims(
         rows = connection.execute(
             f"""SELECT id FROM {DIGEST_OUTBOX_TABLE}
             WHERE profile_id=? AND digest_version=? AND status=? AND claimed_at<=?
+              AND recipient_fingerprint=?
             ORDER BY id ASC""",
-            (profile, version, GmailDigestStatus.IN_FLIGHT.value, expiry),
+            (
+                profile,
+                version,
+                GmailDigestStatus.IN_FLIGHT.value,
+                expiry,
+                fingerprint,
+            ),
         ).fetchall()
         recovered = [int(row[0]) for row in rows]
         for outbox_id in recovered:
+            # Guarded by the fingerprint as well as by the status, so the
+            # write itself — not only the read that chose it — refuses a row
+            # belonging to another recipient.
             connection.execute(
                 f"""UPDATE {DIGEST_OUTBOX_TABLE}
                 SET status=?,next_attempt_at=?,claim_token=NULL,claimed_at=NULL,
-                    updated_at=? WHERE id=? AND status=?""",
+                    updated_at=? WHERE id=? AND status=? AND recipient_fingerprint=?""",
                 (
                     GmailDigestStatus.PENDING.value,
                     stamp,
                     stamp,
                     outbox_id,
                     GmailDigestStatus.IN_FLIGHT.value,
+                    fingerprint,
                 ),
             )
         connection.execute("COMMIT")
@@ -415,6 +441,7 @@ def recover_stale_claims(
             extra={
                 "event": "gmail_digest_claims_recovered",
                 "profile_id": profile,
+                "recipient_fingerprint": fingerprint,
                 "outbox_count": len(recovered),
                 "lease_seconds": lease_seconds,
             },
