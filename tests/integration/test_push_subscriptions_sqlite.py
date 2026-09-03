@@ -601,7 +601,7 @@ def test_0018_upgrades_an_existing_database_without_touching_its_data(tmp_path):
             subscribe()
         assert rows(connection) == []
 
-        assert apply_migrations(connection) == ["0019", "0020", "0021"]
+        assert apply_migrations(connection) == ["0019", "0020", "0021", "0022"]
         subscribe()
         assert len(rows(connection)) == 1
         assert apply_migrations(connection) == []

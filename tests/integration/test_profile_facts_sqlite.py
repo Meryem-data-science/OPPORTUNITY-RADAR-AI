@@ -147,6 +147,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
             "0019",
             "0020",
             "0021",
+            "0022",
         ]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
@@ -167,7 +168,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0021",)
+    assert recorded[-1] == ("0022",)
     assert _counts(migrated) == (0, 0)
 
 
