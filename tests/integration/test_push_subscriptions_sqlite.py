@@ -1,8 +1,11 @@
 """Integration coverage for migration 0018 and push subscription persistence."""
 
+import base64
 import sqlite3
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from services.collector.database.connection import connect_database
 from services.collector.database.migrations import (
@@ -19,6 +22,7 @@ from services.notifications import (
     PushSubscriptionError,
     PushSubscriptionOwnershipError,
     decode_base64url,
+    revoke_push_subscription_by_id,
     subscribe_push_subscription,
     unsubscribe_push_subscription,
     valid_auth,
@@ -27,8 +31,31 @@ from services.notifications import (
 
 ENDPOINT = "https://push.example.invalid/subscription/abc"
 OTHER_ENDPOINT = "https://push.example.invalid/subscription/def"
-P256DH = "BN" + "a" * 85
 AUTH = "c" * 22
+
+
+def p256dh_for(scalar: int) -> str:
+    """A real uncompressed P-256 point, deterministic in ``scalar``.
+
+    ``valid_p256dh`` verifies the point is genuinely on the curve, so a
+    fixture can no longer be 65 bytes of noise with an 0x04 in front of it.
+    """
+    return (
+        base64.urlsafe_b64encode(
+            ec.derive_private_key(scalar, ec.SECP256R1())
+            .public_key()
+            .public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        )
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+
+
+P256DH = p256dh_for(0x5E01)
+ROTATED_P256DH = p256dh_for(0x5E02)
+OTHER_P256DH = p256dh_for(0x5E03)
+#: The right shape and the right prefix, and still not a point on P-256.
+OFF_CURVE_P256DH = "BN" + "a" * 85
 
 
 def push_fixture(tmp_path):
@@ -150,12 +177,12 @@ def test_subscribe_is_idempotent_and_reactivates(tmp_path):
             connection,
             profile_id=profile_id,
             endpoint=ENDPOINT,
-            p256dh="BN" + "b" * 85,
+            p256dh=ROTATED_P256DH,
             auth="d" * 22,
         )
         assert rotated.subscription_id == first.subscription_id
         assert (rotated.created, rotated.keys_updated) == (False, True)
-        assert rows(connection)[0][3:5] == ("BN" + "b" * 85, "d" * 22)
+        assert rows(connection)[0][3:5] == (ROTATED_P256DH, "d" * 22)
         assert len(rows(connection)) == 1
 
         unsubscribe_push_subscription(
@@ -255,6 +282,7 @@ MALFORMED_P256DH = [
     "BN" + "a" * 84,  # 64 bytes: one short of an uncompressed P-256 point
     "BN" + "a" * 86,  # 66 bytes: one too many
     "AA" + "a" * 85,  # right length, but not an uncompressed point (0x00)
+    OFF_CURVE_P256DH,  # right shape and prefix, but not a point on the curve
     "BN" + "a" * 83,  # remainder of one: no such base64url string
     ("BN" + "a" * 83) + "==",  # padding is refused outright
     "BN+a" + "a" * 83,  # "+" and "/" belong to base64, not base64url
@@ -279,7 +307,7 @@ MALFORMED_AUTH = [
     "c/cc" + "c" * 18,
     "c c" + "c" * 19,
     "cc!" + "c" * 19,
-    "BN" + "a" * 85,  # a valid public key is not a valid auth secret
+    P256DH,  # a valid public key is not a valid auth secret
     "a" * (MAX_KEY_LENGTH + 1),
     None,
     7,
@@ -287,11 +315,18 @@ MALFORMED_AUTH = [
 
 
 def test_the_shipped_fixtures_are_real_web_push_credentials():
-    """The fixtures the rest of the suite uses decode to the real key shapes."""
-    assert valid_p256dh(P256DH) and valid_auth(AUTH)
-    assert len(decode_base64url(P256DH)) == P256DH_BYTE_LENGTH
-    assert decode_base64url(P256DH)[0] == 0x04
-    assert len(decode_base64url(AUTH)) == AUTH_BYTE_LENGTH
+    """The fixtures the rest of the suite uses are real Web Push credentials."""
+    for key in (P256DH, ROTATED_P256DH, OTHER_P256DH):
+        assert valid_p256dh(key)
+        assert len(decode_base64url(key)) == P256DH_BYTE_LENGTH
+        assert decode_base64url(key)[0] == 0x04
+    assert len({P256DH, ROTATED_P256DH, OTHER_P256DH}) == 3
+    assert valid_auth(AUTH) and len(decode_base64url(AUTH)) == AUTH_BYTE_LENGTH
+    # Shape alone is not enough any more: this one has the length and the
+    # prefix of a public point and is not one.
+    assert len(decode_base64url(OFF_CURVE_P256DH)) == P256DH_BYTE_LENGTH
+    assert decode_base64url(OFF_CURVE_P256DH)[0] == 0x04
+    assert not valid_p256dh(OFF_CURVE_P256DH)
 
 
 @pytest.mark.parametrize(
@@ -410,7 +445,7 @@ def test_an_endpoint_owned_by_another_profile_fails_closed(tmp_path):
                 connection,
                 profile_id=other_profile_id,
                 endpoint=ENDPOINT,
-                p256dh="BN" + "z" * 85,
+                p256dh=OTHER_P256DH,
                 auth="z" * 22,
             )
         with pytest.raises(PushSubscriptionOwnershipError):
@@ -545,5 +580,60 @@ def test_0018_upgrades_an_existing_database_without_touching_its_data(tmp_path):
         )
         assert len(rows(connection)) == 1
         assert apply_migrations(connection) == []
+    finally:
+        connection.close()
+
+
+def test_revoking_by_id_holds_the_same_invariants_as_revoking_by_endpoint(tmp_path):
+    """Delivery revokes by id, and must land the row exactly where 5.3A does."""
+    connection, profile_id, _ = push_fixture(tmp_path)
+    try:
+        subscription_id = subscribe_push_subscription(
+            connection,
+            profile_id=profile_id,
+            endpoint=ENDPOINT,
+            p256dh=P256DH,
+            auth=AUTH,
+        ).subscription_id
+        other_id = subscribe_push_subscription(
+            connection,
+            profile_id=profile_id,
+            endpoint=OTHER_ENDPOINT,
+            p256dh=P256DH,
+            auth=AUTH,
+        ).subscription_id
+        unsubscribe_push_subscription(
+            connection, profile_id=profile_id, endpoint=OTHER_ENDPOINT
+        )
+        by_endpoint = connection.execute(
+            "SELECT status, revoked_at IS NOT NULL FROM push_subscriptions WHERE id = ?",
+            (other_id,),
+        ).fetchone()
+
+        # It is transaction-neutral by design: delivery owns the transaction.
+        with pytest.raises(PushSubscriptionError, match="active transaction"):
+            revoke_push_subscription_by_id(connection, subscription_id)
+
+        connection.execute("BEGIN IMMEDIATE")
+        assert revoke_push_subscription_by_id(connection, subscription_id) is True
+        # Revoking twice is a no-op, exactly like unsubscribing twice.
+        assert revoke_push_subscription_by_id(connection, subscription_id) is False
+        connection.execute("COMMIT")
+
+        assert (
+            connection.execute(
+                "SELECT status, revoked_at IS NOT NULL FROM push_subscriptions"
+                " WHERE id = ?",
+                (subscription_id,),
+            ).fetchone()
+            == by_endpoint
+            == ("REVOKED", 1)
+        )
+
+        connection.execute("BEGIN IMMEDIATE")
+        for unknown in (9999, 0, -1, True):
+            with pytest.raises(PushSubscriptionError):
+                revoke_push_subscription_by_id(connection, unknown)
+        connection.execute("ROLLBACK")
     finally:
         connection.close()

@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from enum import Enum
 from urllib.parse import urlsplit
 
+from cryptography.hazmat.primitives.asymmetric import ec
+
 from services.collector.logging_config import get_logger
 
 
@@ -95,13 +97,28 @@ def decode_base64url(value: str) -> bytes | None:
 
 
 def valid_p256dh(value: str) -> bool:
-    """Accept only an uncompressed P-256 public point, base64url encoded."""
+    """Accept only an uncompressed P-256 public point, base64url encoded.
+
+    The length and the 0x04 prefix only describe the *shape* of a point; 65
+    bytes of noise has both. Since delivery has to run an ECDH against this
+    value anyway, the point is verified to be on the curve here, at the door,
+    rather than failing much later inside an encryption nobody can retry.
+
+    Nothing about the rejection is reported: the caller gets False, and the
+    candidate — which is a credential — is never named, logged, or re-raised.
+    """
     decoded = decode_base64url(value)
-    return (
-        decoded is not None
-        and len(decoded) == P256DH_BYTE_LENGTH
-        and decoded[0] == P256DH_UNCOMPRESSED_PREFIX
-    )
+    if (
+        decoded is None
+        or len(decoded) != P256DH_BYTE_LENGTH
+        or decoded[0] != P256DH_UNCOMPRESSED_PREFIX
+    ):
+        return False
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), decoded)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def valid_auth(value: str) -> bool:
@@ -224,6 +241,47 @@ def subscribe_push_subscription(
         },
     )
     return result
+
+
+def revoke_push_subscription_by_id(
+    connection: sqlite3.Connection, subscription_id: int
+) -> bool:
+    """Revoke one stored subscription by id, inside the caller's transaction.
+
+    Delivery learns an endpoint is gone from the push service itself, not from
+    the browser, and it learns it while holding a short transaction of its own.
+    So the transition lives here, next to the browser-driven one, rather than
+    being re-implemented against the same columns somewhere else: an already
+    revoked row is left exactly as it is, and the ``REVOKED``/``revoked_at``
+    invariant migration 0018 enforces is written in one place.
+    """
+    _positive_int(subscription_id, "subscription_id")
+    if not connection.in_transaction:
+        raise PushSubscriptionError(
+            "revoke_push_subscription_by_id requires an active transaction"
+        )
+    row = connection.execute(
+        "SELECT status FROM push_subscriptions WHERE id = ?", (subscription_id,)
+    ).fetchone()
+    if row is None:
+        raise PushSubscriptionError("push subscription does not exist")
+    if row[0] != PushSubscriptionStatus.ACTIVE.value:
+        return False
+    connection.execute(
+        """UPDATE push_subscriptions
+           SET status = 'REVOKED', revoked_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (subscription_id,),
+    )
+    LOGGER.info(
+        "Push subscription revoked by delivery.",
+        extra={
+            "event": "push_subscription_revoked_by_delivery",
+            "subscription_id": subscription_id,
+        },
+    )
+    return True
 
 
 def unsubscribe_push_subscription(
