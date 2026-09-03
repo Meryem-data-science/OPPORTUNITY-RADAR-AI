@@ -406,6 +406,7 @@ def test_the_push_surface_sends_no_notification(tmp_path, monkeypatch):
             if "notification" in row[0] or "outbox" in row[0]
         )
         assert notification_tables == [
+            "gmail_digest_outbox",
             "notification_delivery_batches",
             "notification_delivery_targets",
             "notification_events",

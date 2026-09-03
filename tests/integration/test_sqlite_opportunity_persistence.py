@@ -56,6 +56,7 @@ def test_sqlite_persistence_is_same_source_idempotent(tmp_path) -> None:
             "0019",
             "0020",
             "0021",
+            "0022",
         ]
         first = persist_opportunities(
             connection, source, [candidate], clock=lambda: next(timestamps)

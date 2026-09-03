@@ -1348,3 +1348,108 @@ Phase 3.5 projections — and it leaves the historical
 `opportunities.eligibility_score` column untouched, because a categorical
 verdict is not a number. It opens no network connection, downloads no model and
 calls no LLM, and there is no web interface or HTTP endpoint for any of it.
+
+## Daily Gmail digest (Phase 5.4A)
+
+One command materializes one deterministic daily email per profile, from the
+audited Portfolio snapshot, into `gmail_digest_outbox` (migration `0022`):
+
+```bash
+python -m services.gmail_digest.digest_cli \
+  --database ./data/opportunity-radar.db \
+  --profile-id 1 \
+  --timezone Africa/Casablanca \
+  --recipient you@example.com \
+  --dry-run
+```
+
+`--dry-run` opens the database through SQLite's `mode=ro` URI with
+`query_only` pinned, reports the decision, and leaves the file byte-identical —
+which is what makes it safe against a real operational database. Dropping
+`--dry-run` runs the same decision and, when the policy says so, writes exactly
+one frozen `PENDING` row.
+
+**5.4A does not touch Gmail.** There is no OAuth flow, no Gmail API call, no
+SMTP, no mailbox read, no label management and no scheduler anywhere in this
+slice. A materialized row is a message that has been decided, not one that has
+been sent; Phase 5.4B adds delivery against exactly these columns, and Phase 7
+Gmail Intelligence — email classification, rejection and interview detection,
+application tracking — remains out of scope entirely.
+
+### The content is the Portfolio's, not the digest's
+
+The digest shows only the assessments the current audited Portfolio run marked
+`INCLUDED`, and shows each one's persisted bucket, priority category and
+eligibility status verbatim. Nothing is recomputed: not Eligibility, not
+Matching, not Priority, not Portfolio. `UNKNOWN` stays `UNKNOWN`, a missing
+location is rendered as an absence rather than filled in, and no global match
+percentage appears because no authoritative per-opportunity one is persisted.
+The outward link is chosen by `services.api.link_priority` — the same policy
+the Portfolio page uses — and an `INCLUDED` opportunity that cannot be resolved
+to a real absolute `http`/`https` URL fails the whole digest closed rather than
+shipping one dead link. A Portfolio that is `NOT_SYNCED`, or that fails its
+audit, produces no digest and no row.
+
+Items are ordered `TARGET`, `SAFE`, `AMBITIOUS`; inside a bucket by priority
+`URGENT`, `HIGH`, `MEDIUM`, `LOW`, `IGNORE`; then by `opportunity_id`. The
+plain-text and HTML bodies carry the same items in the same order. The HTML is
+inert: every dynamic value is escaped, including inside `href`, and there is no
+script, no external image and no tracking pixel of any kind.
+
+### The first digest is not a silent baseline
+
+Unlike the Web Push policy, whose first sync deliberately plants a baseline and
+announces nothing, a profile with actionable opportunities and no prior digest
+**is** eligible for one: the user has not been told this anywhere else, so
+staying silent would lose information rather than avoid noise. After that:
+
+| situation | result | writes |
+| --- | --- | --- |
+| Portfolio `NOT_SYNCED` or audit not clean | error | nothing |
+| no `INCLUDED` opportunity | `EMPTY` | nothing |
+| a digest already exists for this profile, local day and version | `ALREADY_MATERIALIZED` | nothing — byte-level no-op |
+| a later day, and the content equals the one this recipient was last **sent** | `UNCHANGED` | nothing |
+| anything else | `CREATED` | one frozen `PENDING` row |
+
+There is no placeholder row for `EMPTY` or `UNCHANGED`: a row in this table is
+a message someone will receive. A repeated pass does not move a timestamp to
+record that it looked. Web Push remains responsible for telling the user
+immediately when something genuinely moves; the digest is the daily summary.
+
+### The content fingerprint excludes provenance
+
+`content_fingerprint` covers only what a reader sees — per item the opportunity
+id, title, organization, location, authoritative URL, bucket, priority category
+and eligibility status, plus the digest version and the reading order. It
+deliberately excludes `digest_date`, `created_at`, the row id, the Portfolio run
+id and the Portfolio run fingerprint, which are persisted alongside it as
+provenance. So a Portfolio run that changed only `EXCLUDED` opportunities has a
+new run fingerprint and the same content fingerprint, and cannot trigger a new
+email.
+
+### The day is chosen, never inherited
+
+`--timezone` is required and must be an IANA name resolved through `zoneinfo`.
+A missing, blank or unknown zone fails closed rather than falling back to UTC or
+to the machine's own setting, and the zone that decided a day is persisted in
+the row beside the date. Row timestamps stay in UTC; only the business day is
+local.
+
+### The recipient is a fingerprint, not an address
+
+`--recipient` is configuration. Only `recipient_fingerprint` — a SHA-256 over
+the normalized address — is persisted, so a copy of the database carries no
+mailbox, and the "already sent this" decision is made per recipient. The
+address never reaches stdout, the structured log or an exception message: a
+failure prints only the class of error, and the success output carries counters,
+dates, identities and ids. No rendered subject or body is ever printed.
+
+### Concurrency
+
+Reading the audited Portfolio, resolving the content, applying the four rules
+and inserting the row happen inside one `BEGIN IMMEDIATE`. Two materializers
+racing on the same profile and day produce exactly one `PENDING` row: SQLite
+serializes them, the loser sees the winner's row and reports
+`ALREADY_MATERIALIZED`, and `UNIQUE (profile_id, digest_date, digest_version)`
+is the database's own copy of that promise. No network I/O happens inside the
+transaction, because no network I/O happens in this slice at all.
