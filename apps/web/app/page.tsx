@@ -1,5 +1,6 @@
 import Link from "next/link";
 import React from "react";
+import PushNotifications from "@/components/push-notifications";
 import { loadOpportunities, type Opportunity } from "@/lib/opportunities";
 
 function OpportunityCard({ opportunity }: { opportunity: Opportunity }) {
@@ -51,6 +52,8 @@ export default async function Home() {
           </Link>
         </nav>
       </header>
+
+      <PushNotifications />
 
       {opportunities === null ? (
         <section className="status-panel" role="status">
