@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 
 from services.api.opportunities import (
     OpportunityListResponse,
@@ -27,6 +27,18 @@ from services.api.priority import (
     PriorityApiReadError,
     PriorityResponse,
     read_priority_surface,
+)
+from services.api.push import (
+    PUBLIC_PUSH_ERROR,
+    PUBLIC_PUSH_REQUEST_ERROR,
+    PushApiError,
+    PushConfigResponse,
+    PushConflictError,
+    PushRequestError,
+    PushSubscriptionStateResponse,
+    read_push_config,
+    register_subscription,
+    revoke_subscription,
 )
 from services.api.portfolio import (
     PUBLIC_PORTFOLIO_ERROR,
@@ -99,3 +111,58 @@ def get_portfolio() -> PortfolioResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_PORTFOLIO_ERROR,
         ) from None
+
+
+@app.get("/api/push/config", response_model=PushConfigResponse)
+def get_push_config() -> PushConfigResponse:
+    """Report whether Web Push is configured and expose only the public key."""
+    return read_push_config()
+
+
+async def _push_body(request: Request) -> object:
+    """Read a JSON body without letting a parser echo it back to the caller."""
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=PUBLIC_PUSH_REQUEST_ERROR,
+        ) from None
+
+
+def _push_failure(error: Exception) -> HTTPException:
+    if isinstance(error, PushRequestError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error))
+    if isinstance(error, PushConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=PUBLIC_PUSH_ERROR
+    )
+
+
+@app.post(
+    "/api/push/subscriptions",
+    response_model=PushSubscriptionStateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_push_subscription(
+    request: Request,
+) -> PushSubscriptionStateResponse:
+    """Persist one browser push subscription for the server-resolved profile."""
+    body = await _push_body(request)
+    try:
+        return register_subscription(body)
+    except (PushRequestError, PushConflictError, PushApiError) as error:
+        raise _push_failure(error) from None
+
+
+@app.delete("/api/push/subscriptions", response_model=PushSubscriptionStateResponse)
+async def delete_push_subscription(
+    request: Request,
+) -> PushSubscriptionStateResponse:
+    """Revoke one browser push subscription for the server-resolved profile."""
+    body = await _push_body(request)
+    try:
+        return revoke_subscription(body)
+    except (PushRequestError, PushConflictError, PushApiError) as error:
+        raise _push_failure(error) from None

@@ -316,6 +316,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0015_matching_persistence.sql",
         "0016_priority_persistence.sql",
         "0017_portfolio_persistence.sql",
+        "0018_push_subscriptions.sql",
     ]
 
 

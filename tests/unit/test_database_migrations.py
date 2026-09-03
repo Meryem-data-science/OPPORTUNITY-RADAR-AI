@@ -29,6 +29,7 @@ EXPECTED_TABLES = {
     "portfolio_runs",
     "portfolio_assessments",
     "portfolio_profile_state",
+    "push_subscriptions",
 }
 
 
@@ -63,6 +64,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0015",
             "0016",
             "0017",
+            "0018",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -83,6 +85,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0015",),
         ("0016",),
         ("0017",),
+        ("0018",),
     ]
 
 
@@ -106,6 +109,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0015",
             "0016",
             "0017",
+            "0018",
         ]
         assert apply_migrations(connection) == []
 
@@ -194,7 +198,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "portfolio_assessments": 0,
         "portfolio_profile_state": 0,
     }
-    assert migration_count == 17
+    assert migration_count == 18
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
