@@ -81,6 +81,7 @@ from .persistence import (
 )
 from .policy import (
     NOTIFICATION_POLICY_VERSION,
+    NotificationEventType,
     NotificationTransition,
     PortfolioPosition,
     evaluate_transitions,
@@ -250,15 +251,39 @@ def _records(
     profile_id: int,
     steps: tuple[tuple[int, str, int, str, tuple[NotificationTransition, ...]], ...],
 ) -> tuple[NotificationEventRecord, ...]:
-    """Turn every announced movement into one storable, fingerprinted event."""
+    """Turn every announced movement into one storable, fingerprinted event.
+
+    Policy v1 announces an opportunity as new exactly once per profile, ever.
+    An opportunity that drops out of the Portfolio and comes back is not news
+    again, however different the Portfolio run it comes back in — so the
+    already-announced set spans the whole history, not just this batch. The
+    database enforces the same invariant, but a re-entry is ordinary product
+    behaviour and is answered with silence here, not with an integrity error.
+    """
     opportunity_ids = {
         transition.opportunity_id for _, _, _, _, batch in steps for transition in batch
     }
     metadata = read_opportunity_metadata(connection, sorted(opportunity_ids))
+    announced = {
+        int(row[0])
+        for row in connection.execute(
+            "SELECT DISTINCT opportunity_id FROM notification_events"
+            " WHERE profile_id=? AND event_type=?",
+            (profile_id, NotificationEventType.NEW_ACTIONABLE_OPPORTUNITY.value),
+        )
+    }
     records: list[NotificationEventRecord] = []
     seen: set[str] = set()
     for previous_id, previous_fingerprint, run_id, run_fingerprint, batch in steps:
         for transition in batch:
+            new_actionable = (
+                transition.event_type
+                is NotificationEventType.NEW_ACTIONABLE_OPPORTUNITY
+            )
+            # A re-entry is silent: it is neither news nor, since the previous
+            # position was not actionable, an escalation.
+            if new_actionable and transition.opportunity_id in announced:
+                continue
             payload = canonical_notification_event_payload(
                 transition, metadata[transition.opportunity_id]
             )
@@ -284,6 +309,8 @@ def _records(
                     canonical_json(payload),
                 )
             )
+            if new_actionable:
+                announced.add(transition.opportunity_id)
     return tuple(records)
 
 

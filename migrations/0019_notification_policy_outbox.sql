@@ -43,4 +43,5 @@ CREATE INDEX idx_notification_events_profile ON notification_events(profile_id, 
 CREATE INDEX idx_notification_events_opportunity ON notification_events(opportunity_id);
 CREATE INDEX idx_notification_events_run ON notification_events(portfolio_run_id);
 CREATE INDEX idx_notification_events_type ON notification_events(event_type);
+CREATE UNIQUE INDEX idx_notification_events_new_actionable_once ON notification_events(profile_id, opportunity_id) WHERE event_type = 'NEW_ACTIONABLE_OPPORTUNITY';
 CREATE INDEX idx_notification_outbox_created ON notification_outbox(created_at, id);

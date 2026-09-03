@@ -235,3 +235,48 @@ def test_deleting_an_event_removes_its_outbox_row_but_portfolio_runs_are_restric
     connection.commit()
 
     assert counts(connection) == (0, 0, 0)
+
+
+def test_only_one_new_actionable_event_per_profile_and_opportunity(tmp_path):
+    """The partial unique index is the database guard for the policy v1 rule.
+
+    It constrains NEW_ACTIONABLE_OPPORTUNITY alone: an opportunity can escalate
+    as often as it legitimately climbs, but it is new exactly once.
+    """
+    connection, identity, opportunity_ids, first, second = two_runs(tmp_path)
+    partial = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+        ("idx_notification_events_new_actionable_once",),
+    ).fetchone()
+    assert (
+        partial is not None
+        and "WHERE event_type = 'NEW_ACTIONABLE_OPPORTUNITY'" in (partial[0])
+    )
+
+    base = event_arguments(identity.profile_id, opportunity_ids[0], first, second)
+    insert_event(connection, base)
+    connection.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_event(connection, base | {"event_fingerprint": "b" * 64})
+    connection.rollback()
+
+    # A different opportunity, and an escalation of the same one, both fit.
+    insert_event(
+        connection,
+        base | {"opportunity_id": opportunity_ids[1], "event_fingerprint": "b" * 64},
+    )
+    insert_event(
+        connection,
+        base | {"event_type": "ATTENTION_ESCALATED", "event_fingerprint": "c" * 64},
+    )
+    insert_event(
+        connection,
+        base | {"event_type": "ATTENTION_ESCALATED", "event_fingerprint": "d" * 64},
+    )
+    connection.commit()
+
+    assert connection.execute(
+        "SELECT event_type,COUNT(*) FROM notification_events GROUP BY event_type"
+        " ORDER BY event_type"
+    ).fetchall() == [("ATTENTION_ESCALATED", 2), ("NEW_ACTIONABLE_OPPORTUNITY", 2)]

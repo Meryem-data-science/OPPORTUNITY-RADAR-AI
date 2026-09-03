@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 import socket
+import sqlite3
 import sys
 
 import pytest
@@ -651,7 +652,9 @@ def test_a_portfolio_that_returns_to_an_earlier_snapshot_is_processed_once(tmp_p
     assert (went_back.event_count, went_back.duplicate_count) == (0, 0)
     assert again.processed_run_ids == (second.run_id,)
     assert (again.event_count, again.outbox_count) == (0, 0)
-    assert again.duplicate_count == 1
+    # The re-entry is dropped while the event is derived — this opportunity was
+    # already announced as new — so nothing even reaches the fingerprint dedup.
+    assert again.duplicate_count == 0
     assert announced(connection) == [("NEW_ACTIONABLE_OPPORTUNITY", ids[0])]
     assert again.last_processed_portfolio_run_id == second.run_id
 
@@ -967,3 +970,178 @@ def test_a_hidden_appended_run_is_never_rediscovered_after_the_mark_covers_it(
     assert result.highest_seen_portfolio_run_id == fourth.run_id
     assert result.event_count == 1
     assert announced(connection)[-1] == ("ATTENTION_ESCALATED", ids[0])
+
+
+def new_actionable_rows(connection, opportunity_id=None):
+    """Every persisted NEW_ACTIONABLE_OPPORTUNITY, optionally for one opportunity."""
+    return [
+        row
+        for row in events(connection)
+        if row[0] == "NEW_ACTIONABLE_OPPORTUNITY"
+        and (opportunity_id is None or row[1] == opportunity_id)
+    ]
+
+
+def test_an_opportunity_is_announced_as_new_once_however_often_it_comes_back(
+    tmp_path,
+):
+    """Out of the Portfolio and back in is not news a second time."""
+    connection, identity, ids = fixture(tmp_path)
+    baseline(connection, identity, {ids[0]: excluded(), ids[1]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included(), ids[1]: excluded()})
+    announced_once = sync_notification_policy(connection, identity.profile_id)
+
+    store_run(connection, identity.profile_id, {ids[0]: excluded(), ids[1]: excluded()})
+    left = sync_notification_policy(connection, identity.profile_id)
+
+    # A genuinely different Portfolio run, so a different event fingerprint.
+    returned = store_run(
+        connection,
+        identity.profile_id,
+        {
+            ids[0]: included(bucket=PortfolioBucket.SAFE, priority=HIGH),
+            ids[1]: excluded(),
+        },
+    )
+    back = sync_notification_policy(connection, identity.profile_id)
+
+    assert (announced_once.event_count, announced_once.outbox_count) == (1, 1)
+    assert (left.event_count, left.outbox_count) == (0, 0)
+    assert returned.created is True
+    assert (back.event_count, back.outbox_count, back.duplicate_count) == (0, 0, 0)
+    assert len(new_actionable_rows(connection, ids[0])) == 1
+    assert snapshot(connection)[:2] == (1, 1)
+    # The cursor and the mark still advance: suppression is not a refusal.
+    assert back.status is NotificationSyncStatus.PROCESSED
+    assert back.processed_run_ids == (returned.run_id,)
+    assert back.last_processed_portfolio_run_id == returned.run_id
+    assert back.highest_seen_portfolio_run_id == returned.run_id
+    assert state(connection)[0][2:4] == (returned.run_id, returned.run_id)
+
+
+def test_two_re_entries_inside_one_batch_produce_only_the_first_new_event(tmp_path):
+    """Both cycles are appended before a single sync ever runs."""
+    connection, identity, ids = fixture(tmp_path)
+
+    def store(first):
+        return store_run(
+            connection,
+            identity.profile_id,
+            {ids[0]: first, ids[1]: excluded(), ids[2]: excluded()},
+        )
+
+    first_out = store(excluded(priority=LOW))
+    planted = sync_notification_policy(connection, identity.profile_id)
+    first_in = store(included())
+    # Excluded again, but a run of its own rather than the baseline reused.
+    second_out = store(excluded(priority=MEDIUM))
+    second_in = store(included(bucket=PortfolioBucket.SAFE, priority=HIGH))
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert planted.status is NotificationSyncStatus.BASELINE_INITIALIZED
+    assert result.processed_run_ids == (
+        first_in.run_id,
+        second_out.run_id,
+        second_in.run_id,
+    )
+    assert {run.created for run in (first_in, second_out, second_in)} == {True}
+    assert (result.event_count, result.outbox_count) == (1, 1)
+    assert announced(connection) == [("NEW_ACTIONABLE_OPPORTUNITY", ids[0])]
+    assert events(connection)[0][2:4] == (first_out.run_id, first_in.run_id)
+    assert len(new_actionable_rows(connection, ids[0])) == 1
+    assert result.last_processed_portfolio_run_id == second_in.run_id
+    assert result.highest_seen_portfolio_run_id == second_in.run_id
+
+
+def test_each_opportunity_keeps_its_own_single_new_event(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    baseline(connection, identity, {ids[0]: excluded(), ids[1]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included(), ids[1]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included(), ids[1]: included()})
+    store_run(connection, identity.profile_id, {ids[0]: excluded(), ids[1]: included()})
+    store_run(
+        connection,
+        identity.profile_id,
+        {ids[0]: included(bucket=PortfolioBucket.SAFE), ids[1]: included()},
+    )
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert (result.event_count, result.outbox_count) == (2, 2)
+    assert announced(connection) == [
+        ("NEW_ACTIONABLE_OPPORTUNITY", ids[0]),
+        ("NEW_ACTIONABLE_OPPORTUNITY", ids[1]),
+    ]
+    assert len(new_actionable_rows(connection, ids[0])) == 1
+    assert len(new_actionable_rows(connection, ids[1])) == 1
+
+
+def test_an_already_announced_opportunity_can_still_escalate_later(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    baseline(connection, identity, {ids[0]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=MEDIUM)})
+    sync_notification_policy(connection, identity.profile_id)
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=URGENT)})
+    escalation = sync_notification_policy(connection, identity.profile_id)
+
+    assert (escalation.event_count, escalation.outbox_count) == (1, 1)
+    assert announced(connection) == [
+        ("NEW_ACTIONABLE_OPPORTUNITY", ids[0]),
+        ("ATTENTION_ESCALATED", ids[0]),
+    ]
+    assert len(new_actionable_rows(connection, ids[0])) == 1
+
+
+def test_a_second_new_event_for_one_opportunity_is_refused_by_the_database(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    baseline(connection, identity, {ids[0]: excluded(), ids[1]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included(), ids[1]: excluded()})
+    sync_notification_policy(connection, identity.profile_id)
+    stored = connection.execute(
+        """SELECT profile_id,event_type,opportunity_id,previous_portfolio_run_id,
+        portfolio_run_id,policy_version FROM notification_events"""
+    ).fetchone()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            """INSERT INTO notification_events
+            (profile_id,event_type,opportunity_id,previous_portfolio_run_id,
+             portfolio_run_id,policy_version,event_fingerprint,payload_json)
+            VALUES (?,?,?,?,?,?,?,?)""",
+            (*stored, "e" * 64, '{"a":1}'),
+        )
+    connection.rollback()
+
+    # The same guard does not stand in the way of a second opportunity.
+    connection.execute(
+        """INSERT INTO notification_events
+        (profile_id,event_type,opportunity_id,previous_portfolio_run_id,
+         portfolio_run_id,policy_version,event_fingerprint,payload_json)
+        VALUES (?,?,?,?,?,?,?,?)""",
+        (stored[0], stored[1], ids[1], *stored[3:], "e" * 64, '{"a":1}'),
+    )
+    connection.rollback()
+    assert len(new_actionable_rows(connection)) == 1
+
+
+def test_suppressing_a_repeat_still_leaves_the_next_sync_a_byte_noop(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    baseline(connection, identity, {ids[0]: excluded()})
+    store_run(connection, identity.profile_id, {ids[0]: included()})
+    sync_notification_policy(connection, identity.profile_id)
+    store_run(connection, identity.profile_id, {ids[0]: excluded()})
+    sync_notification_policy(connection, identity.profile_id)
+    repeat = store_run(
+        connection,
+        identity.profile_id,
+        {ids[0]: included(bucket=PortfolioBucket.AMBITIOUS, priority=HIGH)},
+    )
+    suppressed = sync_notification_policy(connection, identity.profile_id)
+    dump = tuple(connection.iterdump())
+    idle = sync_notification_policy(connection, identity.profile_id)
+
+    assert (suppressed.event_count, suppressed.outbox_count) == (0, 0)
+    assert suppressed.last_processed_portfolio_run_id == repeat.run_id
+    assert suppressed.highest_seen_portfolio_run_id == repeat.run_id
+    assert idle.status is NotificationSyncStatus.UP_TO_DATE
+    assert idle.state_changed is False
+    assert tuple(connection.iterdump()) == dump
