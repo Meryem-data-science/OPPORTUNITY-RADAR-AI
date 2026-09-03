@@ -90,6 +90,8 @@ def test_migration_0018_creates_the_table_with_its_invariants(tmp_path):
             "created_at",
             "updated_at",
             "revoked_at",
+            # 0021's activation boundary, on the same table by then.
+            "notification_event_watermark",
         }
         assert rows(connection) == []
 
@@ -532,16 +534,27 @@ def test_deleting_the_profile_removes_its_subscriptions(tmp_path):
         connection.close()
 
 
-def _apply_up_to_0017(connection, tmp_path) -> list[str]:
-    directory = tmp_path / "migrations-before-0018"
+def migrations_below(tmp_path, name, version) -> tuple:
+    """A migrations directory holding every version strictly below ``version``.
+
+    Copying "everything except one" would put 0021 — which alters
+    ``push_subscriptions`` — in front of the 0018 that creates it. A prefix is
+    the only shape that is also a real upgrade path.
+    """
+    directory = tmp_path / name
     directory.mkdir()
     versions = []
     for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
-        if migration.version != "0018":
+        if migration.version < version:
             (directory / migration.path.name).write_text(
                 migration.path.read_text(encoding="utf-8"), encoding="utf-8"
             )
             versions.append(migration.version)
+    return directory, versions
+
+
+def _apply_up_to_0017(connection, tmp_path) -> list[str]:
+    directory, versions = migrations_below(tmp_path, "migrations-before-0018", "0018")
     assert apply_migrations(connection, directory) == versions
     return versions
 
@@ -562,7 +575,8 @@ def test_0018_upgrades_an_existing_database_without_touching_its_data(tmp_path):
             )
         }
 
-        assert apply_migrations(connection) == ["0018"]
+        through_0018, _ = migrations_below(tmp_path, "migrations-through-0018", "0019")
+        assert apply_migrations(connection, through_0018) == ["0018"]
 
         assert rows(connection) == []
         assert (
@@ -571,13 +585,24 @@ def test_0018_upgrades_an_existing_database_without_touching_its_data(tmp_path):
             ).fetchall()
             == before
         )
-        subscribe_push_subscription(
-            connection,
-            profile_id=owner.profile.id,
-            endpoint=ENDPOINT,
-            p256dh=P256DH,
-            auth=AUTH,
-        )
+
+        def subscribe():
+            return subscribe_push_subscription(
+                connection,
+                profile_id=owner.profile.id,
+                endpoint=ENDPOINT,
+                p256dh=P256DH,
+                auth=AUTH,
+            )
+
+        # 0018 alone can hold a subscription but not the boundary that decides
+        # what it may receive, so opting in is refused until 0021 is applied.
+        with pytest.raises(PushSubscriptionError, match="schema is not ready"):
+            subscribe()
+        assert rows(connection) == []
+
+        assert apply_migrations(connection) == ["0019", "0020", "0021"]
+        subscribe()
         assert len(rows(connection)) == 1
         assert apply_migrations(connection) == []
     finally:

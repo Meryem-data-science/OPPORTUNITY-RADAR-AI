@@ -5,18 +5,14 @@ import sqlite3
 import pytest
 
 from services.collector.database.connection import connect_database
-from services.collector.database.migrations import (
-    DEFAULT_MIGRATIONS_DIRECTORY,
-    apply_migrations,
-    discover_migrations,
-)
+from services.collector.database.migrations import apply_migrations
 from services.digital_twin.repository import ensure_user_profile
 from tests.integration.test_notification_policy_migration_sqlite import (
     event_arguments,
     insert_event,
     two_runs,
 )
-from tests.integration.test_push_subscriptions_sqlite import P256DH
+from tests.integration.test_push_subscriptions_sqlite import P256DH, migrations_below
 
 TABLES = ("notification_delivery_batches", "notification_delivery_targets")
 ENDPOINT = "https://push.example.invalid/subscription/abc"
@@ -25,8 +21,20 @@ LATER = "2099-01-01 00:00:00"
 
 
 def delivery_fixture(tmp_path):
-    """A migrated database holding one outbox row and one live subscription."""
+    """A migrated database holding one outbox row and one live subscription.
+
+    The subscription is registered *before* the event, because since migration
+    0021 that is the only order in which it could ever be a recipient of it:
+    an activation may not carry a watermark that already trails the profile's
+    event stream, and one that activated later is deliberately not told.
+    """
     connection, identity, opportunity_ids, first, second = two_runs(tmp_path)
+    subscription_id = connection.execute(
+        """INSERT INTO push_subscriptions
+        (profile_id,endpoint,p256dh,auth,status,notification_event_watermark)
+        VALUES (?,?,?,?,'ACTIVE',0) RETURNING id""",
+        (identity.profile_id, ENDPOINT, P256DH, AUTH),
+    ).fetchone()[0]
     event_id = insert_event(
         connection,
         event_arguments(identity.profile_id, opportunity_ids[0], first, second),
@@ -35,22 +43,33 @@ def delivery_fixture(tmp_path):
         "INSERT INTO notification_outbox (event_id) VALUES (?) RETURNING id",
         (event_id,),
     ).fetchone()[0]
-    subscription_id = connection.execute(
-        """INSERT INTO push_subscriptions (profile_id,endpoint,p256dh,auth,status)
-        VALUES (?,?,?,?,'ACTIVE') RETURNING id""",
-        (identity.profile_id, ENDPOINT, P256DH, AUTH),
-    ).fetchone()[0]
     connection.commit()
     return connection, identity, outbox_id, subscription_id
 
 
 def batch_arguments(outbox_id, **changes):
-    return {
+    arguments = {
         "outbox_id": outbox_id,
         "status": "PENDING",
         "target_count": 1,
         "completed_at": None,
     } | changes
+    # 0021: an empty batch names its reason, and only an empty one does.
+    return (
+        arguments
+        | {
+            "empty_reason": (
+                "NO_ACTIVE_SUBSCRIPTIONS"
+                if arguments["status"] == "NO_ACTIVE_SUBSCRIPTIONS"
+                else None
+            )
+        }
+        | (
+            {"empty_reason": changes["empty_reason"]}
+            if "empty_reason" in changes
+            else {}
+        )
+    )
 
 
 TOKEN = "0123456789abcdef" * 2
@@ -133,13 +152,7 @@ def test_0020_upgrades_a_0019_database_without_touching_any_of_its_data(tmp_path
     """The upgrade path a real operational database takes: 0019, then 0020."""
     connection = connect_database(tmp_path / "upgrade.db")
     try:
-        directory = tmp_path / "migrations-before-0020"
-        directory.mkdir()
-        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
-            if migration.version != "0020":
-                (directory / migration.path.name).write_text(
-                    migration.path.read_text(encoding="utf-8"), encoding="utf-8"
-                )
+        directory, _ = migrations_below(tmp_path, "migrations-before-0020", "0020")
         applied = apply_migrations(connection, directory)
         assert "0020" not in applied and applied[-1] == "0019"
         identity = ensure_user_profile(connection, "delivery-upgrade@example.invalid")
@@ -163,7 +176,8 @@ def test_0020_upgrades_a_0019_database_without_touching_any_of_its_data(tmp_path
             "SELECT * FROM notification_policy_state ORDER BY profile_id"
         ).fetchall()
 
-        assert apply_migrations(connection) == ["0020"]
+        through_0020, _ = migrations_below(tmp_path, "migrations-through-0020", "0021")
+        assert apply_migrations(connection, through_0020) == ["0020"]
 
         assert {
             table: connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()

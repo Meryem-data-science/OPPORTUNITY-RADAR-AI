@@ -9,13 +9,26 @@ batch is a no-op, which is what makes re-running the orchestrator safe.
 
 ``notification_delivery_targets`` is the *snapshot* of who that event goes to.
 The recipients are frozen at the instant the batch is materialized: every
-subscription that was ACTIVE for that profile right then, and no other, ever.
-A subscription registered a minute later is a new device that never saw this
-movement and must not be told about it retroactively, and a target already
-written is never replaced, re-pointed, or added to. A profile with no active
-subscription at that instant gets a batch that is terminal on the spot —
+subscription that was ACTIVE for that profile right then **and already active
+when the event happened**, and no other, ever. A subscription registered a
+minute later is a new device that never saw this movement and must not be told
+about it retroactively, and a target already written is never replaced,
+re-pointed, or added to.
+
+Freezing alone is not enough for that promise, because materialization can run
+long after the event: a device that opted in in between would be ACTIVE at the
+instant of the snapshot and would still be receiving history. So eligibility is
+decided against the subscription's own activation watermark (migration 0021)
+rather than against the moment the snapshot is taken — a subscription is a
+recipient of an event only when ``notification_events.id`` is strictly above
+the watermark it recorded when it became active. The comparison is between two
+ids in one transaction, so it holds however late materialization runs.
+
+A batch with no recipient at that instant is terminal on the spot —
 ``NO_ACTIVE_SUBSCRIPTIONS`` — rather than a batch that waits forever for a
-recipient it will never acquire.
+recipient it will never acquire, and ``empty_reason`` records which of the two
+emptinesses it was: nobody was subscribed at all, or everybody who was
+subscribed activated too late for this event.
 
 Sending is a claim, not a read. A drain takes a target by moving it to
 ``IN_FLIGHT`` under a token of its own, inside one ``BEGIN IMMEDIATE``, and
@@ -63,13 +76,14 @@ from enum import StrEnum
 from services.collector.logging_config import get_logger
 
 from .push_subscriptions import (
+    WATERMARK_COLUMN,
     PushSubscriptionStatus,
     revoke_push_subscription_by_id,
 )
 
 LOGGER = get_logger("services.collector.notifications.delivery")
 
-REQUIRED_MIGRATION_VERSION = "0020"
+REQUIRED_MIGRATION_VERSION = "0021"
 
 #: How many times one target is ever attempted, in total. The fifth failure of
 #: a retryable error is the last: there is no sixth.
@@ -94,6 +108,11 @@ TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 _TABLES = frozenset({"notification_delivery_batches", "notification_delivery_targets"})
 
+#: The column 0021 adds to the batch table, checked by the preflight so a
+#: database that stops at 0020 is refused by name instead of by "no such
+#: column" from the middle of a materialization.
+BATCH_EMPTY_REASON_COLUMN = "empty_reason"
+
 
 class NotificationDeliveryError(RuntimeError):
     """Raised when a delivery cannot be materialized or recorded safely."""
@@ -103,6 +122,22 @@ class DeliveryBatchStatus(StrEnum):
     PENDING = "PENDING"
     NO_ACTIVE_SUBSCRIPTIONS = "NO_ACTIVE_SUBSCRIPTIONS"
     COMPLETED = "COMPLETED"
+
+
+class DeliveryBatchEmptyReason(StrEnum):
+    """Why a batch was born with no recipient, and terminal because of it.
+
+    ``NO_ACTIVE_SUBSCRIPTIONS`` is 0020's original case: the profile had no
+    active subscription at all. ``NO_ELIGIBLE_SUBSCRIPTIONS`` is the one 5.3C2
+    introduces: there were active subscriptions, and every one of them became
+    active at or after this event, so none of them may be told about it. The
+    two are very different operationally — one is a user with no device, the
+    other a user whose device is working exactly as intended — and an audit
+    that could not tell them apart would read the second as a fault.
+    """
+
+    NO_ACTIVE_SUBSCRIPTIONS = "NO_ACTIVE_SUBSCRIPTIONS"
+    NO_ELIGIBLE_SUBSCRIPTIONS = "NO_ELIGIBLE_SUBSCRIPTIONS"
 
 
 class DeliveryTargetStatus(StrEnum):
@@ -187,12 +222,19 @@ class ClaimedTarget:
 
 @dataclass(frozen=True)
 class MaterializationResult:
-    """What one materialization pass created, described without re-reading it."""
+    """What one materialization pass created, described without re-reading it.
+
+    ``ineligible_batches`` is the subset of ``empty_batches`` that had active
+    subscriptions and excluded every one of them for activating too late. It
+    is counted separately because it is the expected shape of a first opt-in,
+    not a deployment with nobody subscribed.
+    """
 
     batch_ids: tuple[int, ...]
     created_batches: int
     created_targets: int
     empty_batches: int
+    ineligible_batches: int
 
 
 @dataclass(frozen=True)
@@ -273,7 +315,14 @@ def transport_failure() -> DeliveryOutcome:
 
 
 def preflight(connection: sqlite3.Connection) -> None:
-    """Refuse to touch delivery persistence that has not been migrated."""
+    """Refuse to touch delivery persistence that has not been migrated.
+
+    Delivery now decides eligibility from two columns 0021 adds, so both are
+    checked as well as the recorded version. A 0020 database is a database
+    whose subscriptions carry no activation boundary at all: reading it with
+    this code would either crash halfway through a materialization or, worse,
+    have to guess a boundary. It is refused whole instead.
+    """
     try:
         migrated = connection.execute(
             "SELECT 1 FROM schema_migrations WHERE version=?",
@@ -286,12 +335,27 @@ def preflight(connection: sqlite3.Connection) -> None:
                 " ('notification_delivery_batches','notification_delivery_targets')"
             )
         }
+        subscription_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(push_subscriptions)")
+        }
+        batch_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(notification_delivery_batches)"
+            )
+        }
     except sqlite3.Error as error:
         raise NotificationDeliveryError(
             "notification delivery schema is not ready;"
             f" migrate through {REQUIRED_MIGRATION_VERSION} before delivery"
         ) from error
-    if migrated is None or tables != _TABLES:
+    if (
+        migrated is None
+        or tables != _TABLES
+        or WATERMARK_COLUMN not in subscription_columns
+        or BATCH_EMPTY_REASON_COLUMN not in batch_columns
+    ):
         raise NotificationDeliveryError(
             "notification delivery schema is not ready;"
             f" migrate through {REQUIRED_MIGRATION_VERSION} before delivery"
@@ -333,7 +397,8 @@ def materialize_delivery_batches(
     try:
         preflight(connection)
         pending = connection.execute(
-            f"""SELECT notification_outbox.id,notification_events.profile_id
+            f"""SELECT notification_outbox.id,notification_events.profile_id,
+            notification_events.id
             FROM notification_outbox
             JOIN notification_events
               ON notification_events.id=notification_outbox.event_id
@@ -344,30 +409,56 @@ def materialize_delivery_batches(
             parameters,
         ).fetchall()
         batch_ids: list[int] = []
-        created_targets = empty_batches = 0
-        for outbox_id, event_profile_id in pending:
-            outbox_id, event_profile_id = int(outbox_id), int(event_profile_id)
-            # The snapshot: exactly the subscriptions active at this instant.
+        created_targets = empty_batches = ineligible_batches = 0
+        for outbox_id, event_profile_id, event_id in pending:
+            outbox_id, event_profile_id, event_id = (
+                int(outbox_id),
+                int(event_profile_id),
+                int(event_id),
+            )
+            # The snapshot: the subscriptions active at this instant that were
+            # already active when this event happened. Strictly above the
+            # watermark — a subscription whose watermark *is* this event id
+            # activated after it and must never learn of it.
             subscription_ids = [
                 int(row[0])
                 for row in connection.execute(
-                    "SELECT id FROM push_subscriptions WHERE profile_id=?"
-                    " AND status=? ORDER BY id ASC",
-                    (event_profile_id, PushSubscriptionStatus.ACTIVE.value),
+                    f"""SELECT id FROM push_subscriptions WHERE profile_id=?
+                    AND status=? AND {WATERMARK_COLUMN}<? ORDER BY id ASC""",
+                    (event_profile_id, PushSubscriptionStatus.ACTIVE.value, event_id),
                 )
             ]
             if subscription_ids:
                 status, completed_at = DeliveryBatchStatus.PENDING.value, None
+                empty_reason: str | None = None
             else:
                 status, completed_at = (
                     DeliveryBatchStatus.NO_ACTIVE_SUBSCRIPTIONS.value,
                     moment,
                 )
+                # Distinguish "nobody is subscribed" from "everybody subscribed
+                # after this happened": one is a user without a device, the
+                # other is the boundary working exactly as designed.
+                active = connection.execute(
+                    "SELECT COUNT(*) FROM push_subscriptions WHERE profile_id=?"
+                    " AND status=?",
+                    (event_profile_id, PushSubscriptionStatus.ACTIVE.value),
+                ).fetchone()[0]
+                if active:
+                    empty_reason = (
+                        DeliveryBatchEmptyReason.NO_ELIGIBLE_SUBSCRIPTIONS.value
+                    )
+                    ineligible_batches += 1
+                else:
+                    empty_reason = (
+                        DeliveryBatchEmptyReason.NO_ACTIVE_SUBSCRIPTIONS.value
+                    )
                 empty_batches += 1
             inserted = connection.execute(
                 """INSERT INTO notification_delivery_batches
-                (outbox_id,status,target_count,materialized_at,updated_at,completed_at)
-                VALUES (?,?,?,?,?,?) RETURNING id""",
+                (outbox_id,status,target_count,materialized_at,updated_at,
+                 completed_at,empty_reason)
+                VALUES (?,?,?,?,?,?,?) RETURNING id""",
                 (
                     outbox_id,
                     status,
@@ -375,6 +466,7 @@ def materialize_delivery_batches(
                     moment,
                     moment,
                     completed_at,
+                    empty_reason,
                 ),
             ).fetchone()
             if inserted is None:
@@ -410,10 +502,15 @@ def materialize_delivery_batches(
                 "batch_count": len(batch_ids),
                 "target_count": created_targets,
                 "empty_batch_count": empty_batches,
+                "ineligible_batch_count": ineligible_batches,
             },
         )
     return MaterializationResult(
-        tuple(batch_ids), len(batch_ids), created_targets, empty_batches
+        tuple(batch_ids),
+        len(batch_ids),
+        created_targets,
+        empty_batches,
+        ineligible_batches,
     )
 
 
@@ -922,6 +1019,13 @@ class DeliveryStatusReport:
     answer without guessing: what has not been materialized yet, what is due,
     what a drain currently holds a claim on, what is waiting on a retry, what
     is done, what had nobody to go to, and what will never be delivered.
+
+    The two empty-batch counters are disjoint and together are every empty
+    batch. ``batches_without_subscriptions`` is a profile with no device;
+    ``batches_without_eligible_subscriptions`` is a profile whose devices all
+    opted in after the event, which is the boundary doing its job rather than a
+    delivery that went missing. Migration 0021 gave every batch that predates
+    it the only reason it could have had, so nothing falls between the two.
     """
 
     profile_id: int | None
@@ -929,6 +1033,7 @@ class DeliveryStatusReport:
     batches_pending: int
     batches_completed: int
     batches_without_subscriptions: int
+    batches_without_eligible_subscriptions: int
     targets_due: int
     targets_scheduled: int
     targets_in_flight: int
@@ -963,15 +1068,17 @@ def read_delivery_status(
     ).fetchone()[0]
     batches = dict(
         connection.execute(
-            f"""SELECT notification_delivery_batches.status,COUNT(*)
+            f"""SELECT notification_delivery_batches.status
+            || CASE WHEN notification_delivery_batches.empty_reason=? THEN ':INELIGIBLE'
+               ELSE '' END,COUNT(*)
             FROM notification_delivery_batches
             JOIN notification_outbox
               ON notification_outbox.id=notification_delivery_batches.outbox_id
             JOIN notification_events
               ON notification_events.id=notification_outbox.event_id
             WHERE 1=1{clause}
-            GROUP BY notification_delivery_batches.status""",
-            parameters,
+            GROUP BY 1""",
+            (DeliveryBatchEmptyReason.NO_ELIGIBLE_SUBSCRIPTIONS.value, *parameters),
         ).fetchall()
     )
     targets = dict(
@@ -998,6 +1105,11 @@ def read_delivery_status(
         int(batches.get(DeliveryBatchStatus.PENDING.value, 0)),
         int(batches.get(DeliveryBatchStatus.COMPLETED.value, 0)),
         int(batches.get(DeliveryBatchStatus.NO_ACTIVE_SUBSCRIPTIONS.value, 0)),
+        int(
+            batches.get(
+                f"{DeliveryBatchStatus.NO_ACTIVE_SUBSCRIPTIONS.value}:INELIGIBLE", 0
+            )
+        ),
         int(targets.get(DeliveryTargetStatus.PENDING.value, 0)),
         int(targets.get(f"{DeliveryTargetStatus.PENDING.value}:SCHEDULED", 0)),
         int(targets.get(DeliveryTargetStatus.IN_FLIGHT.value, 0)),

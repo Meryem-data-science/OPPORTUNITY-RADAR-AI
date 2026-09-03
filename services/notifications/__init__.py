@@ -5,7 +5,10 @@ adds the notification policy: which movements of the audited Portfolio deserve
 a notification, the append-only events those movements produce, and the outbox
 a later phase will drain. Phase 5.3C1 drains it: it freezes the recipients of
 each outbox row, sends the payload the event already describes over Web Push,
-and records every attempt, retry, and revocation.
+and records every attempt, retry, and revocation. Phase 5.3C2 draws the line
+that makes any of that safe to switch on: every subscription records the
+highest event id its profile had when it became active, and delivery targets
+it only for events strictly above that, so opting in never replays history.
 """
 
 from services.notifications.delivery import (
@@ -26,6 +29,7 @@ from services.notifications.delivery_persistence import (
     RETRY_BACKOFF_SECONDS,
     AttemptResult,
     ClaimedTarget,
+    DeliveryBatchEmptyReason,
     DeliveryBatchStatus,
     DeliveryErrorCategory,
     DeliveryOutcome,
@@ -82,6 +86,7 @@ from services.notifications.push_subscriptions import (
     PushSubscriptionStatus,
     SubscribeResult,
     UnsubscribeResult,
+    current_notification_event_watermark,
     decode_base64url,
     revoke_push_subscription_by_id,
     subscribe_push_subscription,
@@ -108,6 +113,7 @@ from services.notifications.web_push import (
     build_web_push_request,
     encrypt_push_message,
     load_vapid_configuration,
+    valid_vapid_subject,
 )
 from services.notifications.sync import (
     NotificationSyncError,
@@ -123,6 +129,7 @@ __all__ = [
     "ClaimedTarget",
     "DEFAULT_TTL_SECONDS",
     "DELIVERY_PAYLOAD_VERSION",
+    "DeliveryBatchEmptyReason",
     "DeliveryBatchStatus",
     "DeliveryDrainResult",
     "DeliveryErrorCategory",
@@ -179,6 +186,7 @@ __all__ = [
     "claim_next_due_target",
     "classify_status_code",
     "close_targets_of_revoked_subscriptions",
+    "current_notification_event_watermark",
     "decode_base64url",
     "drain_notification_deliveries",
     "encode_push_payload",
@@ -204,4 +212,5 @@ __all__ = [
     "unsubscribe_push_subscription",
     "valid_auth",
     "valid_p256dh",
+    "valid_vapid_subject",
 ]

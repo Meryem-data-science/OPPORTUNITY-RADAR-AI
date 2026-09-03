@@ -293,6 +293,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0018_push_subscriptions.sql",
         "0019_notification_policy_outbox.sql",
         "0020_notification_delivery.sql",
+        "0021_push_subscription_activation_watermark.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",

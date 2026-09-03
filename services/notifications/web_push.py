@@ -217,6 +217,20 @@ def _subject(value: str) -> str:
     raise WebPushConfigurationError(PUBLIC_CONFIGURATION_ERROR)
 
 
+def valid_vapid_subject(value: object) -> bool:
+    """Whether RFC 8292 would accept this contact, without raising.
+
+    The rule already lives in :func:`_subject`; this exposes the answer as a
+    boolean so an operator command can refuse a subject before it generates
+    anything, rather than after.
+    """
+    try:
+        _subject(value)  # type: ignore[arg-type]
+    except WebPushConfigurationError:
+        return False
+    return True
+
+
 def build_vapid_configuration(
     *, public_key: str, private_key: str, subject: str
 ) -> VapidConfiguration:
