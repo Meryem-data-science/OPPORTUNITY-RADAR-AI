@@ -152,6 +152,23 @@ class DigestMaterializationResult:
 
 
 @dataclass(frozen=True)
+class DigestDecisionPreview:
+    """What a materialization pass *would* decide, having written nothing.
+
+    This is the shape both read-only commands report: the 5.4A materialization
+    dry run and the 5.4B delivery dry run ask the same question of the same
+    policy, so they ask it through one function rather than two copies that
+    could drift apart.
+    """
+
+    status: DigestMaterializationStatus
+    item_count: int
+    content_fingerprint: str | None
+    outbox_id: int | None
+    portfolio_run_id: int | None
+
+
+@dataclass(frozen=True)
 class DigestOutboxRecord:
     """One persisted digest row, described without its rendered bodies."""
 
