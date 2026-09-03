@@ -22,6 +22,10 @@ from tests.integration.test_notification_policy_migration_sqlite import (
     insert_event,
     two_runs,
 )
+from tests.integration.test_portfolio_persistence_sqlite import (
+    persist,
+    portfolio_fixture,
+)
 from tests.integration.test_push_activation_watermark_migration_sqlite import (
     insert_subscription,
 )
@@ -151,13 +155,138 @@ def test_0022_does_not_alter_any_earlier_migration_file():
     assert versions.count("0022") == 1
 
 
-def migrated(tmp_path, name="digest-constraints.db"):
-    connection = connect_database(tmp_path / name)
-    apply_migrations(connection)
-    identity = ensure_user_profile(connection, "owner@example.invalid")
-    assert identity.profile_id == ROW["profile_id"]
-    connection.commit()
+def migrated(tmp_path):
+    """A migrated database carrying the Portfolio run 0022's provenance names.
+
+    ``portfolio_run_id`` is a real reference now, so the constraint fixture
+    needs a real audited run for this profile rather than the number 1.
+    """
+    connection, identity, _, arguments = portfolio_fixture(tmp_path, 1)
+    stored = persist(connection, arguments)
+    assert (identity.profile_id, stored.run_id) == (
+        ROW["profile_id"],
+        ROW["portfolio_run_id"],
+    )
     return connection
+
+
+def foreign_run_for_another_profile(connection):
+    """Copy the stored run onto a second profile and return the pair.
+
+    A whole second Portfolio pipeline is not what this proves; one genuine
+    ``portfolio_runs`` row owned by somebody else is, and that is what the
+    composite foreign key has to refuse.
+    """
+    connection.commit()
+    other = ensure_user_profile(connection, "second-owner@example.invalid")
+    assert other.profile_id != ROW["profile_id"]
+    run_id = connection.execute("SELECT MAX(id) FROM portfolio_runs").fetchone()[0] + 1
+    connection.execute(
+        """INSERT INTO portfolio_runs SELECT ?,?,priority_run_id,matching_run_id,
+        persistence_version,input_assembly_version,portfolio_engine_version,
+        portfolio_rules_version,priority_run_fingerprint,matching_run_fingerprint,?,
+        assessment_count,included_count,excluded_count,safe_count,target_count,
+        ambitious_count,run_payload_json,created_at FROM portfolio_runs WHERE id=?""",
+        (run_id, other.profile_id, "e" * 64, ROW["portfolio_run_id"]),
+    )
+    connection.commit()
+    return other.profile_id, run_id
+
+
+def test_a_digest_names_a_portfolio_run_that_really_exists(tmp_path):
+    connection = migrated(tmp_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_digest(connection, portfolio_run_id=9999)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+def test_a_digest_can_never_claim_another_profiles_portfolio_run(tmp_path):
+    """The pair is checked, not the id: a real run owned by somebody else."""
+    connection = migrated(tmp_path)
+    try:
+        other_profile_id, other_run_id = foreign_run_for_another_profile(connection)
+        assert connection.execute(
+            "SELECT profile_id FROM portfolio_runs WHERE id=?", (other_run_id,)
+        ).fetchone() == (other_profile_id,)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_digest(connection, portfolio_run_id=other_run_id)
+
+        # The very same run *is* legitimate provenance for its own profile.
+        assert (
+            insert_digest(
+                connection,
+                profile_id=other_profile_id,
+                portfolio_run_id=other_run_id,
+            )
+            > 0
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+def test_a_digest_naming_this_profiles_own_run_is_accepted(tmp_path):
+    connection = migrated(tmp_path)
+    try:
+        outbox_id = insert_digest(connection)
+
+        assert outbox_id > 0
+        assert connection.execute(
+            f"SELECT profile_id,portfolio_run_id FROM {TABLE} WHERE id=?", (outbox_id,)
+        ).fetchone() == (ROW["profile_id"], ROW["portfolio_run_id"])
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    finally:
+        connection.close()
+
+
+def test_deleting_the_profile_still_takes_its_whole_digest_history_with_it(tmp_path):
+    """RESTRICT on the run does not strand a profile that is being removed.
+
+    The digest row cascades away with the profile before the run's RESTRICT is
+    ever evaluated, so erasing a person still works and leaves nothing behind.
+    Worth stating outright, because RESTRICT reads as though it would block it.
+    """
+    connection = migrated(tmp_path)
+    try:
+        insert_digest(connection)
+        connection.commit()
+
+        connection.execute("DELETE FROM profiles WHERE id=?", (ROW["profile_id"],))
+        connection.commit()
+
+        assert connection.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM portfolio_runs").fetchone() == (
+            0,
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+def test_the_portfolio_run_behind_a_frozen_digest_cannot_be_deleted(tmp_path):
+    """RESTRICT: the run is the evidence for what the message says."""
+    connection = migrated(tmp_path)
+    try:
+        insert_digest(connection)
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM portfolio_runs WHERE id=?", (ROW["portfolio_run_id"],)
+            )
+        connection.rollback()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM portfolio_runs WHERE id=?",
+            (ROW["portfolio_run_id"],),
+        ).fetchone() == (1,)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
 
 
 def test_one_profile_gets_at_most_one_digest_per_day_and_version(tmp_path):
@@ -244,6 +373,45 @@ def test_a_digest_belongs_to_a_profile_that_exists(tmp_path):
             "next_attempt_at": None,
             "last_error_code": "REFUSED",
         },
+        # ... and its category has to mean what the status means. A row that
+        # says "give up" and "try again" at once is not a state.
+        {
+            "status": "PERMANENT_FAILURE",
+            "next_attempt_at": None,
+            "attempt_count": 2,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_500",
+            "last_error_category": "RETRYABLE",
+        },
+        # A digest still waiting, or in flight, has only ever failed retryably:
+        # a permanent cause makes the row terminal on the spot.
+        {
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_403",
+            "last_error_category": "PERMANENT",
+        },
+        {
+            "status": "IN_FLIGHT",
+            "next_attempt_at": None,
+            "claim_token": "a" * 32,
+            "claimed_at": "2026-09-03 10:00:00",
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_403",
+            "last_error_category": "PERMANENT",
+        },
+        # An error is a code and a category together, on any status.
+        {
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_500",
+        },
+        {
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_category": "RETRYABLE",
+        },
         # Vocabulary the lifecycle does not have.
         {"status": "FAILED", "next_attempt_at": None},
         {"status": "pending"},
@@ -306,6 +474,25 @@ def test_the_schema_rejects_every_inconsistent_operational_state(tmp_path, chang
             "last_attempt_at": "2026-09-03 10:00:00",
             "last_error_code": "HTTP_403",
             "last_error_category": "PERMANENT",
+        },
+        # A digest waiting for its next attempt after a retryable failure.
+        {
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_500",
+            "last_error_category": "RETRYABLE",
+        },
+        # And the same digest claimed again: the claim is for the attempt about
+        # to happen, and the error still describes the previous one.
+        {
+            "status": "IN_FLIGHT",
+            "next_attempt_at": None,
+            "claim_token": "b" * 32,
+            "claimed_at": "2026-09-03 10:05:00",
+            "attempt_count": 1,
+            "last_attempt_at": "2026-09-03 10:00:00",
+            "last_error_code": "HTTP_500",
+            "last_error_category": "RETRYABLE",
         },
     ],
 )

@@ -37,7 +37,9 @@ CREATE TABLE gmail_digest_outbox (
     -- Provenance: which audited Portfolio snapshot this digest was rendered
     -- from. It is recorded, never folded into the content fingerprint, because
     -- a Portfolio run that changes nothing a reader would see must not make
-    -- the same digest look new.
+    -- the same digest look new. The composite foreign key below makes it a
+    -- real reference rather than a number: it must name a run that exists,
+    -- *and* one that belongs to this same profile.
     portfolio_run_id INTEGER NOT NULL CHECK (portfolio_run_id > 0),
     portfolio_run_fingerprint TEXT NOT NULL CHECK (
         length(portfolio_run_fingerprint) = 64
@@ -120,17 +122,38 @@ CREATE TABLE gmail_digest_outbox (
     -- materialized PENDING row carries neither.
     CHECK ((attempt_count = 0 AND last_attempt_at IS NULL)
         OR (attempt_count > 0 AND last_attempt_at IS NOT NULL)),
-    -- A success carries no error, and a terminal failure names one.
+    -- A success carries no error, and every failure's category has to agree
+    -- with the status it sits beside. The two are one statement about the same
+    -- attempt, so a PERMANENT_FAILURE recording a RETRYABLE cause — a row that
+    -- says "give up" and "try again" at once — is not a state this table can
+    -- hold, and neither is a PENDING row whose last attempt was permanent.
+    -- A digest still waiting or in flight has only ever failed retryably, by
+    -- definition: the moment a cause is permanent the row is terminal.
+    --
+    -- The category is compared with `IS`, not `=`. A CHECK is satisfied by
+    -- NULL as well as by true, so `last_error_category = 'PERMANENT'` against
+    -- a NULL category evaluates to NULL and would let a categoryless failure
+    -- straight through. `IS` returns false there, which is what this means.
     CHECK ((status = 'SENT' AND last_error_code IS NULL AND last_error_category IS NULL)
         OR (status IN ('PENDING', 'IN_FLIGHT')
-            AND ((last_error_code IS NULL) = (last_error_category IS NULL)))
+            AND ((last_error_code IS NULL AND last_error_category IS NULL)
+                OR (last_error_code IS NOT NULL AND last_error_category IS 'RETRYABLE')))
         OR (status = 'PERMANENT_FAILURE'
-            AND last_error_code IS NOT NULL AND last_error_category IS NOT NULL)),
+            AND last_error_code IS NOT NULL AND last_error_category IS 'PERMANENT')),
     -- At most one digest per profile, per local day, per digest version. This
     -- is the anti-spam invariant the database itself holds: two materializers
     -- racing on the same day cannot both win, whatever they each decided.
     UNIQUE (profile_id, digest_date, digest_version),
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    -- The provenance is checked against the pair, not the id alone: 0017
+    -- already carries UNIQUE (id, profile_id) on portfolio_runs, so this
+    -- refuses both a run that does not exist and one that belongs to another
+    -- profile — a digest can never claim to summarize somebody else's
+    -- Portfolio. RESTRICT rather than CASCADE, because the run is the evidence
+    -- for what this frozen message says: deleting it would leave a message
+    -- nobody could account for, so the deletion is refused instead.
+    FOREIGN KEY (portfolio_run_id, profile_id)
+        REFERENCES portfolio_runs(id, profile_id) ON DELETE RESTRICT
 );
 
 -- The daily decision: does this profile already have a digest for this day?

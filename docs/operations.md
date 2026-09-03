@@ -1427,6 +1427,21 @@ provenance. So a Portfolio run that changed only `EXCLUDED` opportunities has a
 new run fingerprint and the same content fingerprint, and cannot trigger a new
 email.
 
+That provenance is a real reference, not a recorded number: `(portfolio_run_id,
+profile_id)` is a composite foreign key onto `portfolio_runs(id, profile_id)`,
+which 0017 already keys, so a digest can neither name a run that does not exist
+nor claim to summarize another profile's Portfolio. It is `ON DELETE RESTRICT`,
+because the run is the evidence for what the frozen message says — deleting the
+profile still removes both, but deleting the run alone out from under a digest
+is refused.
+
+The status and the error category are one statement, and the schema keeps them
+agreeing: `SENT` carries no error at all; `PERMANENT_FAILURE` names a code and
+the category `PERMANENT`; a `PENDING` or `IN_FLIGHT` digest either carries no
+error or carries a code with the category `RETRYABLE`, because a permanent
+cause makes the row terminal on the spot. A row saying "give up" and "try
+again" at once is not a state this table can hold.
+
 ### The day is chosen, never inherited
 
 `--timezone` is required and must be an IANA name resolved through `zoneinfo`.
