@@ -1186,6 +1186,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0017_portfolio_persistence.sql",
         "0018_push_subscriptions.sql",
         "0019_notification_policy_outbox.sql",
+        "0020_notification_delivery.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications

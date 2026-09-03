@@ -226,6 +226,47 @@ def subscribe_push_subscription(
     return result
 
 
+def revoke_push_subscription_by_id(
+    connection: sqlite3.Connection, subscription_id: int
+) -> bool:
+    """Revoke one stored subscription by id, inside the caller's transaction.
+
+    Delivery learns an endpoint is gone from the push service itself, not from
+    the browser, and it learns it while holding a short transaction of its own.
+    So the transition lives here, next to the browser-driven one, rather than
+    being re-implemented against the same columns somewhere else: an already
+    revoked row is left exactly as it is, and the ``REVOKED``/``revoked_at``
+    invariant migration 0018 enforces is written in one place.
+    """
+    _positive_int(subscription_id, "subscription_id")
+    if not connection.in_transaction:
+        raise PushSubscriptionError(
+            "revoke_push_subscription_by_id requires an active transaction"
+        )
+    row = connection.execute(
+        "SELECT status FROM push_subscriptions WHERE id = ?", (subscription_id,)
+    ).fetchone()
+    if row is None:
+        raise PushSubscriptionError("push subscription does not exist")
+    if row[0] != PushSubscriptionStatus.ACTIVE.value:
+        return False
+    connection.execute(
+        """UPDATE push_subscriptions
+           SET status = 'REVOKED', revoked_at = CURRENT_TIMESTAMP,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?""",
+        (subscription_id,),
+    )
+    LOGGER.info(
+        "Push subscription revoked by delivery.",
+        extra={
+            "event": "push_subscription_revoked_by_delivery",
+            "subscription_id": subscription_id,
+        },
+    )
+    return True
+
+
 def unsubscribe_push_subscription(
     connection: sqlite3.Connection,
     *,

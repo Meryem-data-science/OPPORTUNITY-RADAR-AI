@@ -19,6 +19,7 @@ from services.notifications import (
     PushSubscriptionError,
     PushSubscriptionOwnershipError,
     decode_base64url,
+    revoke_push_subscription_by_id,
     subscribe_push_subscription,
     unsubscribe_push_subscription,
     valid_auth,
@@ -545,5 +546,60 @@ def test_0018_upgrades_an_existing_database_without_touching_its_data(tmp_path):
         )
         assert len(rows(connection)) == 1
         assert apply_migrations(connection) == []
+    finally:
+        connection.close()
+
+
+def test_revoking_by_id_holds_the_same_invariants_as_revoking_by_endpoint(tmp_path):
+    """Delivery revokes by id, and must land the row exactly where 5.3A does."""
+    connection, profile_id, _ = push_fixture(tmp_path)
+    try:
+        subscription_id = subscribe_push_subscription(
+            connection,
+            profile_id=profile_id,
+            endpoint=ENDPOINT,
+            p256dh=P256DH,
+            auth=AUTH,
+        ).subscription_id
+        other_id = subscribe_push_subscription(
+            connection,
+            profile_id=profile_id,
+            endpoint=OTHER_ENDPOINT,
+            p256dh=P256DH,
+            auth=AUTH,
+        ).subscription_id
+        unsubscribe_push_subscription(
+            connection, profile_id=profile_id, endpoint=OTHER_ENDPOINT
+        )
+        by_endpoint = connection.execute(
+            "SELECT status, revoked_at IS NOT NULL FROM push_subscriptions WHERE id = ?",
+            (other_id,),
+        ).fetchone()
+
+        # It is transaction-neutral by design: delivery owns the transaction.
+        with pytest.raises(PushSubscriptionError, match="active transaction"):
+            revoke_push_subscription_by_id(connection, subscription_id)
+
+        connection.execute("BEGIN IMMEDIATE")
+        assert revoke_push_subscription_by_id(connection, subscription_id) is True
+        # Revoking twice is a no-op, exactly like unsubscribing twice.
+        assert revoke_push_subscription_by_id(connection, subscription_id) is False
+        connection.execute("COMMIT")
+
+        assert (
+            connection.execute(
+                "SELECT status, revoked_at IS NOT NULL FROM push_subscriptions"
+                " WHERE id = ?",
+                (subscription_id,),
+            ).fetchone()
+            == by_endpoint
+            == ("REVOKED", 1)
+        )
+
+        connection.execute("BEGIN IMMEDIATE")
+        for unknown in (9999, 0, -1, True):
+            with pytest.raises(PushSubscriptionError):
+                revoke_push_subscription_by_id(connection, unknown)
+        connection.execute("ROLLBACK")
     finally:
         connection.close()

@@ -98,7 +98,7 @@ def test_0019_upgrades_an_existing_database_without_touching_its_data(tmp_path):
         directory = tmp_path / "migrations-before-0019"
         directory.mkdir()
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
-            if migration.version != "0019":
+            if migration.version < "0019":
                 (directory / migration.path.name).write_text(
                     migration.path.read_text(encoding="utf-8"), encoding="utf-8"
                 )
@@ -109,7 +109,7 @@ def test_0019_upgrades_an_existing_database_without_touching_its_data(tmp_path):
             "SELECT id, user_id FROM profiles ORDER BY id"
         ).fetchall()
 
-        assert apply_migrations(connection) == ["0019"]
+        assert apply_migrations(connection) == ["0019", "0020"]
 
         assert (
             connection.execute(

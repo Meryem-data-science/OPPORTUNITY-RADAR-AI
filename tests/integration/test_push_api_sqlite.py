@@ -300,10 +300,11 @@ def test_a_database_without_migration_0018_is_unavailable(tmp_path, monkeypatch)
 
 
 def test_the_push_surface_sends_no_notification(tmp_path, monkeypatch):
-    """The push surface stores an opt-in and nothing else: no event, no outbox.
+    """The push surface stores an opt-in and nothing else: no event, no delivery.
 
-    Phase 5.3B owns the notification policy tables. Opting in and out must not
-    put anything in them, and must not deliver anything either.
+    Phase 5.3B owns the notification policy tables and Phase 5.3C1 the delivery
+    ones. Opting in and out must not put anything in either set, and must not
+    deliver anything either.
     """
     connection, _, _, _ = prepared(tmp_path, monkeypatch)
     try:
@@ -318,6 +319,8 @@ def test_the_push_surface_sends_no_notification(tmp_path, monkeypatch):
             if "notification" in row[0] or "outbox" in row[0]
         )
         assert notification_tables == [
+            "notification_delivery_batches",
+            "notification_delivery_targets",
             "notification_events",
             "notification_outbox",
             "notification_policy_state",
