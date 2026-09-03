@@ -291,6 +291,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0016_priority_persistence.sql",
         "0017_portfolio_persistence.sql",
         "0018_push_subscriptions.sql",
+        "0019_notification_policy_outbox.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",
