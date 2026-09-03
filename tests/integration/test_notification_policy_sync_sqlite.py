@@ -110,7 +110,8 @@ def announced(connection):
 def state(connection):
     return connection.execute(
         """SELECT profile_id,baseline_portfolio_run_id,last_processed_portfolio_run_id,
-        policy_version FROM notification_policy_state ORDER BY profile_id"""
+        highest_seen_portfolio_run_id,policy_version FROM notification_policy_state
+        ORDER BY profile_id"""
     ).fetchall()
 
 
@@ -189,6 +190,7 @@ def test_first_activation_makes_the_current_snapshot_a_silent_baseline(tmp_path)
     assert (result.event_count, result.outbox_count) == (0, 0)
     assert result.baseline_portfolio_run_id == first.run_id
     assert result.last_processed_portfolio_run_id == first.run_id
+    assert result.highest_seen_portfolio_run_id == first.run_id
     assert result.processed_run_ids == () and result.state_changed is True
     assert result.policy_version == NOTIFICATION_POLICY_VERSION
     # Nothing already in the Portfolio is announced: no backfill, no spam.
@@ -198,6 +200,7 @@ def test_first_activation_makes_the_current_snapshot_a_silent_baseline(tmp_path)
         [
             (
                 identity.profile_id,
+                first.run_id,
                 first.run_id,
                 first.run_id,
                 NOTIFICATION_POLICY_VERSION,
@@ -469,6 +472,7 @@ def test_a_corrupt_run_inside_the_chain_rolls_back_and_leaves_the_cursor(tmp_pat
                     identity.profile_id,
                     first.run_id,
                     first.run_id,
+                    first.run_id,
                     NOTIFICATION_POLICY_VERSION,
                 )
             ],
@@ -496,7 +500,13 @@ def test_a_corrupt_current_portfolio_state_is_refused_before_anything_is_derived
 
     assert snapshot(connection) == before
     assert before[2] == [
-        (identity.profile_id, first.run_id, first.run_id, NOTIFICATION_POLICY_VERSION)
+        (
+            identity.profile_id,
+            first.run_id,
+            first.run_id,
+            first.run_id,
+            NOTIFICATION_POLICY_VERSION,
+        )
     ]
 
 
@@ -644,3 +654,156 @@ def test_a_portfolio_that_returns_to_an_earlier_snapshot_is_processed_once(tmp_p
     assert again.duplicate_count == 1
     assert announced(connection) == [("NEW_ACTIONABLE_OPPORTUNITY", ids[0])]
     assert again.last_processed_portfolio_run_id == second.run_id
+
+
+def three_priorities(connection, identity, ids):
+    """run1 INCLUDED MEDIUM, run2 INCLUDED LOW, run3 INCLUDED HIGH, all walked."""
+    run1 = baseline(connection, identity, {ids[0]: included(priority=MEDIUM)})
+    run2 = store_run(connection, identity.profile_id, {ids[0]: included(priority=LOW)})
+    run3 = store_run(connection, identity.profile_id, {ids[0]: included(priority=HIGH)})
+    walked = sync_notification_policy(connection, identity.profile_id)
+    assert walked.processed_run_ids == (run2.run_id, run3.run_id)
+    assert walked.highest_seen_portfolio_run_id == run3.run_id
+    # MEDIUM->LOW then LOW->HIGH: neither is a declared escalation.
+    assert walked.event_count == 0
+    return run1, run2, run3
+
+
+def test_returning_to_a_walked_run_is_one_direct_transition_not_a_replay(tmp_path):
+    """3 -> 1 -> 3 ends on MEDIUM -> HIGH, and that is the event it produces.
+
+    Replaying 1 -> 2 -> 3 instead would invent a path nobody observed, and
+    would hide the real movement behind two silent steps.
+    """
+    connection, identity, ids = fixture(tmp_path)
+    run1, run2, run3 = three_priorities(connection, identity, ids)
+
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=MEDIUM)})
+    went_back = sync_notification_policy(connection, identity.profile_id)
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=HIGH)})
+    came_forward = sync_notification_policy(connection, identity.profile_id)
+
+    assert went_back.processed_run_ids == (run1.run_id,)
+    assert went_back.event_count == 0
+    assert came_forward.processed_run_ids == (run3.run_id,)
+    assert came_forward.event_count == 1
+    assert announced(connection) == [("ATTENTION_ESCALATED", ids[0])]
+    assert events(connection)[0][2:4] == (run1.run_id, run3.run_id)
+    assert run2.run_id not in (row[2] for row in events(connection))
+
+
+def test_the_high_water_mark_never_moves_backwards(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    run1, _, run3 = three_priorities(connection, identity, ids)
+    marks = []
+    for priority in (MEDIUM, HIGH, LOW, HIGH, MEDIUM):
+        store_run(
+            connection, identity.profile_id, {ids[0]: included(priority=priority)}
+        )
+        result = sync_notification_policy(connection, identity.profile_id)
+        marks.append(result.highest_seen_portfolio_run_id)
+        assert result.highest_seen_portfolio_run_id == state(connection)[0][3]
+
+    assert marks == sorted(marks) and set(marks) == {run3.run_id}
+    assert state(connection)[0][1] == run1.run_id
+
+
+def test_a_new_run_after_a_return_starts_from_the_cursor_not_from_the_mark(tmp_path):
+    connection, identity, ids = fixture(tmp_path)
+    run1, run2, run3 = three_priorities(connection, identity, ids)
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=MEDIUM)})
+    sync_notification_policy(connection, identity.profile_id)
+
+    fourth = store_run(
+        connection, identity.profile_id, {ids[0]: included(priority=URGENT)}
+    )
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert fourth.created is True and fourth.run_id > run3.run_id
+    # Only the genuinely new run is walked: 2 and 3 are behind the mark.
+    assert result.processed_run_ids == (fourth.run_id,)
+    assert result.highest_seen_portfolio_run_id == fourth.run_id
+    assert result.last_processed_portfolio_run_id == fourth.run_id
+    assert result.event_count == 1
+    assert announced(connection) == [("ATTENTION_ESCALATED", ids[0])]
+    assert events(connection)[0][2:4] == (run1.run_id, fourth.run_id)
+    assert run2.run_id not in (row[2] for row in events(connection))
+
+
+def test_several_genuinely_new_runs_are_still_replayed_step_by_step(tmp_path):
+    """Runs appended above the mark are walked one by one, from the cursor."""
+    connection, identity, ids = fixture(tmp_path)
+
+    def positions(first, second):
+        return {ids[0]: first, ids[1]: second, ids[2]: excluded()}
+
+    run1 = baseline(
+        connection, identity, positions(included(priority=MEDIUM), excluded())
+    )
+    store_run(
+        connection, identity.profile_id, positions(included(priority=LOW), excluded())
+    )
+    run3 = store_run(
+        connection, identity.profile_id, positions(included(priority=HIGH), excluded())
+    )
+    sync_notification_policy(connection, identity.profile_id)
+    returned = store_run(
+        connection,
+        identity.profile_id,
+        positions(included(priority=MEDIUM), excluded()),
+    )
+    sync_notification_policy(connection, identity.profile_id)
+    back = state(connection)[0]
+
+    fourth = store_run(
+        connection,
+        identity.profile_id,
+        positions(included(priority=HIGH), included(priority=MEDIUM)),
+    )
+    fifth = store_run(
+        connection,
+        identity.profile_id,
+        positions(included(priority=URGENT), included(priority=MEDIUM)),
+    )
+    result = sync_notification_policy(connection, identity.profile_id)
+
+    assert returned.run_id == run1.run_id and returned.created is False
+    assert (back[2], back[3]) == (run1.run_id, run3.run_id)
+    assert fourth.created is True and fifth.created is True
+    assert result.processed_run_ids == (fourth.run_id, fifth.run_id)
+    assert result.event_count == 3
+    assert announced(connection) == [
+        ("ATTENTION_ESCALATED", ids[0]),
+        ("NEW_ACTIONABLE_OPPORTUNITY", ids[1]),
+        ("ATTENTION_ESCALATED", ids[0]),
+    ]
+    assert [row[2:4] for row in events(connection)] == [
+        (run1.run_id, fourth.run_id),
+        (run1.run_id, fourth.run_id),
+        (fourth.run_id, fifth.run_id),
+    ]
+    assert result.highest_seen_portfolio_run_id == fifth.run_id
+
+
+def test_a_mark_forced_behind_its_cursor_fails_the_sync_closed(tmp_path):
+    """The CHECK forbids this state; the sync refuses it anyway rather than
+    silently treating already-walked runs as new."""
+    connection, identity, ids = fixture(tmp_path)
+    run1, _, run3 = three_priorities(connection, identity, ids)
+    store_run(connection, identity.profile_id, {ids[0]: included(priority=URGENT)})
+    connection.execute("PRAGMA ignore_check_constraints=ON")
+    connection.execute(
+        "UPDATE notification_policy_state SET highest_seen_portfolio_run_id=?"
+        " WHERE profile_id=?",
+        (run1.run_id, identity.profile_id),
+    )
+    connection.commit()
+    connection.execute("PRAGMA ignore_check_constraints=OFF")
+    before = snapshot(connection)
+
+    with pytest.raises(NotificationSyncError, match="high-water mark"):
+        sync_notification_policy(connection, identity.profile_id)
+
+    assert before[2][0][2] == run3.run_id and before[2][0][3] == run1.run_id
+    assert snapshot(connection) == before
+    assert connection.in_transaction is False

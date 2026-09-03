@@ -127,31 +127,35 @@ def test_state_is_one_row_per_profile_pinned_to_that_profiles_portfolio_runs(tmp
     connection, identity, _, first, second = two_runs(tmp_path)
     state = (
         identity.profile_id,
-        first,
+        second,
+        second,
         second,
         NOTIFICATION_POLICY_VERSION,
     )
-    connection.execute(
-        """INSERT INTO notification_policy_state
+    insert = """INSERT INTO notification_policy_state
         (profile_id,baseline_portfolio_run_id,last_processed_portfolio_run_id,
-         policy_version) VALUES (?,?,?,?)""",
-        state,
-    )
+         highest_seen_portfolio_run_id,policy_version) VALUES (?,?,?,?,?)"""
+    connection.execute(insert, state)
     connection.commit()
 
     for statement, parameters in (
-        (
-            """INSERT INTO notification_policy_state
-            (profile_id,baseline_portfolio_run_id,last_processed_portfolio_run_id,
-             policy_version) VALUES (?,?,?,?)""",
-            state,
-        ),
+        (insert, state),
         (
             "UPDATE notification_policy_state SET last_processed_portfolio_run_id=?",
             (9999,),
         ),
+        (
+            "UPDATE notification_policy_state SET highest_seen_portfolio_run_id=?",
+            (9999,),
+        ),
         ("UPDATE notification_policy_state SET policy_version=?", ("   ",)),
         ("UPDATE notification_policy_state SET baseline_portfolio_run_id=?", (0,)),
+        # The high-water mark can never sit below the pointers it bounds, so it
+        # cannot be walked back to an earlier run even though that run exists.
+        (
+            "UPDATE notification_policy_state SET highest_seen_portfolio_run_id=?",
+            (first,),
+        ),
     ):
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(statement, parameters)
@@ -159,7 +163,7 @@ def test_state_is_one_row_per_profile_pinned_to_that_profiles_portfolio_runs(tmp
 
     assert connection.execute(
         """SELECT profile_id,baseline_portfolio_run_id,last_processed_portfolio_run_id,
-        policy_version FROM notification_policy_state"""
+        highest_seen_portfolio_run_id,policy_version FROM notification_policy_state"""
     ).fetchall() == [state]
 
 
