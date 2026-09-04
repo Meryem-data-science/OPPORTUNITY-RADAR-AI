@@ -277,6 +277,12 @@ stale.
   UNKNOWN against the country a Digital Twin's declared mobility restricts it
   to. The resolutions are projected; the verdict depends on a profile and is
   never stored.
+- `services/targeting/opportunity_type/`: the Phase 7B.1 opportunity-type
+  targeting foundation — the comparison that answers MATCH, OUT_OF_TARGET or
+  UNKNOWN between the structured type Phase 3.5A extracted into
+  `opportunity_constraints` and the types a Digital Twin explicitly said it is
+  looking for. It classifies nothing and adds no schema: the verdict depends on
+  a stated preference and is never stored.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.
