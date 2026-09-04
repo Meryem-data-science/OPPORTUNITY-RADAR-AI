@@ -271,6 +271,12 @@ stale.
   the manual notes kept about it. A detected opportunity never becomes a
   candidature on its own: a row exists because a person saved it, started
   preparing it, or recorded that they had applied.
+- `services/geography/`: the Phase 7A.1 geographic targeting foundation — a
+  closed, offline registry that resolves the locations a posting itself names
+  to ISO country codes, and the comparison that answers MATCH, OUT_OF_TARGET or
+  UNKNOWN against the country a Digital Twin's declared mobility restricts it
+  to. The resolutions are projected; the verdict depends on a profile and is
+  never stored.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

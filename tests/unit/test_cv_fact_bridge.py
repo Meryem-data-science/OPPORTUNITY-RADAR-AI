@@ -322,6 +322,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0021_push_subscription_activation_watermark.sql",
         "0022_gmail_digest_outbox.sql",
         "0023_application_tracking.sql",
+        "0024_opportunity_location_resolutions.sql",
     ]
 
 
