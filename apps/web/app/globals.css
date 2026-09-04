@@ -218,3 +218,31 @@ h1 {
   .source-health-table th, .source-health-table td { padding: 0.7rem; }
   .matching-summary dl, .matching-scores { grid-template-columns: 1fr; }
 }
+
+/* Phase 6.1 — application tracking. Minimal and functional: this page exists
+   to show real candidatures and to change them, not to be decorated. */
+.application-actions { display: flex; flex-direction: column; gap: 0.5rem; }
+.application-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0; }
+.application-actions button, .application-tracking button {
+  padding: 0.45rem 0.8rem;
+  border: 1px solid #cfdad4;
+  border-radius: 8px;
+  background: #f5f8f6;
+  color: #17362a;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.application-actions button:disabled, .application-tracking button:disabled { cursor: progress; opacity: 0.6; }
+.application-status { margin: 0.6rem 0 0; color: #176b49; font-weight: 700; }
+.application-notes { white-space: pre-wrap; }
+.application-tracking { display: flex; flex-direction: column; gap: 0.4rem; }
+.application-tracking p { margin: 0.3rem 0; }
+.application-tracking label { color: #53615a; font-size: 0.8rem; }
+.application-tracking input, .application-tracking select, .application-tracking textarea {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #cfdad4;
+  border-radius: 8px;
+  font: inherit;
+}
+.application-timeline { margin: 0; padding-left: 1.2rem; color: #53615a; line-height: 1.6; }

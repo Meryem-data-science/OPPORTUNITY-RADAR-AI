@@ -1189,6 +1189,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0020_notification_delivery.sql",
         "0021_push_subscription_activation_watermark.sql",
         "0022_gmail_digest_outbox.sql",
+        "0023_application_tracking.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications

@@ -266,6 +266,11 @@ stale.
 - `services/eligibility/`: the Phase 3.6 engine — the only package that reads
   both the offer side and the profile side, and decides whether a person could
   apply to a posting. Three answers, reasons, evidence pointers; no score.
+- `services/applications/`: the Phase 6.1 tracking of real candidatures — the
+  statuses one moves through, the append-only history of how it got there, and
+  the manual notes kept about it. A detected opportunity never becomes a
+  candidature on its own: a row exists because a person saved it, started
+  preparing it, or recorded that they had applied.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.

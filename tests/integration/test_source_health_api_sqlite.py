@@ -126,6 +126,7 @@ def _seed(path) -> tuple[int, int]:
             "0020",
             "0021",
             "0022",
+            "0023",
         ]
         anomalous = _source("test_api_anomalous")
         failing = _source("test_api_failing")

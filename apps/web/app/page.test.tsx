@@ -2,11 +2,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/opportunities", () => ({ loadOpportunities: vi.fn() }));
+vi.mock("@/lib/applications", () => ({ loadApplications: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: () => {} }) }));
 
 import Home from "./page";
 import { loadOpportunities } from "@/lib/opportunities";
+import { loadApplications } from "@/lib/applications";
 
 const loadOpportunitiesMock = vi.mocked(loadOpportunities);
+const loadApplicationsMock = vi.mocked(loadApplications);
 const fixture = {
   items: [
     {
@@ -27,7 +31,13 @@ async function renderHome() {
 }
 
 describe("Home", () => {
-  beforeEach(() => loadOpportunitiesMock.mockReset());
+  beforeEach(() => {
+    loadOpportunitiesMock.mockReset();
+    loadApplicationsMock.mockReset();
+    // The tracking surface being empty is the default; individual tests say
+    // otherwise when they are about tracking.
+    loadApplicationsMock.mockResolvedValue({ profile_id: 1, items: [], total: 0 });
+  });
 
   it("links to the matching read surface", async () => {
     loadOpportunitiesMock.mockResolvedValue(fixture);
@@ -76,5 +86,58 @@ describe("Home", () => {
     expect(html).toContain("Opportunités temporairement indisponibles");
     expect(html).not.toContain("ECONNREFUSED");
     expect(html).not.toContain("secret-token");
+  });
+
+  it("offers the three real actions on every opportunity", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    const html = await renderHome();
+
+    expect(html).toContain("Sauvegarder");
+    expect(html).toContain("Préparer la candidature");
+    expect(html).toContain("J’ai postulé");
+    expect(html).toContain('href="/applications"');
+    // The existing button keeps working next to the new ones.
+    expect(html).toContain('href="https://careers.example.test/jobs/7?source=radar"');
+  });
+
+  it("shows the tracked status of an opportunity that is already a candidature", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    loadApplicationsMock.mockResolvedValue({
+      profile_id: 1,
+      total: 1,
+      items: [
+        {
+          id: 3,
+          opportunity_id: 7,
+          status: "SUBMITTED",
+          submitted_at: "2026-03-02 10:15:00",
+          last_status_change: "2026-03-02 10:15:00",
+          next_action: null,
+          followup_date: null,
+          notes: null,
+          created_at: "2026-03-01 09:00:00",
+          updated_at: "2026-03-02 10:15:00",
+          opportunity: {
+            id: 7,
+            canonical_title: "Test Data Engineer",
+            organization: "Fixture Company",
+            location: "Paris, France",
+            original_url: "https://careers.example.test/jobs/7?source=radar",
+          },
+        },
+      ],
+    } as never);
+
+    expect(await renderHome()).toContain("Suivi");
+  });
+
+  it("still shows opportunities when the tracking surface is unavailable", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    loadApplicationsMock.mockResolvedValue(null);
+
+    const html = await renderHome();
+
+    expect(html).toContain("Test Data Engineer");
+    expect(html).toContain("Sauvegarder");
   });
 });

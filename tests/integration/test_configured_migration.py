@@ -37,6 +37,7 @@ def test_configured_sqlite_migration_is_ready_empty_and_idempotent(tmp_path) -> 
             "0020",
             "0021",
             "0022",
+            "0023",
         ]
         assert check_foundation_schema(connection) is True
         assert apply_migrations(connection) == []

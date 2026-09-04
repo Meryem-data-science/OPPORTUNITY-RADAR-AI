@@ -129,7 +129,9 @@ def test_0022_upgrades_a_real_0021_database_without_touching_a_single_row(tmp_pa
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         )
-        assert migrations[-1] == "0021"
+        # 0023 is still recorded: what this test removed, and what it is
+        # about, is the 0022 step itself.
+        assert "0021" in migrations and "0022" not in migrations
 
         assert apply_migrations(connection) == ["0022"]
 
@@ -151,8 +153,8 @@ def test_0022_does_not_alter_any_earlier_migration_file():
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY)
     ]
 
-    assert versions[-1] == "0022"
     assert versions.count("0022") == 1
+    assert versions[versions.index("0022") - 1] == "0021"
 
 
 def migrated(tmp_path):
