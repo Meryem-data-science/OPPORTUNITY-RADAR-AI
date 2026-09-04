@@ -109,7 +109,7 @@ def test_0019_upgrades_an_existing_database_without_touching_its_data(tmp_path):
             "SELECT id, user_id FROM profiles ORDER BY id"
         ).fetchall()
 
-        assert apply_migrations(connection) == ["0019", "0020", "0021", "0022"]
+        assert apply_migrations(connection) == ["0019", "0020", "0021", "0022", "0023"]
 
         assert (
             connection.execute(

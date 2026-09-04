@@ -1,8 +1,14 @@
-"""FastAPI application exposing persisted opportunity data read-only."""
+"""FastAPI application: the read surfaces of the radar, and the writes a person makes.
+
+Everything the radar itself produces — opportunities, matching, priority, the
+Portfolio, source health — is exposed read-only. The two write surfaces exist
+because a person acted: opting a browser into notifications, and tracking a
+candidature. Both resolve the profile on the server; neither accepts one.
+"""
 
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 
 from services.api.opportunities import (
     OpportunityListResponse,
@@ -46,9 +52,25 @@ from services.api.portfolio import (
     PortfolioResponse,
     read_portfolio_surface,
 )
+from services.api.applications import (
+    PUBLIC_APPLICATION_ERROR,
+    PUBLIC_APPLICATION_REQUEST_ERROR,
+    ApplicationApiConflictError,
+    ApplicationApiError,
+    ApplicationApiNotFoundError,
+    ApplicationApiRequestError,
+    ApplicationDetailResponse,
+    ApplicationListResponse,
+    ApplicationWriteResponse,
+    change_status_surface,
+    create_application_surface,
+    list_applications_surface,
+    read_application_surface,
+    update_tracking_surface,
+)
 
 
-app = FastAPI(title="Opportunity Radar API", version="1.5.0")
+app = FastAPI(title="Opportunity Radar API", version="1.6.0")
 
 
 @app.get("/api/opportunities", response_model=OpportunityListResponse)
@@ -166,3 +188,112 @@ async def delete_push_subscription(
         return revoke_subscription(body)
     except (PushRequestError, PushConflictError, PushApiError) as error:
         raise _push_failure(error) from None
+
+
+async def _application_body(request: Request) -> object:
+    """Read a JSON body without letting a parser echo it back to the caller."""
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=PUBLIC_APPLICATION_REQUEST_ERROR,
+        ) from None
+
+
+def _application_failure(error: Exception) -> HTTPException:
+    """Map one domain refusal onto the answer the caller is owed.
+
+    A malformed request is 400, something this profile does not have is 404, a
+    request that contradicts the candidature is 409, and anything else — an
+    unusable database, a missing migration, a broken configuration — is 503
+    with a fixed sentence. No internal message ever escapes through here.
+    """
+    if isinstance(error, ApplicationApiRequestError):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+        )
+    if isinstance(error, ApplicationApiNotFoundError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    if isinstance(error, ApplicationApiConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=PUBLIC_APPLICATION_ERROR,
+    )
+
+
+_APPLICATION_ERRORS = (
+    ApplicationApiRequestError,
+    ApplicationApiNotFoundError,
+    ApplicationApiConflictError,
+    ApplicationApiError,
+)
+
+
+@app.get("/api/applications", response_model=ApplicationListResponse)
+def list_applications() -> ApplicationListResponse:
+    """Return every tracked candidature of the server-resolved profile."""
+    try:
+        return list_applications_surface()
+    except _APPLICATION_ERRORS as error:
+        raise _application_failure(error) from None
+
+
+@app.get(
+    "/api/applications/{application_id}", response_model=ApplicationDetailResponse
+)
+def get_application(application_id: int) -> ApplicationDetailResponse:
+    """Return one tracked candidature with its append-only timeline."""
+    try:
+        return read_application_surface(application_id)
+    except _APPLICATION_ERRORS as error:
+        raise _application_failure(error) from None
+
+
+@app.post("/api/applications", response_model=ApplicationWriteResponse)
+async def create_application(
+    request: Request, response: Response
+) -> ApplicationWriteResponse:
+    """Record the intention that makes a real opportunity a candidature.
+
+    201 when this call created the candidature, 200 when it already existed —
+    a repeated action is answered with the unchanged candidature rather than a
+    duplicate, and the body says which of the two happened.
+    """
+    body = await _application_body(request)
+    try:
+        result = create_application_surface(body)
+    except _APPLICATION_ERRORS as error:
+        raise _application_failure(error) from None
+    response.status_code = (
+        status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
+    )
+    return result
+
+
+@app.patch(
+    "/api/applications/{application_id}/status",
+    response_model=ApplicationWriteResponse,
+)
+async def patch_application_status(
+    application_id: int, request: Request
+) -> ApplicationWriteResponse:
+    """Move one candidature by hand, within the rules Phase 6.1 enforces."""
+    body = await _application_body(request)
+    try:
+        return change_status_surface(application_id, body)
+    except _APPLICATION_ERRORS as error:
+        raise _application_failure(error) from None
+
+
+@app.patch("/api/applications/{application_id}", response_model=ApplicationWriteResponse)
+async def patch_application_tracking(
+    application_id: int, request: Request
+) -> ApplicationWriteResponse:
+    """Write the manual tracking fields of one candidature, and only those."""
+    body = await _application_body(request)
+    try:
+        return update_tracking_surface(application_id, body)
+    except _APPLICATION_ERRORS as error:
+        raise _application_failure(error) from None

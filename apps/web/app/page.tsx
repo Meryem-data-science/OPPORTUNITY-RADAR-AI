@@ -1,9 +1,18 @@
 import Link from "next/link";
 import React from "react";
+import ApplicationActions from "@/components/application-actions";
 import PushNotifications from "@/components/push-notifications";
+import type { ApplicationStatus } from "@/lib/application-contract";
+import { loadApplications } from "@/lib/applications";
 import { loadOpportunities, type Opportunity } from "@/lib/opportunities";
 
-function OpportunityCard({ opportunity }: { opportunity: Opportunity }) {
+function OpportunityCard({
+  opportunity,
+  trackedStatus,
+}: {
+  opportunity: Opportunity;
+  trackedStatus: ApplicationStatus | null;
+}) {
   return (
     <article className="opportunity-card">
       <div>
@@ -11,6 +20,10 @@ function OpportunityCard({ opportunity }: { opportunity: Opportunity }) {
         <h2>{opportunity.canonical_title}</h2>
         <p className="location">{opportunity.location ?? "Lieu non précisé"}</p>
       </div>
+      <ApplicationActions
+        opportunityId={opportunity.id}
+        status={trackedStatus}
+      />
       <div className="card-footer">
         <span>Vue récemment par le radar</span>
         <a href={opportunity.original_url} target="_blank" rel="noreferrer">
@@ -22,7 +35,18 @@ function OpportunityCard({ opportunity }: { opportunity: Opportunity }) {
 }
 
 export default async function Home() {
-  const opportunities = await loadOpportunities();
+  // Both surfaces are read independently: the tracking one being unavailable
+  // must not stop the radar from showing what it found.
+  const [opportunities, applications] = await Promise.all([
+    loadOpportunities(),
+    loadApplications(),
+  ]);
+  const tracked = new Map<number, ApplicationStatus>(
+    (applications?.items ?? []).map((application) => [
+      application.opportunity_id,
+      application.status,
+    ]),
+  );
 
   return (
     <main className="page-shell">
@@ -35,6 +59,9 @@ export default async function Home() {
           </p>
         </div>
         <nav className="hero-links" aria-label="Pages de supervision">
+          <Link className="health-link" href="/applications">
+            Mes candidatures
+          </Link>
           <Link className="health-link" href="/portfolio">
             Voir mon portfolio
           </Link>
@@ -74,7 +101,11 @@ export default async function Home() {
           ) : (
             <div className="opportunity-grid">
               {opportunities.items.map((opportunity) => (
-                <OpportunityCard key={opportunity.id} opportunity={opportunity} />
+                <OpportunityCard
+                  key={opportunity.id}
+                  opportunity={opportunity}
+                  trackedStatus={tracked.get(opportunity.id) ?? null}
+                />
               ))}
             </div>
           )}
