@@ -296,6 +296,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0021_push_subscription_activation_watermark.sql",
         "0022_gmail_digest_outbox.sql",
         "0023_application_tracking.sql",
+        "0024_opportunity_location_resolutions.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",
