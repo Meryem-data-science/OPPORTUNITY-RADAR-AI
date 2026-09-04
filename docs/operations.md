@@ -1468,3 +1468,153 @@ serializes them, the loser sees the winner's row and reports
 `ALREADY_MATERIALIZED`, and `UNIQUE (profile_id, digest_date, digest_version)`
 is the database's own copy of that promise. No network I/O happens inside the
 transaction, because no network I/O happens in this slice at all.
+
+## Gmail delivery (Phase 5.4B)
+
+One command materializes today's digest and sends what is due, in one pass:
+
+```bash
+python -m services.gmail_digest.delivery_cli \
+  --database ./data/opportunity-radar.db \
+  --profile-id 1 \
+  --timezone Africa/Casablanca \
+  --recipient you@example.com
+```
+
+It loads and validates the Gmail authorization **first**, then materializes
+using the unchanged 5.4A policy, then drains the digests that are due, then
+exits. There is no daemon, no cron entry, no GitHub Actions workflow and no
+scheduler of any kind: something outside this process decides when a pass
+happens. `--limit N` bounds how many digests one pass attempts.
+
+5.4B is transport and only transport. It sends the `subject`, `body_text` and
+`body_html` already frozen in `gmail_digest_outbox` — it does not re-render,
+re-order, add or remove an opportunity, rewrite a URL, or re-read the
+Portfolio, and it recomputes nothing upstream. It adds no migration: `0022`
+already carries the lifecycle, the attempt counter, the claim, the Gmail
+message id and the error vocabulary it writes.
+
+### One scope: `gmail.send`
+
+Authorization is a Desktop/Installed App OAuth flow requesting exactly
+`https://www.googleapis.com/auth/gmail.send`, run once by a person:
+
+```bash
+python -m services.gmail_digest.oauth_bootstrap        # add --force to replace
+```
+
+It opens a consent screen asking only to *send email on your behalf*, and it
+refuses the result if Google returns anything wider. There is no
+`gmail.readonly`, no `gmail.modify`, no `gmail.metadata` and no
+`mail.google.com` anywhere in this phase; the only Gmail call ever made is
+`users().messages().send`. **Nothing here reads a mailbox.** Email
+classification, interview and rejection detection, label management,
+application tracking and follow-up automation are Phase 7 Gmail Intelligence,
+which needs its own consent rather than a scope widened here.
+
+The stored credential is checked for exact send-only scope every time it is
+loaded, not only when it is created, so a token that gained a mailbox scope
+elsewhere is refused rather than used narrowly.
+
+### Two local files, and neither is in the database
+
+| file | what it is |
+| --- | --- |
+| `.secrets/gmail-oauth-client.json` | the Desktop OAuth client, downloaded from Google Cloud. Read, never written. |
+| `.secrets/gmail-token.json` | the authorization this deployment obtained. Written by the bootstrap, refreshed by delivery. |
+
+Both paths can be overridden with `--client-secret` and `--token`. `.secrets/`
+is ignored by Git. Neither file ever enters SQLite, a log line, an exception
+message or a `repr`: the token, the refresh token and the client secret are
+never printed, and a failure reports the class of error rather than quoting
+what failed. Token writes are atomic — a temporary file in the same directory,
+owner-only, renamed over the destination — so a crash mid-write cannot leave
+half a token, and the bootstrap refuses to replace an existing authorization
+without `--force`.
+
+Credentials are loaded, refreshed and scope-checked **before the database is
+opened for writing**. A missing, corrupt, expired, revoked or over-scoped
+credential fails there, so an OAuth problem can never move a `PENDING` digest
+to `IN_FLIGHT`.
+
+### The recipient guard
+
+`--recipient` stays runtime configuration and is never persisted. It is
+normalized and fingerprinted with the same 5.4A logic, and the fingerprint is
+part of the claim predicate: a digest frozen for another mailbox is never
+claimed, never sent and never modified. That holds for stale-claim recovery
+too — `recover_stale_claims` requires a recipient fingerprint and filters on
+it, so a run configured for one mailbox leaves another's abandoned claim
+exactly as it found it (still `IN_FLIGHT`, same token, same `updated_at`);
+only a run configured for that recipient releases it. It is not silently
+skipped either —
+the drain counts it and reports `recipient_mismatched`, and `--dry-run`
+reports `recipient_matching`, `recipient_mismatched` and
+`due_recipient_mismatched`, because a due message for an address that is no
+longer configured is something an operator has to be told.
+
+### Claim, lease and retry
+
+One digest at a time: a short `BEGIN IMMEDIATE` claims the single oldest due
+row under a fresh 32-hex token, the transaction commits, Gmail is called with
+**no transaction open**, and a second short transaction settles that row only
+if it is still `IN_FLIGHT` under that exact token. Two passes therefore never
+send the same digest, and a result whose claim was recovered in the meantime is
+discarded rather than applied.
+
+| policy | value |
+| --- | --- |
+| claim lease | 300 s — an older claim belonged to a dead process and is released |
+| attempts | 5 in total |
+| backoff after attempts 1–4 | 60 s, 300 s, 900 s, 3600 s |
+
+A real send result increments `attempt_count`; a stale-claim recovery never
+does, because a claim nobody settled is not evidence that anything was
+attempted. On the fifth retryable failure the digest becomes
+`PERMANENT_FAILURE` with the category `PERMANENT` — the decision is terminal
+even though the cause was transient — and the cause survives inside the code as
+`RETRY_LIMIT_EXHAUSTED_<cause>`.
+
+Classification is deterministic: no HTTP status at all (DNS, refused
+connection, TLS, timeout) is retryable, as are `429`, `408` and every `5xx`;
+`401` and every other non-`403` `4xx` are permanent, because the credential was
+already validated and refreshed before the claim. A `403` is read rather than
+guessed at — Google's structured reason decides, so `rateLimitExceeded` or
+`quotaExceeded` is retryable while `forbidden`, `insufficientPermissions` or
+`accessNotConfigured` is permanent, and an unrecognised `403` is treated as a
+refusal. Only bounded, normalized codes are stored: no Google response body,
+message or address ever reaches the database.
+
+### At-least-once, not exactly-once
+
+Gmail accepting a message and SQLite recording `SENT` cannot be made one atomic
+act. A process that dies between them leaves a claim it will never settle; the
+lease releases that claim and the digest is sent again — a duplicate email,
+bounded by the lease and by the attempt limit. The alternative, leaving the
+claim held forever, loses the digest outright. So:
+
+* concurrent passes never collide, because a claim is exclusive;
+* a digest that reached `SENT` is never re-sent, by anyone, ever;
+* after a crash in that one window, delivery is **at-least-once**.
+
+Nothing in this phase claims exactly-once delivery.
+
+### `--dry-run`
+
+```bash
+python -m services.gmail_digest.delivery_cli ... --dry-run
+```
+
+Opens the database through SQLite's `mode=ro` URI with `query_only` pinned,
+requires no OAuth file, refreshes no credential, opens no socket, claims
+nothing, recovers nothing and materializes nothing — the file is byte-identical
+afterwards, which is what makes it safe against a real operational database.
+It reports what today's materialization *would* decide and the counts: pending,
+due, scheduled, in flight, stale claims, sent, permanent failures, and the
+three recipient counters. It prints no address, no subject, no body, no MIME
+payload and nothing from an OAuth file.
+
+Run the command twice in one day and the second run is quiet by construction:
+materialization reports `ALREADY_MATERIALIZED` and writes nothing, the drain
+finds nothing due because the digest is already `SENT`, and no second email is
+sent.

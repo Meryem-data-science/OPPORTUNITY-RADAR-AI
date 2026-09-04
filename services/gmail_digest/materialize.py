@@ -76,6 +76,7 @@ from .models import (
     DIGEST_VERSION,
     DigestCandidate,
     DigestContent,
+    DigestDecisionPreview,
     DigestMaterializationResult,
     DigestMaterializationStatus,
     GmailDigestError,
@@ -178,6 +179,66 @@ def build_digest_candidate(
     )
     return DigestCandidate(
         profile_id, run.run_id, run.run_fingerprint, digest_version, content
+    )
+
+
+def preview_digest_decision(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    digest_date: str,
+    recipient_fingerprint: str,
+    digest_version: str = DIGEST_VERSION,
+) -> DigestDecisionPreview:
+    """Apply the daily policy without writing, on a connection that cannot.
+
+    This is :func:`materialize_daily_digest`'s decision and only its decision:
+    the same four outcomes, reached by the same reads, in the same order, with
+    the insert left out. It takes no transaction and performs no write, so it
+    runs unchanged over a ``mode=ro`` connection with ``query_only`` pinned —
+    which is what both dry runs need and why the policy is not written twice.
+    """
+    preflight(connection)
+    existing = read_digest_for_day(
+        connection,
+        profile_id=profile_id,
+        digest_date=digest_date,
+        digest_version=digest_version,
+    )
+    if existing is not None:
+        return DigestDecisionPreview(
+            DigestMaterializationStatus.ALREADY_MATERIALIZED,
+            existing.item_count,
+            existing.content_fingerprint,
+            existing.outbox_id,
+            existing.portfolio_run_id,
+        )
+    candidate = build_digest_candidate(
+        connection, profile_id, digest_version=digest_version
+    )
+    content = candidate.content
+    if content is None:
+        return DigestDecisionPreview(
+            DigestMaterializationStatus.EMPTY, 0, None, None, candidate.portfolio_run_id
+        )
+    last_sent = read_latest_sent_digest(
+        connection,
+        profile_id=profile_id,
+        recipient_fingerprint=recipient_fingerprint,
+        digest_version=digest_version,
+    )
+    unchanged = (
+        last_sent is not None
+        and last_sent.content_fingerprint == content.content_fingerprint
+    )
+    return DigestDecisionPreview(
+        DigestMaterializationStatus.UNCHANGED
+        if unchanged
+        else DigestMaterializationStatus.CREATED,
+        len(content.items),
+        content.content_fingerprint,
+        last_sent.outbox_id if unchanged else None,
+        candidate.portfolio_run_id,
     )
 
 

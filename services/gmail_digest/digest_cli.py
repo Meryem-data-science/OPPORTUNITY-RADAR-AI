@@ -37,9 +37,8 @@ from services.collector.database.connection import (
 
 from .fingerprint import recipient_fingerprint
 from .local_day import LocalDay, resolve_local_day
-from .materialize import build_digest_candidate, materialize_daily_digest
-from .models import DIGEST_VERSION, DigestMaterializationStatus, GmailDigestError
-from .persistence import preflight, read_digest_for_day, read_latest_sent_digest
+from .materialize import materialize_daily_digest, preview_digest_decision
+from .models import DIGEST_VERSION, GmailDigestError
 
 
 def _positive_integer(value: str) -> int:
@@ -93,52 +92,20 @@ def _dry_run(
         enabled = connection.execute("PRAGMA query_only").fetchone()
         if enabled is None or enabled[0] != 1:
             raise GmailDigestError("dry run could not pin the connection read-only")
-        preflight(connection)
-        existing = read_digest_for_day(
+        preview = preview_digest_decision(
             connection,
             profile_id=args.profile_id,
             digest_date=local_day.date,
-            digest_version=DIGEST_VERSION,
-        )
-        if existing is not None:
-            return {
-                "status": DigestMaterializationStatus.ALREADY_MATERIALIZED.value,
-                "item_count": existing.item_count,
-                "content_fingerprint": existing.content_fingerprint,
-                "outbox_id": existing.outbox_id,
-                "portfolio_run_id": existing.portfolio_run_id,
-            }
-        candidate = build_digest_candidate(connection, args.profile_id)
-        content = candidate.content
-        if content is None:
-            return {
-                "status": DigestMaterializationStatus.EMPTY.value,
-                "item_count": 0,
-                "content_fingerprint": None,
-                "outbox_id": None,
-                "portfolio_run_id": candidate.portfolio_run_id,
-            }
-        last_sent = read_latest_sent_digest(
-            connection,
-            profile_id=args.profile_id,
             recipient_fingerprint=fingerprint,
             digest_version=DIGEST_VERSION,
         )
-        unchanged = (
-            last_sent is not None
-            and last_sent.content_fingerprint == content.content_fingerprint
-        )
-        return {
-            "status": (
-                DigestMaterializationStatus.UNCHANGED.value
-                if unchanged
-                else DigestMaterializationStatus.CREATED.value
-            ),
-            "item_count": len(content.items),
-            "content_fingerprint": content.content_fingerprint,
-            "outbox_id": last_sent.outbox_id if unchanged else None,
-            "portfolio_run_id": candidate.portfolio_run_id,
-        }
+    return {
+        "status": preview.status.value,
+        "item_count": preview.item_count,
+        "content_fingerprint": preview.content_fingerprint,
+        "outbox_id": preview.outbox_id,
+        "portfolio_run_id": preview.portfolio_run_id,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
