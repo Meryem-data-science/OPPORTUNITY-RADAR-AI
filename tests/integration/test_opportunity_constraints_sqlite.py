@@ -463,6 +463,134 @@ def test_a_projection_stored_under_an_older_version_is_re_extracted(
     ).extractor_version == EXTRACTOR_VERSION
 
 
+# --------------------------------------------------------------------------
+# v3 -> v4: the same text, read differently (Phase 7B.2)
+#
+# The database below is created under `tmp_path` and thrown away, like every
+# other one in this file. The posting is invented: a German-language consulting
+# advertisement whose only occurrence of the letters "pfe" sits inside
+# `Handlungsempfehlungen`. `v3` matched that as a wording and stored `PFE`;
+# `v4` matches wordings on their boundaries and stores nothing.
+# --------------------------------------------------------------------------
+
+# TEST ONLY posting, invented for these tests.
+SUBSTRING_TITLE = "Senior Consultant Daten- und KI-Strategie"
+SUBSTRING_DESCRIPTION = (
+    "Sie analysieren Daten und leiten daraus konkrete Handlungsempfehlungen ab. "
+    "Um das Potenzial der Daten voll auszuschöpfen, geben Sie Empfehlungen zur "
+    "Datenstrategie."
+)
+
+
+def _stored_type(connection, opportunity_id: int) -> str | None:
+    row = connection.execute(
+        "SELECT opportunity_type FROM opportunity_constraints WHERE opportunity_id = ?",
+        (opportunity_id,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _type_evidence(connection, opportunity_id: int) -> list[tuple]:
+    return connection.execute(
+        "SELECT rule_id, source_field, evidence_text, normalized_value "
+        "FROM opportunity_constraint_evidence "
+        "WHERE opportunity_id = ? AND constraint_kind = 'OPPORTUNITY_TYPE' "
+        "ORDER BY position",
+        (opportunity_id,),
+    ).fetchall()
+
+
+def test_a_v3_substring_projection_is_recomputed_under_v4_and_then_settles(
+    migrated,
+) -> None:
+    """The version moved, so the unchanged text is read again — and once only.
+
+    This is the whole contract of `EXTRACTOR_VERSION` exercised end to end:
+    a projection stored under `v3` with the same `source_fingerprint` is stale
+    because the *code* changed, the run replaces it with what `v4` reads, and
+    the run after that writes nothing at all.
+    """
+    opportunity = insert_opportunity(
+        migrated, title=SUBSTRING_TITLE, description=SUBSTRING_DESCRIPTION
+    )
+    synchronize_opportunity_constraints(migrated)
+    fingerprint = stored_signature(migrated, opportunity)[0]
+
+    # What `v3` left behind: the same posting, the same fingerprint, and a
+    # `PFE` read out of the middle of `Handlungsempfehlungen`.
+    migrated.execute(
+        "UPDATE opportunity_constraints SET extractor_version = ?, "
+        "opportunity_type = 'PFE' WHERE opportunity_id = ?",
+        ("opportunity-constraints-v3", opportunity),
+    )
+    migrated.execute(
+        "INSERT INTO opportunity_constraint_evidence (opportunity_id, position, "
+        "constraint_kind, source_field, rule_id, evidence_text, normalized_value) "
+        "VALUES (?, 0, 'OPPORTUNITY_TYPE', 'DESCRIPTION', "
+        "'OPPORTUNITY_TYPE_PFE_V1', ?, 'PFE')",
+        (opportunity, SUBSTRING_DESCRIPTION[:200]),
+    )
+    migrated.commit()
+    assert _stored_type(migrated, opportunity) == "PFE"
+
+    first = synchronize_opportunity_constraints(migrated)
+
+    # Stale because of the version, not because of the text.
+    assert (first.replaced, first.unchanged, first.created) == (1, 0, 0)
+    assert stored_signature(migrated, opportunity) == (
+        fingerprint,
+        EXTRACTOR_VERSION,
+    )
+    assert EXTRACTOR_VERSION == "opportunity-constraints-v4"
+    # The chance substring asserted nothing, so nothing is asserted.
+    assert _stored_type(migrated, opportunity) is None
+    assert _type_evidence(migrated, opportunity) == []
+    assert read_opportunity_constraints(
+        migrated, opportunity
+    ).opportunity_type is None
+
+    second = synchronize_opportunity_constraints(migrated)
+
+    assert (second.replaced, second.unchanged, second.created) == (0, 1, 0)
+    assert second.changed is False
+    assert stored_signature(migrated, opportunity) == (
+        fingerprint,
+        EXTRACTOR_VERSION,
+    )
+
+
+def test_an_explicit_pfe_survives_the_v3_to_v4_recomputation(migrated) -> None:
+    """The correction removes chance matches, not real ones.
+
+    A description that names a PFE in words still projects `PFE` after the
+    recomputation, with evidence quoting the sentence that said so.
+    """
+    opportunity = insert_opportunity(
+        migrated,
+        title="Data Scientist",
+        description="Nous accompagnons nos clients.\nStage PFE de 6 mois à Casablanca.",
+    )
+    synchronize_opportunity_constraints(migrated)
+    migrated.execute(
+        "UPDATE opportunity_constraints SET extractor_version = ? WHERE opportunity_id = ?",
+        ("opportunity-constraints-v3", opportunity),
+    )
+    migrated.commit()
+
+    summary = synchronize_opportunity_constraints(migrated)
+
+    assert summary.replaced == 1
+    assert _stored_type(migrated, opportunity) == "PFE"
+    assert _type_evidence(migrated, opportunity) == [
+        (
+            "OPPORTUNITY_TYPE_PFE_V1",
+            "DESCRIPTION",
+            "Stage PFE de 6 mois à Casablanca.",
+            "PFE",
+        )
+    ]
+
+
 def test_no_caller_can_name_the_version_a_projection_is_stored_under() -> None:
     """`EXTRACTOR_VERSION` is the contract; changing it means editing the code."""
     import inspect

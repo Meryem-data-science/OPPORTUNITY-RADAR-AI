@@ -76,7 +76,7 @@ def test_the_opportunity_type_registry_is_the_one_the_profile_side_uses() -> Non
 
 
 def test_the_extractor_version_is_the_documented_one() -> None:
-    assert EXTRACTOR_VERSION == "opportunity-constraints-v3"
+    assert EXTRACTOR_VERSION == "opportunity-constraints-v4"
 
 
 # --------------------------------------------------------------------------
@@ -222,6 +222,171 @@ def test_a_description_type_loses_to_the_title_but_is_used_alone() -> None:
     assert read("This is an alternance contract.").opportunity_type is (
         OpportunityType.ALTERNANCE
     )
+
+
+# --------------------------------------------------------------------------
+# A type wording is a word, not a run of characters (Phase 7B.2)
+#
+# The operational corpus caught this one. `v3` looked for a type wording with
+# `folded.find(signal)`, so `pfe` matched wherever those three characters
+# happened to sit — and they sit inside ordinary German words. Consulting and
+# marketing postings were stored as `PFE`, each carrying an evidence fragment
+# that named no PFE, and the Phase 2 classifier read the same postings as
+# `JOB`.
+#
+# The tests below say the cause, not the postings: no opportunity id appears
+# here, and none may. A rule keyed on an id would fix three rows and leave the
+# class of bug in place.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        # "Handlungsempfehlungen" contains "mpfeh" — and so "pfe".
+        "Sie leiten daraus konkrete Handlungsempfehlungen ab.",
+        # "auszuschöpfen" ends in "öpfen"; the accented letter is a word
+        # character, which is exactly why the boundary holds.
+        "Um das Potenzial der Daten voll auszuschöpfen.",
+        "Sie geben Empfehlungen zur Datenstrategie.",
+        # And the plain shapes of the same mistake, in any language.
+        "The XPFE module is part of our stack.",
+        "The internal codename for this workstream is PFE2.",
+    ),
+    ids=("Handlungsempfehlungen", "auszuschopfen", "Empfehlungen", "XPFE", "PFE2"),
+)
+def test_pfe_inside_a_longer_word_is_not_a_pfe(description) -> None:
+    """A substring is not a claim, so the honest answer is UNKNOWN."""
+    result = read(description, title="Senior Consultant Data & AI Strategy")
+
+    assert result.opportunity_type is None
+    assert not [
+        evidence
+        for evidence in result.evidence
+        if evidence.kind is ConstraintKind.OPPORTUNITY_TYPE
+    ]
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "PFE",
+        "PFE Data Scientist recherché.",
+        "Stage PFE de 6 mois dans notre équipe data.",
+        "Projet de fin d'études en data engineering.",
+        "Nous proposons un (PFE) encadré.",
+        "Il s'agit d'un PFE, encadré par un ingénieur.",
+        "Ce poste est un PFE.",
+        "PFE: sujet en machine learning.",
+    ),
+)
+def test_an_explicit_pfe_wording_is_still_a_pfe(description) -> None:
+    """Punctuation is not a word character, so it never hides a wording."""
+    assert read(description).opportunity_type is OpportunityType.PFE
+
+
+def test_a_final_year_internship_is_read_as_the_registry_spells_it() -> None:
+    result = read("A final-year internship in our data team.")
+
+    assert result.opportunity_type is OpportunityType.PFE
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    (
+        ("This internship runs in our data team.", OpportunityType.INTERNSHIP),
+        ("Offre de stage data à Casablanca.", OpportunityType.INTERNSHIP),
+        ("Nous recherchons un stagiaire data.", OpportunityType.INTERNSHIP),
+        ("Ce poste est en alternance.", OpportunityType.ALTERNANCE),
+        ("Un contrat d'apprentissage de 12 mois.", OpportunityType.ALTERNANCE),
+        ("Il s'agit d'un PFA encadré.", OpportunityType.PFA),
+        ("A summer internship in analytics.", OpportunityType.SUMMER_INTERNSHIP),
+        ("This is a pre-hire internship.", OpportunityType.PRE_HIRE_INTERNSHIP),
+    ),
+)
+def test_the_other_types_still_read_from_a_description(description, expected) -> None:
+    """The boundary is a guard on the wordings, not a narrowing of them."""
+    assert read(description).opportunity_type is expected
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    (
+        ("Junior Data Engineer", OpportunityType.JUNIOR_ROLE),
+        ("Graduate Programme Data", OpportunityType.FIRST_JOB),
+        ("Entry-level Data Analyst", OpportunityType.FIRST_JOB),
+        ("Data Science Internship", OpportunityType.INTERNSHIP),
+        ("Alternance Data Analyst", OpportunityType.ALTERNANCE),
+    ),
+)
+def test_the_title_only_types_still_read_from_a_title(title, expected) -> None:
+    assert read("A role in our team.", title=title).opportunity_type is expected
+
+
+def test_a_derived_word_is_not_the_wording_it_derives_from() -> None:
+    """`stage` does not imply `stages`, and that is the point.
+
+    A boundary-safe wording no longer arrives with its whole morphology for
+    free. That is the invariant, not a regression: a variant the corpus shows
+    is needed becomes its own registry entry, argued for like every other one.
+    """
+    assert read("Notre plateforme gère les stagings de données.").opportunity_type is None
+    assert read("The stagecoach museum is next door.").opportunity_type is None
+
+
+def test_the_evidence_quotes_the_fragment_that_named_the_type() -> None:
+    """Evidence is a pointer to a real wording, never to a chance substring."""
+    result = read(
+        "We advise clients on strategy.\nStage PFE de 6 mois à Casablanca.",
+        title="Data Scientist",
+    )
+
+    type_evidence = [
+        evidence
+        for evidence in result.evidence
+        if evidence.kind is ConstraintKind.OPPORTUNITY_TYPE
+    ]
+    assert len(type_evidence) == 1
+    assert type_evidence[0].rule_id == "OPPORTUNITY_TYPE_PFE_V1"
+    assert type_evidence[0].source_field is SourceField.DESCRIPTION
+    assert type_evidence[0].text == "Stage PFE de 6 mois à Casablanca."
+    assert type_evidence[0].normalized_value == "PFE"
+
+
+def test_a_description_pfe_stands_even_where_the_classifier_read_a_job() -> None:
+    """The classifier is not a veto: it is one source among three.
+
+    Phase 7B.2 is about the quality of the textual evidence and nothing else.
+    A description that says `Stage PFE` says it whatever a coarser reading of
+    the title concluded, and `JOB` is not in the classifier map at all.
+    """
+    result = read(
+        "Stage PFE de 6 mois dans notre équipe data.",
+        title="Data Scientist",
+        qualification_type="JOB",
+    )
+
+    assert result.opportunity_type is OpportunityType.PFE
+
+
+def test_every_type_signal_is_matched_on_its_boundaries() -> None:
+    """The guard is registry-wide, so a wording added later inherits it."""
+    from services.collector.extractors.opportunity_constraints.rules import (
+        _TYPE_SIGNALS,
+        _TYPE_SIGNAL_PATTERNS,
+    )
+
+    declared = {
+        signal for _type, _rule, signals, _ok in _TYPE_SIGNALS for signal in signals
+    }
+    assert declared == set(_TYPE_SIGNAL_PATTERNS)
+    for signal, pattern in _TYPE_SIGNAL_PATTERNS.items():
+        assert pattern.search(signal) is not None
+        # Glued to a letter on either side, the wording is no longer a wording.
+        assert pattern.search(f"x{signal}") is None
+        assert pattern.search(f"{signal}x") is None
+        # Punctuation and spaces are not word characters, so they never hide it.
+        assert pattern.search(f"({signal}).") is not None
 
 
 # --------------------------------------------------------------------------

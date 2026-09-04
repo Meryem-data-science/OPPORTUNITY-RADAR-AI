@@ -57,7 +57,17 @@ from services.digital_twin.preferences.models import OpportunityType, WorkMode
 #: also, explicitly, as a `PFE` was being reported as contradicting itself, and
 #: it is not: a PFE **is** an internship, named more precisely. See
 #: `SPECIFIC_INTERNSHIP_TYPES`.
-EXTRACTOR_VERSION = "opportunity-constraints-v3"
+#:
+#: `v4` is the operational corpus talking back about the other direction. `v3`
+#: looked for a type wording as a bare substring, so `pfe` inside
+#: `Handlungsempfehlungen`, `Empfehlungen` or `auszuschöpfen` made a German
+#: consulting posting a `PFE`, with evidence quoting a sentence that named no
+#: PFE. Type wordings are now matched as whole words or whole phrases — see
+#: `_TYPE_SIGNAL_PATTERNS` in `rules.py`. The same posting can therefore read
+#: differently under `v4` than under `v3`, which is exactly what moving this
+#: version is for: the next synchronization recomputes every projection stored
+#: under `v3`, unchanged text and all.
+EXTRACTOR_VERSION = "opportunity-constraints-v4"
 
 #: The longest evidence fragment stored for one rule match. Evidence is a
 #: pointer to why a value was asserted, not a copy of the posting: storing a

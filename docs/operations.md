@@ -1050,7 +1050,7 @@ one:
 | `projected` / `not_projected` | `status` only: how many hold a stored reading |
 | `known_opportunity_type` … `known_convention` | how many postings **stated** each thing. Never how many are suitable: there is nobody to be suitable for. `known_experience` counts postings holding at least one requirement, not requirements |
 | `conflicts` | how many contradictions were recorded rather than settled |
-| `extractor_version` | `opportunity-constraints-v3` |
+| `extractor_version` | `opportunity-constraints-v4` |
 | `changed` | `false` when the run found every projection already correct |
 
 A `known_*` count is a property of how postings are written. A low
