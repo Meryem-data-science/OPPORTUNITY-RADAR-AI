@@ -47,6 +47,8 @@ from services.geography.models import (
 )
 from services.geography.profile_target import (
     MOBILITY_ABSENT_RULE,
+    MOBILITY_MULTIPLE_COUNTRIES_RULE,
+    MOBILITY_UNRESOLVED_RULE,
     RESTRICTED_COUNTRY_RULE,
     resolve_profile_target,
 )
@@ -122,16 +124,21 @@ def profile_id(migrated) -> int:
     return ensure_user_profile(migrated, TEST_ONLY_EMAIL).profile_id
 
 
+def declare_mobility(connection, profile_id: int, *locations: str) -> int:
+    """Record a RESTRICTED mobility in the person's own words, and project it."""
+    set_profile_mobility(
+        connection,
+        profile_id,
+        MobilityPreference(scope=MobilityScope.RESTRICTED, locations=locations),
+    )
+    synchronize_profile_preferences(connection, profile_id)
+    return profile_id
+
+
 @pytest.fixture
 def moroccan_profile(migrated, profile_id) -> int:
     """A profile that restricted itself to Morocco, in its own words."""
-    set_profile_mobility(
-        migrated,
-        profile_id,
-        MobilityPreference(scope=MobilityScope.RESTRICTED, locations=("Maroc",)),
-    )
-    synchronize_profile_preferences(migrated, profile_id)
-    return profile_id
+    return declare_mobility(migrated, profile_id, "Maroc")
 
 
 def source_of(path: Path) -> str:
@@ -254,6 +261,38 @@ def test_migration_0024_alters_no_existing_table() -> None:
         assert f"CREATE TABLE {table}" not in statements
 
 
+def test_the_only_thing_0024_adds_to_the_source_table_is_an_index() -> None:
+    """The composite identity the foreign key needs is an index, not a column.
+
+    `0009` already uses this shape to keep one profile's projection off another
+    profile's facts. An index adds no column, changes no value, and leaves the
+    raw locations exactly as they were collected.
+    """
+    statements = executable_sql(MIGRATION)
+    touching_the_source = [
+        statement.strip()
+        for statement in statements.split(";")
+        if "opportunity_constraint_locations" in statement
+        and "CREATE TABLE opportunity_location_resolutions" not in statement
+    ]
+    assert len(touching_the_source) == 1
+    assert touching_the_source[0].startswith("CREATE UNIQUE INDEX")
+
+
+def test_the_source_table_carries_the_composite_identity(migrated) -> None:
+    indexes = {
+        row[1]: row[2]
+        for row in migrated.execute(
+            "PRAGMA index_list(opportunity_constraint_locations)"
+        )
+    }
+    name = "idx_opportunity_constraint_locations_id_opportunity"
+    assert indexes.get(name) == 1
+    assert [
+        row[2] for row in migrated.execute(f"PRAGMA index_info({name})")
+    ] == ["id", "opportunity_id"]
+
+
 def test_the_earlier_migrations_are_untouched() -> None:
     """`0024` adds a file; it does not edit the schema history."""
     for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
@@ -326,6 +365,71 @@ def test_two_readings_of_one_segment_are_refused(migrated, corpus) -> None:
 def test_a_resolution_of_an_absent_source_row_is_refused(migrated, corpus) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         _insert_resolution(migrated, source_location_id=9999)
+
+
+def test_a_resolution_may_not_point_at_another_postings_location(
+    migrated, corpus
+) -> None:
+    """The pair is a database rule, not an application convention.
+
+    This insert goes straight to SQLite, around
+    `store_location_resolutions` and its check: both ids exist, so two separate
+    foreign keys would have accepted it, and the row would have filed one
+    posting's Casablanca under another posting. The composite key refuses it.
+    """
+    assert migrated.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    moroccan_row = int(
+        migrated.execute(
+            "SELECT id FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+            (corpus["moroccan"],),
+        ).fetchone()[0]
+    )
+    # Both ids are real; only the pair is wrong.
+    assert migrated.execute(
+        "SELECT 1 FROM opportunities WHERE id = ?", (corpus["french"],)
+    ).fetchone() is not None
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        _insert_resolution(
+            migrated,
+            opportunity_id=corpus["french"],
+            source_location_id=moroccan_row,
+            segment_position=0,
+        )
+
+
+def test_the_honest_pair_is_accepted(migrated, corpus) -> None:
+    """The guard above refuses a mismatch, not every direct write."""
+    moroccan_row = int(
+        migrated.execute(
+            "SELECT id FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+            (corpus["moroccan"],),
+        ).fetchone()[0]
+    )
+    _insert_resolution(
+        migrated,
+        opportunity_id=corpus["moroccan"],
+        source_location_id=moroccan_row,
+        segment_position=0,
+    )
+    assert len(read_opportunity_resolutions(migrated, corpus["moroccan"])) == 1
+
+
+def test_deleting_a_source_location_takes_its_readings_with_it(
+    migrated, corpus
+) -> None:
+    """The composite key still cascades, exactly as the single one did."""
+    synchronize_location_resolutions(migrated)
+    moroccan_row = int(
+        migrated.execute(
+            "SELECT id FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+            (corpus["moroccan"],),
+        ).fetchone()[0]
+    )
+    migrated.execute(
+        "DELETE FROM opportunity_constraint_locations WHERE id = ?", (moroccan_row,)
+    )
+    migrated.commit()
+    assert read_opportunity_resolutions(migrated, corpus["moroccan"]) == ()
 
 
 # --------------------------------------------------------------------------
@@ -591,6 +695,50 @@ def test_resolving_a_target_never_writes_the_derived_code_back(
     stored = get_profile_mobility(migrated, moroccan_profile)
     assert stored.value.locations == ("Maroc",)
     assert "MA" not in before[0][3]
+
+
+def test_a_stated_mobility_needs_every_entry_placed_to_name_a_target(
+    migrated, profile_id
+) -> None:
+    """One entry this package cannot place withholds the target, on disk too.
+
+    Skipping it would let a declared `["Maroc", "Unsupported Place"]` answer
+    `MA` and quietly narrow a restriction its author wrote wider.
+    """
+    declare_mobility(migrated, profile_id, "Maroc", "Unsupported Place")
+    target = resolve_profile_target(migrated, profile_id)
+    assert target.country_code is None
+    assert target.rule_id == MOBILITY_UNRESOLVED_RULE
+
+
+def test_a_stated_mobility_naming_two_countries_names_no_target(
+    migrated, profile_id
+) -> None:
+    """The profile audited before this slice still said `["Maroc", "France"]`."""
+    declare_mobility(migrated, profile_id, "Maroc", "France")
+    target = resolve_profile_target(migrated, profile_id)
+    assert target.country_code is None
+    assert target.rule_id == MOBILITY_MULTIPLE_COUNTRIES_RULE
+
+
+def test_two_entries_naming_morocco_still_name_morocco(migrated, profile_id) -> None:
+    declare_mobility(migrated, profile_id, "Maroc", "Casablanca")
+    target = resolve_profile_target(migrated, profile_id)
+    assert target.country_code == "MA"
+    assert target.rule_id == RESTRICTED_COUNTRY_RULE
+
+
+def test_an_unresolvable_mobility_is_still_kept_verbatim(
+    migrated, profile_id
+) -> None:
+    """Refusing to derive a target changes nothing about what the person said."""
+    declare_mobility(migrated, profile_id, "Maroc", "Unsupported Place")
+    before = _mobility_rows(migrated)
+    resolve_profile_target(migrated, profile_id)
+    assert _mobility_rows(migrated) == before
+    stored = get_profile_mobility(migrated, profile_id)
+    assert stored.value.locations == ("Maroc", "Unsupported Place")
+    assert stored.value.scope is MobilityScope.RESTRICTED
 
 
 def test_no_verdict_is_written_anywhere_by_an_audit(

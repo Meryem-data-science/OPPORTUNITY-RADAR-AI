@@ -534,11 +534,20 @@ def test_storing_for_an_absent_posting_is_refused(migrated) -> None:
     assert _counts(migrated) == (0,) * len(CONSTRAINT_TABLES)
 
 
+#: `0012` and the later migrations that build directly on its tables. A
+#: database without `0012` cannot have them either: `0024` creates the
+#: composite identity index its foreign key needs *on*
+#: `opportunity_constraint_locations`, so it fails outright when that table is
+#: absent — which is the correct behaviour, and the reason this test names it
+#: here rather than pretending such a database is applicable.
+WITHOUT_0012 = ("0012", "0024")
+
+
 def test_synchronizing_before_the_migration_is_refused(tmp_path) -> None:
     connection = connect_database(tmp_path / "partial.db")
     try:
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY):
-            if migration.version == "0012":
+            if migration.version in WITHOUT_0012:
                 continue
             connection.executescript(migration.path.read_text(encoding="utf-8"))
         with pytest.raises(OpportunityConstraintServiceError):

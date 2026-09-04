@@ -10,13 +10,27 @@ source is a value that can disagree with it.
 The rules are the ones the rest of this package uses, applied to the person's
 side of the database:
 
-    mobility-restricted-country-v1  RESTRICTED, and the locations name one
-                                    country the registry knows -> that country
+    mobility-restricted-country-v1  RESTRICTED, and **every** location the
+                                    person named resolves to the same country
+                                    -> that country
     mobility-absent-v1              no accepted MOBILITY fact -> UNKNOWN
     mobility-open-v1                OPEN -> UNKNOWN
-    mobility-unresolved-v1          the locations named nothing the registry
-                                    knows -> UNKNOWN
-    mobility-multiple-countries-v1  the locations named several -> UNKNOWN
+    mobility-unresolved-v1          at least one location this package could
+                                    not place -> UNKNOWN
+    mobility-multiple-countries-v1  every location placed, in several
+                                    countries -> UNKNOWN
+
+**A target country is unanimous or it does not exist.** Every declared location
+must resolve, and all of them to one country; a single AMBIGUOUS or UNKNOWN
+entry withholds the target rather than being skipped. `["Maroc", "Atlantis"]`
+is UNKNOWN, not `MA`: ignoring the entry nobody could place would read absence
+of evidence as agreement, quietly narrow a restriction the person wrote wider
+than one country, and let the evaluator answer OUT_OF_TARGET about a place they
+may well have meant to include. `UNKNOWN` is not `FALSE` on this side of the
+database either.
+
+`["Maroc", "Casablanca"]` is `MA` all the same: several entries naming one
+country are unanimous, not multiple.
 
 `OPEN` is UNKNOWN and not a target, however the locations read. `OPEN` means
 "I will go anywhere", possibly with a preference attached; deriving a target
@@ -77,21 +91,30 @@ def resolve_declared_target(
     resolver — the same registry, the same normalisation, the same rule ids —
     so `Maroc` on the profile side and `Maroc` on the posting side can never be
     read two different ways.
+
+    A target is unanimous or absent: every segment of every declared location
+    must resolve, and all to one country. Nothing here drops the segments it
+    could not read.
     """
     if scope is MobilityScope.OPEN:
         return ProfileTarget(
             profile_id=profile_id, country_code=None, rule_id=MOBILITY_OPEN_RULE
         )
-    countries = {
-        segment.country_code
+    segments = tuple(
+        segment
         for location in locations
         for segment in resolve_location_text(location)
-        if segment.status is ResolutionStatus.RESOLVED
-    }
-    if not countries:
+    )
+    # An entry nobody could place is not an entry that can be skipped. One
+    # AMBIGUOUS or UNKNOWN segment — and the empty case, which resolves
+    # nothing at all — withholds the target.
+    if not segments or any(
+        segment.status is not ResolutionStatus.RESOLVED for segment in segments
+    ):
         return ProfileTarget(
             profile_id=profile_id, country_code=None, rule_id=MOBILITY_UNRESOLVED_RULE
         )
+    countries = {segment.country_code for segment in segments}
     if len(countries) > 1:
         return ProfileTarget(
             profile_id=profile_id,

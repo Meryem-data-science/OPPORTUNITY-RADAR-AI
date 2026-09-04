@@ -173,6 +173,14 @@ def test_a_restriction_to_morocco_resolves_to_ma() -> None:
     assert target_of(MobilityScope.RESTRICTED, "Casablanca, Maroc")[0] == "MA"
 
 
+def test_several_entries_naming_one_country_are_unanimous_not_multiple() -> None:
+    """`["Maroc", "Casablanca"]` says Morocco twice, which is still Morocco."""
+    assert target_of(MobilityScope.RESTRICTED, "Maroc", "Casablanca") == (
+        "MA",
+        RESTRICTED_COUNTRY_RULE,
+    )
+
+
 def test_a_mobility_naming_several_countries_is_unknown_and_never_the_first() -> None:
     """`["Maroc", "France"]` is "not restricted to one country", not "Morocco"."""
     assert target_of(MobilityScope.RESTRICTED, "Maroc", "France") == (
@@ -187,6 +195,30 @@ def test_a_mobility_the_registry_does_not_recognise_is_unknown() -> None:
         MOBILITY_UNRESOLVED_RULE,
     )
     assert target_of(MobilityScope.RESTRICTED, "APAC")[0] is None
+
+
+@pytest.mark.parametrize("unplaceable", ["Atlantis", "APAC", "Any Office"])
+def test_one_unplaceable_entry_withholds_the_whole_target(unplaceable) -> None:
+    """An entry nobody could place is never skipped to reach a target.
+
+    Dropping it would read absence of evidence as agreement: `["Maroc", X]`
+    would answer `MA`, silently narrowing a restriction the person may well
+    have written wider than one country, and the evaluator would then answer
+    OUT_OF_TARGET about places X might have covered. UNKNOWN is not FALSE on
+    this side of the database either.
+    """
+    assert target_of(MobilityScope.RESTRICTED, "Maroc", unplaceable) == (
+        None,
+        MOBILITY_UNRESOLVED_RULE,
+    )
+
+
+def test_a_mobility_that_resolves_to_nothing_at_all_is_unknown() -> None:
+    assert target_of(MobilityScope.RESTRICTED, "Unsupported Place") == (
+        None,
+        MOBILITY_UNRESOLVED_RULE,
+    )
+    assert target_of(MobilityScope.RESTRICTED) == (None, MOBILITY_UNRESOLVED_RULE)
 
 
 def test_an_open_mobility_names_no_target_however_it_is_written() -> None:

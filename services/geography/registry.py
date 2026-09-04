@@ -18,12 +18,19 @@ Three catalogues, three jobs:
 `CITY_COUNTRIES`    the few cities allowed to imply a country on their own.
 `AMBIGUOUS_REGIONS` text that names a real area but never one country.
 
-**No bare two-letter alias is registered**, and that is the trap this file
+**Exactly two bare two-letter aliases are registered — `UK` and `US` — and no
+other two-letter token resolves to anything.** That is the trap this file
 exists to avoid: the corpus contains `San Francisco, CA` and `New York, NY`,
 where `CA` is California and `MA` is Massachusetts — not Canada and not
-Morocco. `UK`, `USA` and `UAE` are the exceptions, and each is three letters or
-collides with no state code. A posting written `Casablanca, MA` therefore
-resolves through the city, or not at all; it never resolves through `MA`.
+Morocco, whatever ISO 3166-1 says those codes mean. `UK` and `US` are in
+because neither is a US state abbreviation; every other country's two-letter
+code is out, including `MA` itself. A posting written `Casablanca, MA`
+therefore resolves through the city, or not at all; it never resolves through
+`MA`. (`USA` and `UAE` are registered too and are not exceptions to anything —
+they are three letters, and no state is abbreviated that way.)
+
+A test pins that exact set, so widening it is a deliberate edit rather than an
+accident.
 
 The city catalogue is Moroccan and small on purpose. The product targets the
 whole of Morocco with no city restriction, so a city is never a decision here —
