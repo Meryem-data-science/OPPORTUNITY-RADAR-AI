@@ -1,0 +1,291 @@
+# Phase 7C.1 — the declared Morocco PFE/stage source universe, version 1.
+#
+# THIS FILE IS NOT config/sources.yaml AND ACTIVATES NOTHING.
+#
+# `config/sources.yaml` is the operational catalogue: a row there is collected
+# by the RadarAgent. A row *here* is a statement of what we want our coverage to
+# be measured against — the explicit denominator of every recall number Phase
+# 7C will ever publish. Nothing here is loaded by a collector, by the factory or
+# by the agent, and the only link between the two files is
+# `production_source_id`, which is null for everything that does not already run.
+#
+# What is deliberately not claimed here:
+#
+# * no scraper, API, feed or export is asserted to exist for any site below.
+#   Where we do not know, the entry says NEEDS_VERIFICATION and its note says
+#   what is unverified, rather than describing a capability nobody has checked;
+# * no homepage URL below was fetched. `homepage_url_status` says whether the
+#   URL is evidence we were handed (EVIDENCED), a domain written from public
+#   knowledge and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN);
+# * LinkedIn is collected from Gmail job-alert mail and from nothing else. There
+#   is no LinkedIn scraping in this project and the strategy registry has no
+#   member that would describe one.
+
+map_name: morocco_pfe_source_coverage
+version: v1
+scope_country: MA
+created_for_phase: "7C.1"
+is_production_registry: false
+production_registry_path: config/sources.yaml
+
+sources:
+  # ---------------------------------------------------------------- P0 -----
+  # What already runs, and the employers' own pages, which outrank every
+  # republication of them.
+  - id: linkedin_job_alert_email
+    name: LinkedIn job alerts (Gmail)
+    homepage_url: https://www.linkedin.com/jobs/
+    homepage_url_status: WELL_KNOWN_UNVERIFIED
+    source_class: LINKEDIN_ALERT
+    priority: P0
+    coverage_role: PRIMARY
+    collection_strategy: GMAIL_ALERT
+    integration_status: ACTIVE
+    country: MA
+    production_source_id: linkedin_job_alert_email
+    live_canary: false
+    notes: >-
+      The only source in this map that already collects. Opportunities are read
+      conservatively out of LinkedIn job-alert email through the read-only Gmail
+      API; LinkedIn itself is never authenticated to, opened or scraped. Alert
+      mail is a filtered feed of what LinkedIn chose to send, so its coverage of
+      Morocco PFE postings is unknown and is exactly what 7C.2 must measure.
+
+  - id: oracle_morocco_rd_careers
+    name: Oracle Morocco — Research & Development careers
+    homepage_url: https://www.oracle.com/ma/careers/research-development/
+    homepage_url_status: EVIDENCED
+    source_class: OFFICIAL_CAREER
+    priority: P0
+    coverage_role: AUDIT
+    collection_strategy: MANUAL_BENCHMARK
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: true
+    notes: >-
+      LIVE CANARY, not a gold opportunity row. This official page publicly
+      advertises Oracle's Morocco PFE 2027 internship programme, which makes it
+      evidence that an employer-side PFE universe exists outside every board we
+      read. It is recorded here as source evidence because 7C.1 has no
+      opportunity-level structured detail for it; fabricating a benchmark row
+      from a programme page is exactly what this map exists to prevent. Whether
+      the page exposes per-posting URLs, or which ATS backs it, is unverified.
+
+  - id: official_employer_career_pages_ma
+    name: Official employer career pages (Morocco)
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: OFFICIAL_CAREER
+    priority: P0
+    coverage_role: PRIMARY
+    collection_strategy: FUTURE_GENERIC_ATS
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      The class, not one site: the employer-published PFE offers that no board
+      republishes. It has no single homepage and no collector; enumerating the
+      employers worth reading, and finding which of them expose a reusable ATS,
+      is future work. Kept at P0 because an official posting is the most
+      authoritative form of every opportunity we could otherwise only see
+      second-hand.
+
+  # ---------------------------------------------------------------- P1 -----
+  # The next collectors to be evaluated, in the order the architect fixed.
+  # None of them is implemented and 7C.1 implements none of them.
+  - id: rekrute
+    name: ReKrute
+    homepage_url: https://www.rekrute.com
+    homepage_url_status: WELL_KNOWN_UNVERIFIED
+    source_class: JOB_BOARD
+    priority: P1
+    coverage_role: PRIMARY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: CANDIDATE
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      First production collector candidate after LinkedIn (planned 7C.3). No
+      collector exists. Whether the site offers a feed, an export or any stable
+      listing structure has not been verified, and its terms of use have not
+      been reviewed here.
+
+  - id: stagiaires_ma
+    name: Stagiaires.ma
+    homepage_url: https://www.stagiaires.ma
+    homepage_url_status: WELL_KNOWN_UNVERIFIED
+    source_class: INTERNSHIP_BOARD
+    priority: P1
+    coverage_role: PRIMARY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: CANDIDATE
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Internship-specific board, so its listings are close to the product's
+      narrowed scope (planned 7C.4). No collector exists and no access method is
+      verified.
+
+  - id: stage_ma
+    name: Stage.ma
+    homepage_url: https://www.stage.ma
+    homepage_url_status: EVIDENCED
+    source_class: INTERNSHIP_BOARD
+    priority: P1
+    coverage_role: PRIMARY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: CANDIDATE
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      The source of both seed rows of morocco_pfe_gold_v1, which is why its
+      domain is evidenced rather than assumed: real PFE/AI postings were
+      observed on it. Being a benchmark source does not make it a collected one
+      — no collector exists (planned 7C.5).
+
+  - id: talentsoft_hosted_career_sites
+    name: TalentSoft-hosted employer career sites
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: ATS
+    priority: P1
+    coverage_role: PRIMARY
+    collection_strategy: FUTURE_GENERIC_ATS
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Recorded because a reusable ATS would let one integration cover many
+      employers at once, the way the existing Greenhouse collector does for two
+      global boards. Which Moroccan employers publish PFE offers on
+      TalentSoft-hosted sites, on what hosts, and whether any public listing
+      endpoint exists, is all unverified. No host list is asserted here.
+
+  # ---------------------------------------------------------------- P2 -----
+  # Discovery breadth. Useful for finding opportunities we would otherwise miss
+  # entirely; not trusted as the authoritative statement of any posting.
+  - id: dreamjob_ma
+    name: Dreamjob
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: JOB_BOARD
+    priority: P2
+    coverage_role: DISCOVERY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Named as a Morocco job board worth covering. Its exact domain was not
+      confirmed in this slice, so no URL is recorded rather than a guessed one.
+
+  - id: wadifaweb
+    name: Wadifaweb
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: JOB_BOARD
+    priority: P2
+    coverage_role: DISCOVERY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Named as a Morocco job board worth covering. Domain and listing structure
+      unverified; no URL is recorded rather than a guessed one.
+
+  - id: ekhadma
+    name: eKhadma
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: JOB_BOARD
+    priority: P2
+    coverage_role: DISCOVERY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Named as a Morocco job board worth covering. Domain and listing structure
+      unverified; no URL is recorded rather than a guessed one.
+
+  - id: indeed_maroc
+    name: Indeed Maroc
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: DISCOVERY_AGGREGATOR
+    priority: P2
+    coverage_role: DISCOVERY
+    collection_strategy: FUTURE_COLLECTOR
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      An aggregator republishing other people's postings, so it is a way to
+      discover an opportunity, never the authority on it — the official or
+      board URL behind an Indeed listing is the one worth resolving. Its
+      Morocco domain, its access terms and whether automated collection is
+      permitted at all are unverified.
+
+  # ---------------------------------------------------------------- P3 -----
+  # Audit only. Read to find what the layers above missed, not to be collected.
+  - id: marocannonces
+    name: MarocAnnonces
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: DISCOVERY_AGGREGATOR
+    priority: P3
+    coverage_role: AUDIT
+    collection_strategy: MANUAL_BENCHMARK
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      General classifieds carrying employment ads among much else. Useful for a
+      manual audit of what the P0-P2 layers missed; not a production candidate
+      in any planned slice. Domain and structure unverified.
+
+  - id: pfe_daba
+    name: PFE Daba
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: DISCOVERY_AGGREGATOR
+    priority: P3
+    coverage_role: AUDIT
+    collection_strategy: MANUAL_BENCHMARK
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Named as a PFE-focused aggregator. Topically the closest thing to this
+      product's scope in the P3 layer, which makes it valuable for auditing
+      recall — but nothing about its domain, its provenance or whether it
+      republishes or originates postings has been verified.
+
+  - id: interactjob
+    name: InteractJob
+    homepage_url: null
+    homepage_url_status: UNKNOWN
+    source_class: DISCOVERY_AGGREGATOR
+    priority: P3
+    coverage_role: AUDIT
+    collection_strategy: MANUAL_BENCHMARK
+    integration_status: NEEDS_VERIFICATION
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Named as a secondary aggregator to audit against. Domain and structure
+      unverified.

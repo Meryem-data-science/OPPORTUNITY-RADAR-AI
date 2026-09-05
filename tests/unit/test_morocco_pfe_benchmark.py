@@ -1,0 +1,531 @@
+"""Tests for the Phase 7C.1 Morocco source map and gold benchmark foundation.
+
+Every test here is offline. No test opens a socket, and none should ever: the
+URLs in the benchmark are recorded facts, and checking whether one still
+resolves is a live concern that would make this suite fail for reasons that
+have nothing to do with the artefacts it validates.
+
+The rejection tests are written against small in-memory documents rather than
+by mutating the committed files, so a real artefact is never rewritten to prove
+that a validator refuses something.
+"""
+
+from copy import deepcopy
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+
+from evaluation.morocco_pfe.validator import (
+    BENCHMARK_COUNTRY_CODE,
+    COLLECTION_STRATEGIES,
+    COVERAGE_ROLES,
+    DEFAULT_BENCHMARK_PATH,
+    DEFAULT_MANIFEST_PATH,
+    DEFAULT_SOURCE_MAP_PATH,
+    INTEGRATION_STATUSES,
+    OBSERVATION_HORIZONS,
+    PRIORITIES,
+    SOURCE_AUTHORITIES,
+    SOURCE_CLASSES,
+    BenchmarkValidationError,
+    SourceMapValidationError,
+    check_source_map_against_production_registry,
+    load_benchmark_records,
+    load_manifest,
+    load_source_map,
+    parse_benchmark_lines,
+    parse_source_map,
+    validate_benchmark,
+    validate_manifest_document,
+)
+from services.collector.sources import DEFAULT_SOURCE_REGISTRY, load_source_registry
+from services.digital_twin.preferences.models import OpportunityType
+
+PRODUCTION_SOURCE_REGISTRY = Path("config/sources.yaml")
+
+
+def seed_record() -> dict[str, object]:
+    """Return the first committed benchmark row, as a mutable copy."""
+    return deepcopy(load_benchmark_records(DEFAULT_BENCHMARK_PATH)[0])
+
+
+def as_jsonl(*records: dict[str, object]) -> str:
+    return "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records)
+
+
+def source_map_document() -> dict[str, object]:
+    """Return the committed source map document, as a mutable copy."""
+    return yaml.safe_load(DEFAULT_SOURCE_MAP_PATH.read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------- benchmark ---
+
+
+def test_committed_benchmark_and_manifest_validate() -> None:
+    report = validate_benchmark(DEFAULT_BENCHMARK_PATH, DEFAULT_MANIFEST_PATH)
+
+    assert report.record_count == 2
+    assert report.status == "DRAFT"
+    assert report.target_minimum_rows >= 60
+    assert report.evaluation_ready is False
+    assert report.rows_missing_for_target == report.target_minimum_rows - 2
+
+
+def test_seed_rows_are_the_two_real_observed_stage_ma_opportunities() -> None:
+    records = load_benchmark_records(DEFAULT_BENCHMARK_PATH)
+
+    by_id = {record["benchmark_id"]: record for record in records}
+    assert sorted(by_id) == ["stage-ma-9233", "stage-ma-9279"]
+    for record in records:
+        # Identity is derived from the source, never from `opportunities.id`.
+        assert record["benchmark_id"].startswith("stage-ma-")
+        assert record["source_name"] == "Stage.ma"
+        assert record["country_code"] == BENCHMARK_COUNTRY_CODE
+        assert record["historical_or_live"] == "HISTORICAL"
+        assert record["source_authority"] == "JOB_BOARD"
+        assert record["expected_opportunity_type"] == OpportunityType.PFE.value
+        assert record["expected_data_ai"] is True
+        assert record["source_url"].startswith("https://www.stage.ma/offres-stage/")
+        # No official employer URL is known for either row, and none is invented.
+        assert record["official_application_url"] is None
+
+    assert by_id["stage-ma-9279"]["organization"] == "ARRA Engineering"
+    assert by_id["stage-ma-9279"]["published_at"] == "2026-03-02"
+    assert by_id["stage-ma-9233"]["organization"] == "PionovaAI"
+    assert by_id["stage-ma-9233"]["published_at"] == "2026-01-31"
+
+
+def test_benchmark_ids_are_unique_and_a_duplicate_is_rejected() -> None:
+    records = load_benchmark_records(DEFAULT_BENCHMARK_PATH)
+    identifiers = [record["benchmark_id"] for record in records]
+    assert len(set(identifiers)) == len(identifiers)
+
+    duplicate = deepcopy(records[0])
+    with pytest.raises(BenchmarkValidationError, match="duplicate benchmark_id"):
+        parse_benchmark_lines(as_jsonl(records[0], duplicate))
+
+
+def test_invalid_jsonl_syntax_is_rejected() -> None:
+    with pytest.raises(BenchmarkValidationError, match="invalid JSON"):
+        parse_benchmark_lines('{"benchmark_id": "stage-ma-9279",\n')
+
+
+@pytest.mark.parametrize("empty", ["", "   ", None, 7])
+def test_empty_or_non_string_benchmark_id_is_rejected(empty: object) -> None:
+    record = seed_record()
+    record["benchmark_id"] = empty
+    with pytest.raises(BenchmarkValidationError, match="benchmark_id"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize("country", ["FR", "ma", "MAR", "", None])
+def test_country_other_than_ma_is_rejected(country: object) -> None:
+    record = seed_record()
+    record["country_code"] = country
+    with pytest.raises(BenchmarkValidationError, match="country_code"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "not-a-url",
+        "ftp://www.stage.ma/offres-stage/9279",
+        "www.stage.ma/offres-stage/9279",
+        "https://",
+        None,
+    ],
+)
+def test_invalid_source_url_is_rejected(url: object) -> None:
+    record = seed_record()
+    record["source_url"] = url
+    with pytest.raises(BenchmarkValidationError, match="source_url"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+def test_official_application_url_may_be_null_but_not_malformed() -> None:
+    record = seed_record()
+    record["official_application_url"] = None
+    assert parse_benchmark_lines(as_jsonl(record))[0][
+        "official_application_url"
+    ] is None
+
+    record["official_application_url"] = "javascript:void(0)"
+    with pytest.raises(BenchmarkValidationError, match="official_application_url"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize("horizon", ["EXPIRED", "historical", "ARCHIVED", None])
+def test_invalid_historical_or_live_is_rejected(horizon: object) -> None:
+    record = seed_record()
+    record["historical_or_live"] = horizon
+    with pytest.raises(BenchmarkValidationError, match="historical_or_live"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize("authority", ["BOARD", "job_board", "SCRAPER", None])
+def test_invalid_source_authority_is_rejected(authority: object) -> None:
+    record = seed_record()
+    record["source_authority"] = authority
+    with pytest.raises(BenchmarkValidationError, match="source_authority"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+def test_expected_opportunity_type_uses_the_shared_closed_registry() -> None:
+    record = seed_record()
+    for member in OpportunityType:
+        record["expected_opportunity_type"] = member.value
+        assert parse_benchmark_lines(as_jsonl(record))
+
+    record["expected_opportunity_type"] = "GRADUATION_PROJECT"
+    with pytest.raises(BenchmarkValidationError, match="expected_opportunity_type"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize("label", [True, False, None])
+def test_expected_data_ai_accepts_exactly_three_answers(label: object) -> None:
+    record = seed_record()
+    record["expected_data_ai"] = label
+    assert parse_benchmark_lines(as_jsonl(record))[0]["expected_data_ai"] is label
+
+
+@pytest.mark.parametrize("label", ["true", 1, "YES"])
+def test_expected_data_ai_rejects_anything_else(label: object) -> None:
+    record = seed_record()
+    record["expected_data_ai"] = label
+    with pytest.raises(BenchmarkValidationError, match="expected_data_ai"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize(
+    "published_at", ["02/03/2026", "2026-3-2", "20260302", "2026-13-02"]
+)
+def test_published_at_must_be_null_or_an_iso_date(published_at: str) -> None:
+    record = seed_record()
+    record["published_at"] = published_at
+    with pytest.raises(BenchmarkValidationError, match="published_at"):
+        parse_benchmark_lines(as_jsonl(record))
+
+    record["published_at"] = None
+    assert parse_benchmark_lines(as_jsonl(record))[0]["published_at"] is None
+
+
+def test_observed_at_is_required_and_cannot_precede_publication() -> None:
+    record = seed_record()
+    record["observed_at"] = None
+    with pytest.raises(BenchmarkValidationError, match="observed_at"):
+        parse_benchmark_lines(as_jsonl(record))
+
+    record = seed_record()
+    record["published_at"] = "2026-03-02"
+    record["observed_at"] = "2026-03-01"
+    with pytest.raises(BenchmarkValidationError, match="precedes published_at"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("title", "Sample PFE offer"),
+        ("organization", "Acme SARL"),
+        ("organization", "Example Corp"),
+        ("title", "TODO fill this in"),
+        ("source_name", "Placeholder board"),
+    ],
+)
+def test_manifestly_synthetic_records_are_rejected(field: str, value: str) -> None:
+    record = seed_record()
+    record[field] = value
+    with pytest.raises(BenchmarkValidationError, match="synthetic"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+def test_placeholder_urls_are_rejected() -> None:
+    record = seed_record()
+    record["source_url"] = "https://example.com/offres-stage/9279"
+    with pytest.raises(BenchmarkValidationError, match="placeholder host"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+def test_a_record_missing_or_gaining_a_field_is_rejected() -> None:
+    record = seed_record()
+    del record["notes"]
+    with pytest.raises(BenchmarkValidationError, match="missing field"):
+        parse_benchmark_lines(as_jsonl(record))
+
+    record = seed_record()
+    record["opportunity_id"] = 12
+    with pytest.raises(BenchmarkValidationError, match="unexpected field"):
+        parse_benchmark_lines(as_jsonl(record))
+
+
+def test_no_seed_record_carries_an_operational_database_identity() -> None:
+    for record in load_benchmark_records(DEFAULT_BENCHMARK_PATH):
+        assert "opportunity_id" not in record
+        assert "id" not in record
+
+
+# ---------------------------------------------------------------- manifest ---
+
+
+def test_committed_manifest_declares_a_draft_seed() -> None:
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+
+    assert manifest["benchmark_name"] == "morocco_pfe_gold_v1"
+    assert manifest["scope_country"] == BENCHMARK_COUNTRY_CODE
+    assert manifest["status"] == "DRAFT"
+    assert manifest["created_for_phase"] == "7C.1"
+    assert manifest["target_minimum_rows"] >= 60
+    assert manifest["evaluation_ready"] is False
+    assert manifest["current_rows"] == 2
+
+
+def test_manifest_row_count_must_match_the_jsonl(tmp_path: Path) -> None:
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+    manifest["current_rows"] = 47
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BenchmarkValidationError, match="current_rows"):
+        validate_benchmark(DEFAULT_BENCHMARK_PATH, manifest_path)
+
+
+def test_evaluation_ready_is_refused_while_the_seed_is_too_small(
+    tmp_path: Path,
+) -> None:
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+    manifest["evaluation_ready"] = True
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(BenchmarkValidationError, match="evaluation_ready must be false"):
+        validate_benchmark(DEFAULT_BENCHMARK_PATH, manifest_path)
+
+
+def test_a_benchmark_at_its_target_may_be_declared_ready_after_human_review(
+    tmp_path: Path,
+) -> None:
+    """The readiness rule is coherence, not a ceiling on the benchmark's life."""
+    seed = seed_record()
+    rows = []
+    for index in range(60):
+        row = deepcopy(seed)
+        row["benchmark_id"] = f"stage-ma-{9000 + index}"
+        rows.append(row)
+    benchmark_path = tmp_path / "gold.jsonl"
+    benchmark_path.write_text(as_jsonl(*rows), encoding="utf-8")
+
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+    manifest["current_rows"] = 60
+    manifest["evaluation_ready"] = True
+    manifest["status"] = "REVIEWED"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = validate_benchmark(benchmark_path, manifest_path)
+    assert report.evaluation_ready is True
+    assert report.rows_missing_for_target == 0
+
+
+def test_manifest_scope_country_must_be_ma() -> None:
+    manifest = load_manifest(DEFAULT_MANIFEST_PATH)
+    manifest["scope_country"] = "FR"
+    with pytest.raises(BenchmarkValidationError, match="scope_country"):
+        validate_manifest_document(manifest)
+
+
+# -------------------------------------------------------------- source map ---
+
+
+def test_committed_source_map_loads() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    assert source_map.map_name == "morocco_pfe_source_coverage"
+    assert source_map.version == "v1"
+    assert source_map.scope_country == BENCHMARK_COUNTRY_CODE
+    assert source_map.created_for_phase == "7C.1"
+    assert len(source_map.sources) == 14
+    assert len({entry.id for entry in source_map.sources}) == len(source_map.sources)
+    for priority in ("P0", "P1", "P2", "P3"):
+        assert source_map.by_priority(priority), f"{priority} has no source"
+
+
+def test_every_mapped_source_is_morocco_scoped_and_uses_closed_registries() -> None:
+    for entry in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources:
+        assert entry.country == BENCHMARK_COUNTRY_CODE
+        assert entry.source_class in SOURCE_CLASSES
+        assert entry.priority in PRIORITIES
+        assert entry.coverage_role in COVERAGE_ROLES
+        assert entry.collection_strategy in COLLECTION_STRATEGIES
+        assert entry.integration_status in INTEGRATION_STATUSES
+
+
+def test_the_expected_morocco_sources_are_mapped() -> None:
+    by_id = {entry.id: entry for entry in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources}
+
+    assert by_id["rekrute"].priority == "P1"
+    assert by_id["stagiaires_ma"].priority == "P1"
+    assert by_id["stage_ma"].priority == "P1"
+    assert by_id["talentsoft_hosted_career_sites"].source_class == "ATS"
+    for identifier in ("dreamjob_ma", "wadifaweb", "ekhadma", "indeed_maroc"):
+        assert by_id[identifier].priority == "P2"
+    for identifier in ("marocannonces", "pfe_daba", "interactjob"):
+        assert by_id[identifier].priority == "P3"
+        assert by_id[identifier].coverage_role == "AUDIT"
+
+
+def test_linkedin_is_collected_through_gmail_alerts_only() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+    linkedin = next(
+        entry for entry in source_map.sources if entry.source_class == "LINKEDIN_ALERT"
+    )
+
+    assert linkedin.id == "linkedin_job_alert_email"
+    assert linkedin.collection_strategy == "GMAIL_ALERT"
+    assert linkedin.integration_status == "ACTIVE"
+    assert linkedin.production_source_id == "linkedin_job_alert_email"
+    # There is no scraping strategy to choose, in this entry or in the registry.
+    assert "SCRAPER" not in COLLECTION_STRATEGIES
+    assert not any(
+        "scrap" in strategy.lower() for strategy in COLLECTION_STRATEGIES
+    )
+
+
+def test_a_linkedin_source_may_not_declare_another_strategy() -> None:
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["source_class"] == "LINKEDIN_ALERT":
+            entry["collection_strategy"] = "FUTURE_COLLECTOR"
+            entry["integration_status"] = "CANDIDATE"
+            entry["production_source_id"] = None
+    with pytest.raises(SourceMapValidationError, match="GMAIL_ALERT only"):
+        parse_source_map(document)
+
+
+def test_only_really_configured_sources_may_claim_to_be_active() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+    configured = {source.id for source in load_source_registry(PRODUCTION_SOURCE_REGISTRY)}
+
+    active = check_source_map_against_production_registry(
+        source_map, PRODUCTION_SOURCE_REGISTRY
+    )
+    assert [entry.id for entry in active] == ["linkedin_job_alert_email"]
+    for entry in source_map.sources:
+        if entry.integration_status == "ACTIVE":
+            assert entry.production_source_id in configured
+        else:
+            assert entry.production_source_id is None
+
+
+def test_an_active_claim_without_a_configured_collector_is_rejected() -> None:
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["integration_status"] = "ACTIVE"
+            entry["collection_strategy"] = "EXISTING_COLLECTOR"
+            entry["production_source_id"] = "rekrute_collector"
+    source_map = parse_source_map(document)
+
+    with pytest.raises(SourceMapValidationError, match="does not configure"):
+        check_source_map_against_production_registry(
+            source_map, PRODUCTION_SOURCE_REGISTRY
+        )
+
+
+def test_a_candidate_source_may_not_claim_an_implemented_strategy() -> None:
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "stage_ma":
+            entry["collection_strategy"] = "EXISTING_COLLECTOR"
+    with pytest.raises(SourceMapValidationError, match="claims an implemented collector"):
+        parse_source_map(document)
+
+
+def test_a_source_outside_morocco_is_rejected() -> None:
+    document = source_map_document()
+    document["sources"][0]["country"] = "FR"
+    with pytest.raises(SourceMapValidationError, match="country"):
+        parse_source_map(document)
+
+
+def test_an_unrecorded_homepage_url_must_say_so() -> None:
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "wadifaweb":
+            entry["homepage_url_status"] = "WELL_KNOWN_UNVERIFIED"
+    with pytest.raises(SourceMapValidationError, match="homepage_url_status"):
+        parse_source_map(document)
+
+
+def test_oracle_is_a_live_canary_and_not_a_gold_opportunity_row() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+    canaries = source_map.live_canaries
+
+    assert [entry.id for entry in canaries] == ["oracle_morocco_rd_careers"]
+    oracle = canaries[0]
+    assert oracle.source_class == "OFFICIAL_CAREER"
+    assert oracle.homepage_url == "https://www.oracle.com/ma/careers/research-development/"
+    assert oracle.integration_status == "NEEDS_VERIFICATION"
+    assert oracle.production_source_id is None
+
+    # A canary is evidence that a source publishes this kind of thing. It is
+    # never silently promoted into an opportunity-level benchmark row.
+    benchmark_urls = {
+        record["source_url"] for record in load_benchmark_records(DEFAULT_BENCHMARK_PATH)
+    }
+    assert oracle.homepage_url not in benchmark_urls
+    assert not any("oracle" in url.lower() for url in benchmark_urls)
+
+
+# ------------------------------------------------------------- separation ---
+
+
+def test_the_coverage_map_is_not_the_production_source_registry() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    assert source_map.is_production_registry is False
+    assert DEFAULT_SOURCE_MAP_PATH != DEFAULT_SOURCE_REGISTRY
+    assert DEFAULT_SOURCE_MAP_PATH != PRODUCTION_SOURCE_REGISTRY
+    assert source_map.production_registry_path == "config/sources.yaml"
+
+    # The declared universe is far larger than what is collected, which is the
+    # whole point: the map is the denominator, not the catalogue.
+    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+    assert len(source_map.sources) > len(configured)
+    assert len(source_map.active_sources) < len(source_map.sources)
+
+
+def test_a_map_declaring_itself_a_production_registry_is_rejected() -> None:
+    document = source_map_document()
+    document["is_production_registry"] = True
+    with pytest.raises(SourceMapValidationError, match="not a production source registry"):
+        parse_source_map(document)
+
+
+def test_the_production_catalogue_is_untouched_by_this_slice() -> None:
+    """7C.1 activates nothing: the operational catalogue is still Phase 2's."""
+    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+
+    assert {source.id for source in configured} == {
+        "scale_ai_greenhouse",
+        "artefact_greenhouse",
+        "linkedin_job_alert_email",
+    }
+    assert {source.type for source in configured} == {
+        "greenhouse",
+        "gmail_linkedin_alert",
+    }
+
+
+def test_no_benchmark_row_is_an_operational_opportunity() -> None:
+    """The benchmark carries evidence, never a row of the operational database."""
+    records = load_benchmark_records(DEFAULT_BENCHMARK_PATH)
+
+    assert records
+    for record in records:
+        assert record["historical_or_live"] in OBSERVATION_HORIZONS
+        assert record["source_authority"] in SOURCE_AUTHORITIES
+        # Identity is the source's, so it survives a rebuilt database file.
+        assert not str(record["benchmark_id"]).isdigit()
