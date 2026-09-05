@@ -1044,6 +1044,36 @@ def install_sender(monkeypatch, transport, *, calls=None):
     monkeypatch.setattr(delivery_cli, "build_gmail_digest_sender", build)
 
 
+def pin_cli_today(monkeypatch, moment):
+    """Make the command's own materialization read `moment` as "now".
+
+    A test that freezes specific days by hand and then runs the real command
+    has two clocks in it: the days it wrote, and the wall clock the command
+    reads. They agree on exactly one real day and drift on every other, which
+    is a test that passes by coincidence — this one was green on 2026-09-04
+    because `DAY_TWO` happened to be that day, and failed the next morning with
+    `assert 2 == 1` when the command froze a third digest for 2026-09-05.
+
+    `delivery_cli.main` takes no clock, and it should not grow one: production
+    has a single notion of today, the wall clock, and a `--now` flag existing
+    only so the suite can move it would be production surface bought by tests.
+    So the pin goes around the dependency instead. The wrapper calls the **real**
+    `materialize_daily_digest` with `now` fixed, so the command under test is
+    still the real command, the materialization is still the real one, and the
+    only thing the test decides is which day the command thinks it is.
+    """
+    real_materialize_daily_digest = delivery_cli.materialize_daily_digest
+
+    def materialize_at_pinned_moment(connection, profile_id, **keywords):
+        return real_materialize_daily_digest(
+            connection, profile_id, now=moment, **keywords
+        )
+
+    monkeypatch.setattr(
+        delivery_cli, "materialize_daily_digest", materialize_at_pinned_moment
+    )
+
+
 def ready_database(tmp_path):
     """A migrated database with a real Portfolio and no digest yet."""
     connection, identity, ids = digest_fixture(tmp_path)
@@ -1122,10 +1152,16 @@ def test_the_limit_bounds_how_many_digests_one_pass_attempts(
     connection.commit()
     transport = RecordingTransport()
     install_sender(monkeypatch, transport)
+    # The pass must see the two digests above and no others, so the day it
+    # reads is the last day this test froze.
+    pin_cli_today(monkeypatch, DAY_TWO)
 
     run_cli(connection, profile_id, "--limit", "1")
 
     payload = json.loads(capsys.readouterr().out)
+    # `DAY_TWO` is already frozen, so the command adds nothing: what the limit
+    # bounds is exactly the two digests this test created.
+    assert payload["materialization_status"] == "ALREADY_MATERIALIZED"
     assert payload["delivery"]["attempted"] == 1
     assert len(transport.raw_messages) == 1
     assert (
