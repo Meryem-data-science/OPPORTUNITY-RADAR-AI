@@ -69,6 +69,18 @@ def test_cli_handles_expected_agent_error(monkeypatch):
     assert run_radar.main(["--once", "--apply"]) == 1
 
 
+def test_cli_runs_exactly_one_pass_and_exits(monkeypatch):
+    """The authorized operational command is a single pass, not a runner.
+
+    No scheduler, daemon or recurring loop exists: ``--once --apply`` triggers
+    one ``run_once`` and the process returns.
+    """
+    run_once = Mock(return_value=summary())
+    monkeypatch.setattr(run_radar.RadarAgent, "run_once", run_once)
+    assert run_radar.main(["--once", "--apply"]) == 0
+    assert run_once.call_count == 1
+
+
 def test_cli_passes_repeatable_source_filter(monkeypatch):
     built = []
     class Agent:

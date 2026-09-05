@@ -293,12 +293,13 @@ about jobs that were never mailed at all.
 
 ### What 7C.2A deliberately does not do
 
-* **No production change.** `config/sources.yaml` is untouched: LinkedIn still
-  runs `newer_than:7d from:linkedin.com` with a limit of 50 in production. That
-  query is broader than job alerts and also matches newsletters; correcting it
-  to `from:jobalerts-noreply@linkedin.com` is an operational decision and is
-  7C.2B's, not this slice's. The 30-day audit query is an **evaluation**
-  default and configures nothing.
+* **No production change.** `config/sources.yaml` was untouched by this slice:
+  LinkedIn still ran `newer_than:7d from:linkedin.com` with a limit of 50 in
+  production. That query is broader than job alerts and also matches
+  newsletters; correcting it to `from:jobalerts-noreply@linkedin.com` was an
+  operational decision left to 7C.2B, which has since made exactly that change
+  (see below). The 30-day audit query is an **evaluation** default and
+  configures nothing.
 * **No data write.** No SQLite write, no migration, no new table, no JSONL
   dump, no raw Gmail export, no new credential storage mechanism. Gmail →
   parser → operational database has *not* been exercised by this slice, and the
@@ -308,6 +309,46 @@ about jobs that were never mailed at all.
   above rather than denied.
 * **No parser or collector change.** The parser is reused, not reimplemented;
   the collector, the factory and `RadarAgent` are untouched.
+
+## 7C.2B — the production query correction
+
+7C.2B changed one production value and nothing else: the LinkedIn source's
+`gmail_query` in `config/sources.yaml`.
+
+| | |
+| --- | --- |
+| before | `newer_than:7d from:linkedin.com` |
+| after | `newer_than:7d from:jobalerts-noreply@linkedin.com` |
+
+`gmail_message_limit` stays **50** and the window stays **7 days**. The 30-day
+query above remains a 7C.2A **evaluation** default and is never production
+configuration; `tests/unit/test_sources.py` locks both facts.
+
+Nothing else moved. No new collector, parser, persistence model, migration,
+schema change, CLI or scheduler: the existing chain — `run_radar` → `RadarAgent`
+→ `LinkedInJobAlertCollector` → Gmail `gmail.readonly` → the existing parser →
+opportunity persistence → `source_run` finalization → the existing qualification
+pass — is reused unchanged. An operational run stays the explicit
+
+```
+python -m services.collector.cli.run_radar --once --apply --source linkedin_job_alert_email
+```
+
+`--source` narrows **collection** only. After the source loop, `RadarAgent`
+still runs its one qualification reconciliation over every eligible operational
+opportunity, exactly as it did before; 7C.2B does not add a LinkedIn-only
+qualification mode.
+
+### The first operational SQLite run is external evidence
+
+Before 7C.2B, `opportunity_sources` and `source_runs` held zero
+`linkedin_job_alert_email` rows: Gmail → parser was proven live by 7C.2A, but
+Gmail → parser → `RadarAgent` → the operational database had never been
+executed. This slice does not execute it either. The first authorized run
+against `data/opportunity-radar.db` is performed locally by the architect, after
+a backup and after review of this branch. Its outcome is external validation
+evidence: it is recorded outside the repository and is never hardcoded into
+production logic or tests.
 
 ### The real numbers live outside the code
 

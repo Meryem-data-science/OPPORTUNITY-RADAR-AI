@@ -43,8 +43,26 @@ def test_load_valid_source_registry() -> None:
     assert linkedin.type == "gmail_linkedin_alert"
     assert linkedin.organization is None
     assert linkedin.board_token is None
-    assert linkedin.gmail_query == "newer_than:7d from:linkedin.com"
+    assert linkedin.enabled is True
+    assert linkedin.status == "active"
+    assert linkedin.gmail_query == "newer_than:7d from:jobalerts-noreply@linkedin.com"
     assert linkedin.gmail_message_limit == 50
+
+
+def test_production_linkedin_query_is_the_job_alert_sender_over_seven_days() -> None:
+    """Lock the exact operational Gmail query and bound.
+
+    The sender is the LinkedIn Job Alert address specifically: the broader
+    ``from:linkedin.com`` also matches newsletters and other LinkedIn mail. The
+    30-day window belongs to the read-only 7C.2A evaluation audit and must never
+    become production configuration.
+    """
+    linkedin = get_enabled_source("linkedin_job_alert_email", Path("config/sources.yaml"))
+
+    assert linkedin.gmail_query == "newer_than:7d from:jobalerts-noreply@linkedin.com"
+    assert linkedin.gmail_message_limit == 50
+    assert "newer_than:30d" not in linkedin.gmail_query
+    assert "from:linkedin.com" not in linkedin.gmail_query
 
 
 def test_gmail_linkedin_source_requires_query_and_bounded_non_boolean_limit(tmp_path):

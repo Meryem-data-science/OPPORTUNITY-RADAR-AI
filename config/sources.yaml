@@ -25,5 +25,5 @@ sources:
     country: null
     frequency_minutes: 60
     status: active
-    gmail_query: "newer_than:7d from:linkedin.com"
+    gmail_query: "newer_than:7d from:jobalerts-noreply@linkedin.com"
     gmail_message_limit: 50

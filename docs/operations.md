@@ -58,9 +58,13 @@ python -m services.collector.cli.run_radar \
 ```
 
 `--source` is repeatable. Unknown, disabled, or inactive requested sources are
-refused. The manual `collect_source`, `persist_source`, and
-`list_opportunities` CLIs remain useful for bounded diagnostics, but
-`run_radar` is the normal orchestration entry point.
+refused. It narrows **collection** only: once the filtered source loop finishes,
+`RadarAgent` still runs its single qualification reconciliation over every
+eligible operational opportunity, not only over the sources just collected.
+
+The manual `collect_source`, `persist_source`, and `list_opportunities` CLIs
+remain useful for bounded diagnostics, but `run_radar` is the normal
+orchestration entry point.
 
 The LinkedIn collector reads only alert email content. It never uses a LinkedIn
 authenticated session or opens job pages. Gmail bodies, snippets, message and
