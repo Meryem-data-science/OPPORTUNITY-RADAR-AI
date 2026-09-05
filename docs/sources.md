@@ -79,3 +79,86 @@ published" from "this collector or parser may be broken". An unknown
 `items_found` is never counted as a zero. The rule is specified in
 [database.md](database.md). Nothing is alerted, retried, or rescheduled as a
 result.
+
+## ReKrute (Phase 7C.3A — foundation only, not a source)
+
+ReKrute is **not** a configured source. It has no row in `config/sources.yaml`,
+no `SourceConfig` type, no entry in the collector factory and no
+`production_source_id` in the Morocco PFE source map, where it stays
+`CANDIDATE`. The `RadarAgent` cannot run it and nothing about it is written to
+the database.
+
+**The access audit did not succeed.** 7C.3A was required to verify ReKrute's
+public access before writing a parser against it. Outbound HTTPS from the
+Claude Code Cloud session is filtered, and the egress proxy answered 403 to
+`CONNECT` for `www.rekrute.com:443` and `rekrute.com:443`. DNS resolved and
+unrelated hosts returned 200, so the denial is that sandbox's allow-list rather
+than ReKrute blocking the request: no robots.txt, no terms page, no listing
+page and no detail page was ever received. No CAPTCHA, bot challenge, site 403
+or forced login was observed — not because none exists, but because no response
+ever arrived.
+
+Consequently `services/collector/parsers/rekrute.py` contains **no listing
+parser and no detail parser**. Extracting offer links or offer fields requires
+ReKrute's real markup, and inventing it is the one thing this phase forbids.
+What the module does contain owes nothing to the site's HTML:
+
+* `RekruteOfferRecord` — a source-shaped record whose field list is the
+  architect's specification, not observed evidence. It keeps `deadline` and
+  `contract_type`, which `OpportunityCandidate` has no column for, so the
+  evidence is not discarded; `to_opportunity_candidate` bridges only what the
+  shared model already supports and smuggles nothing into another field. The
+  shared model is unchanged in this slice.
+* `canonical_offer_url` — deterministic canonicalization: https, canonical
+  host, fragment dropped, universal tracking parameters (`utm_*`, `gclid`, …)
+  dropped, remaining query sorted. Unrecognised parameters are **kept**,
+  because where ReKrute puts an offer id is unverified and discarding one could
+  destroy identity. Non-http(s) schemes, foreign hosts and URLs carrying
+  RFC 3986-invalid characters are rejected.
+* `assess_target_evidence` — the locked PFE/stage rule (below).
+
+### Completing the audit
+
+    python -m evaluation.morocco_pfe.cli.rekrute_access_audit
+    python -m evaluation.morocco_pfe.cli.rekrute_access_audit \
+        --url https://www.rekrute.com/<public listing path> --follow-links --limit 5
+
+GET-only, sequential, with a delay and an explicit timeout, hard bounded at 10
+pages. It fetches `robots.txt` first and **obeys** it, and it stops at any wall
+it meets — 403, 429, CAPTCHA, login redirect — and reports it. It never
+bypasses a CAPTCHA, rotates a proxy, impersonates a browser, drives a browser
+engine, authenticates or sends a cookie; the user agent names the audit
+truthfully. It writes nothing: no SQLite, no benchmark row, no HTML on disk.
+
+It prints **structure, not content** — JSON-LD types and `JobPosting` key
+*names*, response codes, link counts, and path shapes with digit runs collapsed
+so an offer-URL grammar becomes visible without anyone having guessed it. Exit
+codes: `0` completed, `1` transport/usage failure, `2` access barrier, `3`
+robots.txt disallows the path. No listing URL is hardcoded, because none was
+verified; an operator passes the page they can see.
+
+Its report records what a public GET returned. It does **not** establish that
+automated collection is permitted — robots.txt and ReKrute's terms are both
+still unread, and this project makes no legal claim about either.
+
+### PFE/stage targeting, and where classification lives
+
+An offer is PFE/stage evidence only when **either** the source's own structured
+contract field explicitly says stage, **or** the title/offer text carries
+explicit PFE evidence ("PFE", "projet de fin d'études"). Incidental internship
+wording in prose is never sufficient: a CDI whose description reads "une
+première expérience ou un stage est appréciée" is a CDI.
+
+The division of responsibility: **source parsing** reports facts ReKrute states
+and answers that one narrow question from the source's own contract field;
+**shared classification**
+(`services/collector/qualification/classifier.py`) keeps the cross-source
+questions — `OpportunityType`, `Domain`, Data/AI qualification — and stays
+source- and geography-neutral. The parser imports the Phase 7B vocabulary
+rather than re-declaring a taxonomy, and adds only what 7B has no notion of: a
+source-published contract field. Data & AI filtering is Phase 8 and appears
+nowhere here.
+
+Phase **7C.3B** is the operational activation: finishing the audit from a
+permitted network, writing the listing and detail parsers against the structure
+it reports, and only then registering a collector.

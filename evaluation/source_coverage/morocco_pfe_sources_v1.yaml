@@ -111,7 +111,23 @@ sources:
       First production collector candidate after LinkedIn (planned 7C.3). No
       collector exists. Whether the site offers a feed, an export or any stable
       listing structure has not been verified, and its terms of use have not
-      been reviewed here.
+      been reviewed here. 7C.3A attempted that verification and could not
+      complete it: outbound HTTPS from the Claude Code Cloud session is
+      filtered, and the egress proxy answered 403 to CONNECT for both
+      www.rekrute.com:443 and rekrute.com:443. DNS resolved and unrelated hosts
+      returned 200, so the denial is that sandbox's allow-list and NOT a
+      ReKrute-side block: no robots.txt, no listing page, no detail page, no
+      terms page and no byte of the site was ever received, and no CAPTCHA,
+      bot challenge or site 403 was ever observed. homepage_url_status
+      therefore stays WELL_KNOWN_UNVERIFIED rather than becoming EVIDENCED.
+      What 7C.3A did add is the means to finish the audit from a network that
+      may reach the host: a GET-only, robots-obeying, bounded probe
+      (evaluation.morocco_pfe.cli.rekrute_access_audit) that reports page
+      structure, plus a network-free parsing foundation
+      (services/collector/parsers/rekrute.py) that contains URL policy and the
+      PFE/stage targeting rule but deliberately NO listing or detail parser,
+      because ReKrute's markup remains unobserved. Nothing here is activated:
+      integration_status stays CANDIDATE and production_source_id stays null.
 
   - id: stagiaires_ma
     name: Stagiaires.ma

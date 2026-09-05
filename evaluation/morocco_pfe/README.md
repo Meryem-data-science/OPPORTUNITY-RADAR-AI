@@ -422,7 +422,47 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
 * **7C.2B** — the operational follow-up: correcting the production LinkedIn
   Gmail query, and exercising Gmail → parser → operational database. Neither is
   implemented here.
-* **7C.3** — ReKrute collector.
+* **7C.3A** — ReKrute public access + parser foundation. Implemented, and
+  honest about what it could not establish. The access audit did **not**
+  succeed: outbound HTTPS from the Claude Code Cloud session is filtered and
+  the egress proxy answered 403 to `CONNECT` for `www.rekrute.com:443` and
+  `rekrute.com:443`. DNS resolved and unrelated hosts returned 200, so the
+  denial is that sandbox's allow-list, **not** ReKrute blocking us — no
+  robots.txt, terms page, listing page or detail page was ever received, and no
+  CAPTCHA, bot challenge or site 403 was ever observed because no response ever
+  arrived. Nothing was authenticated, no browser was driven, no proxy was
+  rotated and no wall was worked around.
+
+  Because ReKrute's markup was never observed, this slice ships **no listing
+  parser and no detail parser**: inventing selectors, JSON-LD shapes or an
+  offer-URL grammar is exactly the fabrication the phase forbids. What it does
+  ship is (a) `services/collector/parsers/rekrute.py`, the network-free part
+  that owes nothing to the site's HTML — `RekruteOfferRecord`, host/scheme
+  policy and deterministic URL canonicalization, the locked PFE/stage targeting
+  rule, and the bridge onto `OpportunityCandidate`; and (b)
+  `python -m evaluation.morocco_pfe.cli.rekrute_access_audit`, a GET-only,
+  sequential, robots-obeying probe bounded at 10 pages that reports page
+  *structure* (JSON-LD types, `JobPosting` key names, link counts, path shapes)
+  and never page content, so the audit can be completed from a network that may
+  reach the host.
+
+  Targeting follows the locked rule: an offer is PFE/stage evidence only when
+  the source's own structured contract field explicitly says stage, or the
+  title/text carries explicit PFE evidence. A CDI reading "une première
+  expérience ou un stage..." is not a stage opportunity. Data & AI filtering is
+  Phase 8 and appears nowhere here.
+
+  Reading the probe's report establishes what a public GET returned. It does
+  **not** establish that automated collection of ReKrute is permitted:
+  robots.txt and ReKrute's terms are both still unread, and this slice makes no
+  legal claim about either.
+
+  Not done here, by design: no `config/sources.yaml` row, no `SourceConfig`
+  type, no factory registration, no `RadarAgent` run, no SQLite write, no
+  migration and no scheduler.
+* **7C.3B** — the operational ReKrute activation: finishing the access audit
+  from a permitted network, writing the listing/detail parsers against the
+  structure it reports, and only then registering a collector. Not implemented.
 * **7C.4** — Stagiaires.ma collector.
 * **7C.5** — Stage.ma collector.
 * **7C.x** — official ATS integration, where a reusable ATS is confirmed to
