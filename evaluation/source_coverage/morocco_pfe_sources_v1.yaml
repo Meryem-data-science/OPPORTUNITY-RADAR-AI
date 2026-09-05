@@ -1,5 +1,9 @@
 # Phase 7C.1 — the declared Morocco PFE/stage source universe, version 1.
 #
+# Created in 7C.1 and amended since by the phases that evaluated individual
+# entries; the map's identity (`version`, `created_for_phase`) is unchanged by
+# those amendments, which only correct what an entry claims about itself.
+#
 # THIS FILE IS NOT config/sources.yaml AND ACTIVATES NOTHING.
 #
 # `config/sources.yaml` is the operational catalogue: a row there is collected
@@ -14,9 +18,13 @@
 # * no scraper, API, feed or export is asserted to exist for any site below.
 #   Where we do not know, the entry says NEEDS_VERIFICATION and its note says
 #   what is unverified, rather than describing a capability nobody has checked;
-# * no homepage URL below was fetched. `homepage_url_status` says whether the
-#   URL is evidence we were handed (EVIDENCED), a domain written from public
-#   knowledge and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN);
+# * almost no homepage URL below has been fetched. `homepage_url_status` says
+#   whether the URL is evidence (EVIDENCED — either handed to us, or confirmed
+#   by a real request in a later phase), a domain written from public knowledge
+#   and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN). ReKrute is
+#   the one entry whose URL was actually requested: Phase 7C.3 reached its
+#   public robots.txt and terms pages, which is why it reads EVIDENCED. No
+#   other entry's status should be read as a claim that anyone visited it;
 # * LinkedIn is collected from Gmail job-alert mail and from nothing else. There
 #   is no LinkedIn scraping in this project and the strategy registry has no
 #   member that would describe one.
@@ -93,48 +101,11 @@ sources:
       second-hand.
 
   # ---------------------------------------------------------------- P1 -----
-  # The next collectors to be evaluated, in the order the architect fixed.
-  # None of them is implemented and 7C.1 implements none of them.
-  - id: rekrute
-    name: ReKrute
-    homepage_url: https://www.rekrute.com
-    homepage_url_status: EVIDENCED
-    source_class: JOB_BOARD
-    priority: P2
-    coverage_role: AUDIT
-    collection_strategy: MANUAL_BENCHMARK
-    integration_status: NOT_SELECTED
-    country: MA
-    production_source_id: null
-    live_canary: false
-    notes: >-
-      Evaluated in Phase 7C.3 and deliberately not selected for production.
-      Public human-facing employment pages exist and are reachable in an
-      ordinary browser. A real local GET-only audit retrieved robots.txt with
-      HTTP 200, and the public terms page
-      (https://www.rekrute.com/conditions-utilisation.html) also returned
-      HTTP 200, which is why homepage_url_status is now EVIDENCED rather than
-      WELL_KNOWN_UNVERIFIED. Against that, an automated GET of the PFE listing
-      target https://www.rekrute.com/emploi-PFE returned HTTP 403 with a
-      14-byte body while the same page remains visible to a human. No bypass of
-      that refusal was attempted or implemented: no browser impersonation, no
-      Selenium or Playwright, no proxy rotation, no CAPTCHA handling, no
-      authenticated access, no user cookies and no private API. This entry
-      makes NO claim that ReKrute prohibits automated access; robots.txt did
-      not disallow the target path, the terms were not read as a permission and
-      still require human review, and the audit's automated-access keyword
-      indicators were all false — an absence which is not permission either.
-      The decision is a product one: ReKrute is a general employment board
-      rather than a PFE/stage-specialised source, so its expected PFE coverage
-      benefit does not justify further integration effort for a product
-      narrowed to Morocco PFE/stage, particularly when honest automated listing
-      access is already refused. It stays useful as an AUDIT/reference source
-      for manual coverage comparison. No collector, no production parser, no
-      config/sources.yaml row, no RadarAgent run, no database row, no migration
-      and no scheduler exist for it. Reconsider only if an official or public
-      integration channel suitable for this purpose becomes available, or if
-      the product scope changes.
-
+  # The current collector candidates, in the order the architect fixed:
+  # Stagiaires.ma, then Stage.ma, then the TalentSoft-hosted career sites.
+  # None of them is implemented. ReKrute used to head this list; Phase 7C.3
+  # evaluated it and did not select it, so it now sits in the
+  # evaluated/not-selected section at the end of this file rather than here.
   - id: stagiaires_ma
     name: Stagiaires.ma
     homepage_url: https://www.stagiaires.ma
@@ -311,3 +282,52 @@ sources:
     notes: >-
       Named as a secondary aggregator to audit against. Domain and structure
       unverified.
+
+  # ------------------------------------------- EVALUATED / NOT SELECTED -----
+  # Sources we investigated and decided against. This is not a priority tier
+  # and not a queue: nothing here is waiting to be built. An entry is kept
+  # because knowing that a source was looked at, and why it was declined, is
+  # worth more than its silent absence would be — and because it may still be
+  # useful to compare coverage against by hand.
+  #
+  # NOT_SELECTED records a product decision only. It never means a source is
+  # legally forbidden, permanently impossible, or fake.
+  - id: rekrute
+    name: ReKrute
+    homepage_url: https://www.rekrute.com
+    homepage_url_status: EVIDENCED
+    source_class: JOB_BOARD
+    priority: P2
+    coverage_role: AUDIT
+    collection_strategy: MANUAL_BENCHMARK
+    integration_status: NOT_SELECTED
+    country: MA
+    production_source_id: null
+    live_canary: false
+    notes: >-
+      Evaluated in Phase 7C.3 and deliberately not selected for production.
+      Public human-facing employment pages exist and are reachable in an
+      ordinary browser. A real local GET-only audit retrieved robots.txt with
+      HTTP 200, and the public terms page
+      (https://www.rekrute.com/conditions-utilisation.html) also returned
+      HTTP 200, which is why homepage_url_status is now EVIDENCED rather than
+      WELL_KNOWN_UNVERIFIED. Against that, an automated GET of the PFE listing
+      target https://www.rekrute.com/emploi-PFE returned HTTP 403 with a
+      14-byte body while the same page remains visible to a human. No bypass of
+      that refusal was attempted or implemented: no browser impersonation, no
+      Selenium or Playwright, no proxy rotation, no CAPTCHA handling, no
+      authenticated access, no user cookies and no private API. This entry
+      makes NO claim that ReKrute prohibits automated access; robots.txt did
+      not disallow the target path, the terms were not read as a permission and
+      still require human review, and the audit's automated-access keyword
+      indicators were all false — an absence which is not permission either.
+      The decision is a product one: ReKrute is a general employment board
+      rather than a PFE/stage-specialised source, so its expected PFE coverage
+      benefit does not justify further integration effort for a product
+      narrowed to Morocco PFE/stage, particularly when honest automated listing
+      access is already refused. It stays useful as an AUDIT/reference source
+      for manual coverage comparison. No collector, no production parser, no
+      config/sources.yaml row, no RadarAgent run, no database row, no migration
+      and no scheduler exist for it. Reconsider only if an official or public
+      integration channel suitable for this purpose becomes available, or if
+      the product scope changes.
