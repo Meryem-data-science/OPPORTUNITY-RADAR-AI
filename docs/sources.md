@@ -124,11 +124,40 @@ What the module does contain owes nothing to the site's HTML:
         --url https://www.rekrute.com/<public listing path> --follow-links --limit 5
 
 GET-only, sequential, with a delay and an explicit timeout, hard bounded at 10
-pages. It fetches `robots.txt` first and **obeys** it, and it stops at any wall
-it meets — 403, 429, CAPTCHA, login redirect — and reports it. It never
-bypasses a CAPTCHA, rotates a proxy, impersonates a browser, drives a browser
-engine, authenticates or sends a cookie; the user agent names the audit
-truthfully. It writes nothing: no SQLite, no benchmark row, no HTML on disk.
+pages, and **every page is fetched exactly once** — the target's links come
+from that single response rather than a second request. It stops at any wall it
+meets — 403, 429, CAPTCHA, login redirect — and reports it. It never bypasses a
+CAPTCHA, rotates a proxy, impersonates a browser, drives a browser engine,
+authenticates or sends a cookie; the user agent names the audit truthfully. It
+writes nothing: no SQLite, no benchmark row, no HTML on disk.
+
+`robots.txt` is fetched first, under an explicit status policy:
+
+| robots.txt response | audit behaviour |
+|---|---|
+| 200 | parse and obey; a disallowed path is not fetched (exit `3`) |
+| 404, 410 | file definitively absent — no explicit rule applies, audit continues |
+| 401, 403, 407, 429 | we were **refused** the file — stop before the target |
+| 5xx / unexpected status | unresolved — stop before the target |
+| challenge page or login redirect served as robots | stop |
+| transport failure or timeout | stop |
+
+The asymmetry is the point: a robots.txt we were refused tells us nothing about
+what is allowed, and an unknown rule is never read as a permissive one. A 404
+means no rule exists — a statement about robots.txt only, and **not**
+permission of any kind.
+
+The audit also checks the public terms page
+(`https://www.rekrute.com/conditions-utilisation.html`) once, GET-only, and
+reports it structurally: URL, status, availability, any barrier, and — when
+reachable — which automation-related words (`robot`, `crawler`, `scrap`,
+`scraping`, `aspir`, `automatis`, `bot`) appear in its **visible text**, with
+markup excluded so a `<meta name="robots">` tag cannot manufacture a finding.
+No clause, sentence or page text is emitted. There is no legal classifier here:
+`manual_review_required` is always true, and the absence of those words is
+explicitly **not** permission. A barrier on the terms page is reported, not
+bypassed; if robots disallows that path, or robots itself was unusable, the
+terms page is not fetched at all.
 
 It prints **structure, not content** — JSON-LD types and `JobPosting` key
 *names*, response codes, link counts, and path shapes with digit runs collapsed

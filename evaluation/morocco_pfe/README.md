@@ -444,7 +444,12 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
   sequential, robots-obeying probe bounded at 10 pages that reports page
   *structure* (JSON-LD types, `JobPosting` key names, link counts, path shapes)
   and never page content, so the audit can be completed from a network that may
-  reach the host.
+  reach the host. Every page it touches is fetched exactly once; `robots.txt`
+  is governed by an explicit status policy (200 obey; 404/410 absent so no rule
+  applies; 401/403/407/429 refused, and a refused file is never read as
+  permissive, so the audit stops before the target; 5xx unresolved, stop); and
+  the public terms page is checked once and reported structurally, always with
+  `manual_review_required` true and never as a permission finding.
 
   Targeting follows the locked rule: an offer is PFE/stage evidence only when
   the source's own structured contract field explicitly says stage, or the

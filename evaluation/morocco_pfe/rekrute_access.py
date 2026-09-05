@@ -322,6 +322,162 @@ def path_shapes(urls: tuple[str, ...], top: int = 10) -> tuple[tuple[str, int], 
     return tuple(counter.most_common(top))
 
 
+# --------------------------------------------------------- robots policy ----
+
+#: What a robots.txt response means for the rest of the audit. Deliberately
+#: four outcomes rather than "200 or not": a robots.txt we were *refused*
+#: (403/429) tells us nothing about what is allowed, and treating that silence
+#: as permission is the failure mode this policy exists to prevent.
+ROBOTS_OBEY = "OBEY"
+ROBOTS_ABSENT = "ABSENT"
+ROBOTS_BARRIER = "BARRIER"
+ROBOTS_UNRESOLVED = "UNRESOLVED"
+
+
+@dataclass(frozen=True)
+class RobotsDisposition:
+    """Whether robots.txt can be honoured, and what to do when it cannot."""
+
+    disposition: str
+    barrier: str | None = None
+    detail: str | None = None
+
+    @property
+    def may_proceed(self) -> bool:
+        """Only a parsed file or a definitively absent one lets the audit continue."""
+        return self.disposition in {ROBOTS_OBEY, ROBOTS_ABSENT}
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "disposition": self.disposition,
+            "barrier": self.barrier,
+            "detail": self.detail,
+        }
+
+
+def classify_robots_response(
+    status_code: int, final_url: str, body: str
+) -> RobotsDisposition:
+    """Decide what a robots.txt response permits.
+
+    * **200** — parse it and obey it, unless the response is transparently a
+      bot wall or a login page rather than the file itself.
+    * **404 / 410** — the file is definitively absent, so no explicit rule
+      exists and this audit's own policy allows it to continue. That is a
+      statement about robots.txt only; it is **not** permission of any kind,
+      legal or otherwise.
+    * **401 / 403 / 407 / 429** — we were refused the file. We therefore do not
+      know what it says, and an unknown rule is never assumed to be permissive:
+      the audit stops before touching the requested page.
+    * **5xx and anything else** — unresolved. Stop.
+
+    Emptiness is deliberately *not* a barrier here: a valid robots.txt is often
+    only a couple of lines long, so the generic short-body heuristic used for
+    HTML pages would misread a real file as a wall.
+    """
+    if status_code in {401, 403, 407}:
+        return RobotsDisposition(
+            ROBOTS_BARRIER, f"ROBOTS_HTTP_{status_code}", "robots.txt was refused"
+        )
+    if status_code == 429:
+        return RobotsDisposition(
+            ROBOTS_BARRIER, "ROBOTS_HTTP_429_RATE_LIMITED", "robots.txt was rate limited"
+        )
+    if status_code in {404, 410}:
+        return RobotsDisposition(
+            ROBOTS_ABSENT, None, f"robots.txt is absent (HTTP {status_code})"
+        )
+    if status_code >= 500:
+        return RobotsDisposition(
+            ROBOTS_UNRESOLVED,
+            f"ROBOTS_HTTP_{status_code}_SERVER_ERROR",
+            "robots.txt could not be resolved",
+        )
+    if status_code != 200:
+        return RobotsDisposition(
+            ROBOTS_UNRESOLVED,
+            f"ROBOTS_HTTP_{status_code}",
+            "unexpected robots.txt status",
+        )
+    sample = (body or "")[:20000].lower()
+    if any(marker in sample for marker in _CHALLENGE_MARKERS):
+        return RobotsDisposition(
+            ROBOTS_BARRIER,
+            "ROBOTS_BOT_CHALLENGE_OR_CAPTCHA",
+            "robots.txt returned a challenge page",
+        )
+    if any(
+        segment in urlsplit(final_url or "").path.lower()
+        for segment in ("/login", "/signin", "/connexion")
+    ):
+        return RobotsDisposition(
+            ROBOTS_BARRIER, "ROBOTS_REDIRECTED_TO_LOGIN", "robots.txt redirected to login"
+        )
+    return RobotsDisposition(ROBOTS_OBEY, None, "robots.txt retrieved")
+
+
+# ------------------------------------------------------------------ terms ----
+
+#: The public terms page an architect observed independently. Recorded as a URL
+#: to *check*, with no assumption whatsoever about what it says.
+TERMS_URL = "https://www.rekrute.com/conditions-utilisation.html"
+
+#: Case-insensitive markers worth a human's attention when reading the terms.
+#: Their presence is a pointer for manual review; their **absence is not
+#: permission**, and nothing in this module decides whether anything is allowed.
+AUTOMATION_TERM_MARKERS = (
+    "robot", "crawler", "scrap", "scraping", "aspir", "automatis", "bot",
+)
+
+
+class _TextExtractor(HTMLParser):
+    """Collect visible text, skipping script/style so markup cannot match."""
+
+    _SKIP = frozenset({"script", "style", "noscript", "template"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in self._SKIP:
+            self._depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._SKIP and self._depth:
+            self._depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._depth:
+            self.parts.append(data)
+
+
+def visible_text(html: str) -> str:
+    """Return a page's visible text.
+
+    Tags are dropped on purpose: a `<meta name="robots">` element is markup,
+    not a statement in the terms, and matching it would manufacture a finding.
+    """
+    extractor = _TextExtractor()
+    try:
+        extractor.feed(html or "")
+    except Exception:  # malformed markup is evidence, not a crash
+        return " ".join((html or "").split())
+    return " ".join("".join(extractor.parts).split())
+
+
+def automation_term_indicators(html: str) -> dict[str, bool]:
+    """Report which automation-related words appear in a terms page's text.
+
+    A structural pointer for a human reader and nothing more. This is not a
+    legal classifier: an all-`False` result means these words were not found,
+    never that automated access is permitted.
+    """
+    text = visible_text(html).lower()
+    return {marker: marker in text for marker in AUTOMATION_TERM_MARKERS}
+
+
 #: Markers that a response is a bot wall or a login redirect rather than the
 #: public page. Matched case-insensitively against a bounded prefix of the body.
 _CHALLENGE_MARKERS = (
@@ -366,6 +522,16 @@ def detect_access_barrier(status_code: int, final_url: str, body: str) -> str | 
 
 __all__ = [
     "AUDIT_USER_AGENT",
+    "AUTOMATION_TERM_MARKERS",
+    "ROBOTS_ABSENT",
+    "ROBOTS_BARRIER",
+    "ROBOTS_OBEY",
+    "ROBOTS_UNRESOLVED",
+    "RobotsDisposition",
+    "TERMS_URL",
+    "automation_term_indicators",
+    "classify_robots_response",
+    "visible_text",
     "DEFAULT_DETAIL_LIMIT",
     "MAX_DETAIL_LIMIT",
     "REKRUTE_HOSTS",
