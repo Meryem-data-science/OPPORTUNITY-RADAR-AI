@@ -24,7 +24,7 @@ v1 stores neither and records a `RequirementAmbiguity` instead. UNKNOWN is
 then a decision on the record rather than a silence.
 
 The version below is this package's own. It is **not**
-`opportunity-constraints-v3`: 3.5A's rules and 3.5B's rules change for
+`opportunity-constraints-v4`: 3.5A's rules and 3.5B's rules change for
 different reasons, and one shared label would make every skill fix recompute
 every start date. Two contracts, two versions, two fingerprints, two states.
 """

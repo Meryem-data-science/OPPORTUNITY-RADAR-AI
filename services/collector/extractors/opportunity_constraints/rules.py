@@ -121,6 +121,12 @@ def _folded(text: str) -> str:
 #: A title reading "Junior Data Engineer" still settles it, and so does the
 #: Phase 2 classifier. What is refused is inferring the seniority of an offer
 #: from a sentence that merely contains the word.
+#:
+#: Every wording here is matched as a whole word or a whole phrase, never as a
+#: substring of a longer word — see `_TYPE_SIGNAL_PATTERNS`. So a morphological
+#: variant is not implied by the form it derives from: `stage` does not match
+#: `stages`, and if the corpus shows a variant has to be read it becomes its own
+#: entry, justified like every other one, rather than arriving for free.
 _TYPE_SIGNALS: tuple[tuple[OpportunityType, str, tuple[str, ...], bool], ...] = (
     (
         OpportunityType.PFE,
@@ -177,6 +183,39 @@ _TYPE_SIGNALS: tuple[tuple[OpportunityType, str, tuple[str, ...], bool], ...] = 
         False,
     ),
 )
+
+#: Every type wording above, compiled once, anchored so that it matches a word
+#: or a phrase and never the inside of a longer word.
+#:
+#: This is the whole of Phase 7B.2. The rules used to look for a wording with
+#: `folded.find(signal)`, which asks only whether those characters appear
+#: anywhere in the fragment. `pfe` appears inside ordinary German words —
+#: `Handlungsempfehlungen`, `Empfehlungen`, `auszuschöpfen` — and the operational
+#: corpus duly stored consulting and marketing roles as `PFE`, each with an
+#: evidence fragment that named no `PFE` at all.
+#:
+#: `(?<!\w)…(?!\w)` rather than `\b…\b`: a signal may begin or end with a
+#: character that is not a word character, and `\b` next to one asserts the
+#: opposite of what is meant. The lookarounds say the same thing for every
+#: signal — whatever sits against it must not continue the word — so the guard
+#: is uniform across the registry instead of per-entry. `re.escape` keeps a
+#: wording a literal: `entry-level` and `d'études` are text, not syntax.
+#:
+#: The whole phrase is bounded, not each of its words: `final-year internship`
+#: is one wording, and only its two ends are checked. Matching stays local,
+#: deterministic and closed — no stemming, no fuzziness, no lexicon beyond the
+#: tuple above, and Unicode word characters (`ö`, `é`) are word characters, which
+#: is what makes the German cases fail to match.
+#:
+#: The Phase 2 classifier has always matched this way (`_contains` in
+#: `services/collector/qualification/classifier.py`); this brings the constraint
+#: rules to the same standard.
+_TYPE_SIGNAL_PATTERNS: dict[str, re.Pattern[str]] = {
+    signal: re.compile(rf"(?<!\w){re.escape(signal)}(?!\w)")
+    for _type, _rule, _signals, _description_ok in _TYPE_SIGNALS
+    for signal in _signals
+}
+
 
 #: Words that, just before a type wording, mean the posting is denying it:
 #: "this isn't a research internship" is not an internship.
@@ -273,17 +312,15 @@ def _opportunity_type_hits(
             for opportunity_type, rule_id, signals, description_ok in _TYPE_SIGNALS:
                 if in_description and not description_ok:
                     continue
-                position, matched = -1, ""
+                span: tuple[int, int] | None = None
                 for signal in signals:
-                    found = folded.find(signal)
-                    if found != -1:
-                        position, matched = found, signal
+                    match = _TYPE_SIGNAL_PATTERNS[signal].search(folded)
+                    if match is not None:
+                        span = match.span()
                         break
-                if position == -1:
+                if span is None:
                     continue
-                if in_description and _incidental(
-                    folded, position, position + len(matched)
-                ):
+                if in_description and _incidental(folded, *span):
                     continue
                 yield RuleHit(
                     slot=Slot.OPPORTUNITY_TYPE,

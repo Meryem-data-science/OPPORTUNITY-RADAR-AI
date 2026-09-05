@@ -1570,7 +1570,7 @@ moved a requirement's level from the sentence to the clause; `v3` separated the
 slash from the `or`, taught the bilingual marker its nouns, and deduplicated
 identical refusals. Each changes what a given description reads as, so an older
 row is recomputed rather than trusted. It is deliberately **not**
-`opportunity-constraints-v3`: 3.5A and 3.5B change for different reasons, and
+`opportunity-constraints-v4`: 3.5A and 3.5B change for different reasons, and
 one shared label would make every skill fix recompute every start date.
 
 `source_fingerprint` is a SHA-256 over canonical JSON of exactly the field 3.5B
