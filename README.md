@@ -283,6 +283,13 @@ stale.
   `opportunity_constraints` and the types a Digital Twin explicitly said it is
   looking for. It classifies nothing and adds no schema: the verdict depends on
   a stated preference and is never stored.
+- `evaluation/`: the Phase 7C.1 coverage-evaluation foundation — the declared,
+  versioned universe of Morocco PFE/stage sources we want to be measured
+  against, and a gold benchmark of real opportunities observed on them. Nothing
+  here is production: it activates no source, adds no collector and no
+  migration, and never writes to the operational database. `config/sources.yaml`
+  remains the only file that turns a source on. The benchmark is a DRAFT seed
+  and is explicitly not evaluation-ready.
 - `apps/web/`: Next.js web application.
 - `config/sources.yaml`: operational source catalogue.
 - `migrations/`: ordered SQLite/Foundation SQL migrations.
