@@ -9,10 +9,24 @@ live run.
 
 No test opens a socket, a database or a token file. The Gmail client is stubbed
 at the CLI boundary exactly as the existing probe tests stub it.
+
+What these tests hold the slice to is the guarantee the slice actually makes:
+the audit persists no Gmail data, depends on no database, prints only aggregate
+counts, and delegates OAuth to the existing Gmail client. They deliberately do
+**not** assert that nothing anywhere writes a file — the real
+`services/collector/gmail/client.py` maintains its own credential file at
+`GMAIL_TOKEN_PATH`, and a test claiming otherwise would be asserting something
+stronger than the architecture guarantees.
 """
 
+import ast
+from dataclasses import fields
 import inspect
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import Mock, patch
 
 import pytest
@@ -25,7 +39,12 @@ from evaluation.morocco_pfe.linkedin_gmail_audit import (
     GmailIntakeAuditError,
     audit_gmail_intake,
 )
-from services.collector.gmail.client import MAX_MESSAGE_LIMIT
+from services.collector.gmail import GmailClient, GmailConfiguration
+from services.collector.gmail.client import (
+    GMAIL_READONLY_SCOPE,
+    GMAIL_SCOPES,
+    MAX_MESSAGE_LIMIT,
+)
 from services.collector.models.gmail_message import GmailMessageCandidate
 from services.collector.models.opportunity import OpportunityCandidate
 from services.collector.parsers.linkedin_job_alert import (
@@ -267,16 +286,105 @@ def test_the_production_linkedin_parser_is_reused_not_reimplemented() -> None:
         assert parsing_machinery not in source
 
 
-def test_the_audit_reaches_no_database_and_no_persistence(tmp_path) -> None:
+def imported_module_names(module) -> set[str]:
+    """Every module name the given module imports, read from its own syntax."""
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(module))):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+    return names
+
+
+def test_the_audit_imports_no_database_module() -> None:
     for module in (linkedin_gmail_audit, audit_cli):
-        source = inspect.getsource(module)
-        for forbidden in ("sqlite", "libsql", "opportunity-radar.db", "INSERT", "open("):
-            assert forbidden not in source
+        for imported in imported_module_names(module):
+            assert "database" not in imported
+            assert "sqlite" not in imported
+            assert "libsql" not in imported
 
+
+def test_importing_the_audit_loads_no_sqlite_or_libsql_driver() -> None:
+    """Importing the audit must not drag a database driver in behind it.
+
+    Read from a fresh interpreter rather than from this one, whose `sys.modules`
+    is already full of everything the rest of the suite imported.
+    """
+    repository_root = Path(__file__).resolve().parents[2]
+    probe = (
+        "import json, sys;"
+        "import evaluation.morocco_pfe.cli.linkedin_gmail_audit;"
+        "print(json.dumps([name for name in sys.modules"
+        " if 'sqlite' in name or 'libsql' in name"
+        " or name.startswith('services.collector.database')]))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=repository_root,
+        env={**os.environ, "PYTHONPATH": str(repository_root)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert json.loads(completed.stdout) == []
+
+
+def test_the_audit_persists_nothing_it_reads() -> None:
+    """The audit's own code path writes no file and exports no message.
+
+    The Gmail client is stubbed here, so this is a statement about the audit
+    and not about OAuth: the real client's credential maintenance at
+    `GMAIL_TOKEN_PATH` is outside this test on purpose, and is not claimed
+    away by it.
+    """
+    opened: list[object] = []
+
+    def refuse_open(*arguments, **keywords):
+        opened.append(arguments)
+        raise AssertionError("the audit opened a file")
+
+    client = cli_client(message("a"), message("b"))
+    with patch("builtins.open", refuse_open), patch("os.open", refuse_open):
+        report = run_cli(client, QUERY, 5)
+        pure = audit([message()], [[candidate("11")]])
+
+    assert opened == []
+    assert report.messages_found == 2
+    assert pure.candidates_parsed == 1
+
+
+def test_oauth_and_credentials_stay_delegated_to_the_existing_gmail_client() -> None:
+    """No second credential mechanism, and no relaxation of the read scope."""
+    assert audit_cli.GmailClient is GmailClient
+    assert audit_cli.GmailConfiguration is GmailConfiguration
+    assert GMAIL_SCOPES == (GMAIL_READONLY_SCOPE,)
+
+    for module in (linkedin_gmail_audit, audit_cli):
+        defined = {
+            node.name
+            for node in ast.walk(ast.parse(inspect.getsource(module)))
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+        }
+        # Loading, refreshing and storing credentials belongs to one module,
+        # and it is not either of these.
+        for name in defined:
+            assert not any(
+                word in name.lower() for word in ("credential", "token", "oauth")
+            )
+
+
+def test_the_report_has_no_field_that_could_carry_message_content() -> None:
     report = audit([message()], [[candidate("11")]])
+    values = report.as_dict()
 
-    assert report.candidates_parsed == 1
-    assert not list(tmp_path.iterdir())
+    assert set(values) == {field.name for field in fields(report)}
+    for key, value in values.items():
+        if key == "query":
+            assert value == QUERY
+        else:
+            assert isinstance(value, (int, bool))
 
 
 def test_the_audit_runs_the_real_parser_over_a_synthetic_alert() -> None:

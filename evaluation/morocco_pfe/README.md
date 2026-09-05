@@ -259,6 +259,27 @@ neither modifies nor weakens. No message is read into any file: the audit
 prints counts, and never a message id, thread id, subject, snippet, body,
 sender or URL.
 
+### The one local file that does change
+
+The audit persists nothing it reads, but "nothing is written anywhere" would be
+false, and it is worth being exact about why. Authorizing any Gmail entry point
+in this repository lets `services/collector/gmail/client.py` maintain its own
+credential file: it tightens the permissions of `GMAIL_TOKEN_PATH` to `0600`,
+and rewrites that file when a token is refreshed or a new authorization is
+granted.
+
+That is pre-existing OAuth behaviour, shared with the Gmail probe, the LinkedIn
+alert probe and the production collector. 7C.2A delegates to it unchanged — no
+new credential loader, no second token path, no weakening of the read-only
+scope — and does not claim it away. So the accurate guarantee is:
+
+| The audit | The OAuth client it delegates to |
+| --- | --- |
+| persists no Gmail message data — no subject, snippet, body or message id | may `chmod` the local token file |
+| creates no evaluation dump and no business artefact | may rewrite the token file on refresh or new authorization |
+| writes no SQLite or other database data | touches nothing else on disk |
+| modifies no Gmail message or label | |
+
 ### `truncated`
 
 `truncated` is true whenever `messages_found == message_limit`. The Gmail
@@ -278,11 +299,13 @@ about jobs that were never mailed at all.
   to `from:jobalerts-noreply@linkedin.com` is an operational decision and is
   7C.2B's, not this slice's. The 30-day audit query is an **evaluation**
   default and configures nothing.
-* **No write, anywhere.** No SQLite write, no migration, no new table, no JSONL
-  dump, no raw Gmail export, no new credential storage. Gmail → parser →
-  operational database has *not* been exercised by this slice, and the
+* **No data write.** No SQLite write, no migration, no new table, no JSONL
+  dump, no raw Gmail export, no new credential storage mechanism. Gmail →
+  parser → operational database has *not* been exercised by this slice, and the
   `linkedin_job_alert_email` rows in `opportunity_sources` and `source_runs`
-  remain whatever they already were.
+  remain whatever they already were. The existing OAuth client's own credential
+  maintenance at `GMAIL_TOKEN_PATH` is the one exception, and it is described
+  above rather than denied.
 * **No parser or collector change.** The parser is reused, not reimplemented;
   the collector, the factory and `RadarAgent` are untouched.
 
@@ -351,10 +374,10 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
 
 ## Backlog (numbers are the architect's to fix)
 
-* **7C.2A** — LinkedIn Gmail intake audit. Implemented, above: read-only,
-  writes nothing, scrapes no LinkedIn page. There is no historical replay and
-  there will not be one — the dedicated account is new and the personal account
-  is out of scope.
+* **7C.2A** — LinkedIn Gmail intake audit. Implemented, above: read-only
+  against Gmail, persists nothing it reads, scrapes no LinkedIn page. There is
+  no historical replay and there will not be one — the dedicated account is new
+  and the personal account is out of scope.
 * **7C.2B** — the operational follow-up: correcting the production LinkedIn
   Gmail query, and exercising Gmail → parser → operational database. Neither is
   implemented here.

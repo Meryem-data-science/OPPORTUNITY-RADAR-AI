@@ -9,14 +9,23 @@ prints one JSON object of counts.
     python -m evaluation.morocco_pfe.cli.linkedin_gmail_audit \
         --query "newer_than:7d from:jobalerts-noreply@linkedin.com" --limit 50
 
-Read-only, in every sense that matters:
+Read-only against Gmail, and precise about what that does and does not cover:
 
 * the Gmail scope stays `gmail.readonly`, enforced by the existing client — no
   credential mechanism is added, weakened or duplicated here;
-* no message is modified, labelled, deleted or exported;
-* nothing is written anywhere: no database, no JSONL, no email dump;
+* no Gmail message or label is modified, deleted or exported;
+* the audit persists no Gmail data: no database write, no JSONL, no email dump,
+  no evaluation artefact and no business artefact of any kind;
 * what is printed is aggregate counts and the caller's own query — never a
   message id, thread id, subject, snippet, body or address.
+
+One local file can still change, and it is the OAuth client's own, not the
+audit's: authorizing this command may cause
+`services/collector/gmail/client.py` to tighten the permissions of
+`GMAIL_TOKEN_PATH` and to rewrite it when a token is refreshed or newly
+granted. That is the credential maintenance every Gmail entry point in this
+repository already delegates to, and this slice delegates to it unchanged
+rather than claiming it does not happen.
 
 The account read is the project's own dedicated Gmail account, configured by
 `GMAIL_OAUTH_CLIENT_SECRET_PATH` and `GMAIL_TOKEN_PATH`. No other mailbox is in

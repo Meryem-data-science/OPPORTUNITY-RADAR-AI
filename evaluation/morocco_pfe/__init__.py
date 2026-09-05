@@ -18,8 +18,9 @@ Phase 7C.2A adds one measurement beside them, and no artefact:
     linkedin_gmail_audit.py  aggregate Gmail intake quality of LinkedIn alerts
 
 It reads mail read-only through the existing Gmail client, reuses the existing
-LinkedIn parser, writes nothing anywhere, and reports counts — parser yield
-over a bounded Gmail window, which is not LinkedIn recall.
+LinkedIn parser, persists nothing it reads, and reports counts — parser yield
+over a bounded Gmail window, which is not LinkedIn recall. The OAuth client
+keeps maintaining its own credential file, as it always has.
 """
 
 from evaluation.morocco_pfe.linkedin_gmail_audit import (

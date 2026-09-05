@@ -23,9 +23,19 @@ carries **counts only** — never a message id, a thread id, a subject, a
 snippet, a body, a URL or an address — so it is safe to print, paste into a
 review and keep.
 
-Nothing here writes anything. There is no persistence, no JSONL dump and no
+The audit persists nothing it reads. No Gmail message data, no subject,
+snippet, body or message id, no evaluation dump, no database row, no
 operational table: `linkedin_job_alert_email` rows in `opportunity_sources` are
-the business of a later operational slice, not of this measurement.
+the business of a later operational slice, not of this measurement. No Gmail
+message or label is modified, and no business artefact is created.
+
+One local file can nonetheless change while an audit runs, and it is not the
+audit's. The existing OAuth client maintains its own credential file at
+`GMAIL_TOKEN_PATH`: it tightens that file's permissions, and rewrites it when a
+token is refreshed or a new authorization is granted. That behaviour predates
+this slice, belongs to `services/collector/gmail/client.py`, and is left
+untouched here. "The audit writes nothing" is a claim about Gmail data and
+evaluation artefacts, and never about that credential file.
 
 The parser is **reused, never reimplemented**:
 `services/collector/parsers/linkedin_job_alert.py` is the one definition of
