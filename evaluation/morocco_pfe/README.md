@@ -1,4 +1,4 @@
-# Phase 7C.1 — Morocco PFE source map and gold benchmark foundation
+# Morocco PFE evaluation — 7C.1 source map and gold benchmark, 7C.2A Gmail intake audit
 
 This directory is the foundation for one question, and it does not yet answer
 it:
@@ -208,6 +208,116 @@ benchmark's `expected_opportunity_type`.
 future use. It changes no production classifier and adds no production rule;
 Data & AI classification is Phase 8 and is out of scope here.
 
+## 7C.2A — the Gmail LinkedIn intake audit
+
+`linkedin_gmail_audit.py` and `cli/linkedin_gmail_audit.py` are the first thing
+in this directory that reads anything live. They measure one link of the chain
+and nothing else:
+
+    Gmail job-alert messages -> the existing LinkedIn parser -> counts
+
+Run it, read-only, over a bounded window:
+
+```
+python -m evaluation.morocco_pfe.cli.linkedin_gmail_audit
+python -m evaluation.morocco_pfe.cli.linkedin_gmail_audit \
+    --query "newer_than:7d from:jobalerts-noreply@linkedin.com" --limit 50
+```
+
+It prints one JSON object: `query`, `message_limit`, `messages_found`,
+`messages_with_candidates`, `messages_without_candidates`, `candidates_parsed`,
+`unique_linkedin_jobs`, `duplicate_occurrences`, `candidates_with_location`,
+`candidates_without_location`, `truncated`.
+
+### Parser yield is not LinkedIn recall
+
+This is the distinction the whole slice exists to keep:
+
+| | |
+| --- | --- |
+| **Gmail intake coverage / parser yield** | of the messages this Gmail query returns, how many the parser reads, how many distinct jobs they describe. **This is what the audit measures.** |
+| **LinkedIn recall** | of the Morocco PFE jobs really posted on LinkedIn, how many the radar sees. **The audit says nothing about this.** |
+
+A job LinkedIn never puts in an alert email does not exist as far as this
+measurement is concerned, and no alert-mail number can bound how many such jobs
+there are. `messages_without_candidates == 0` means the parser read every
+message it was given; it does not mean the mailbox held every job. Calling any
+number produced here "LinkedIn recall" would be a false claim.
+
+### The mailbox
+
+The project reads **one dedicated Gmail account**, created for it, holding only
+recent live mail. The owner's personal Gmail account is out of scope entirely:
+it is never connected, read, imported or replayed, and no code here can reach a
+mailbox other than the one `GMAIL_OAUTH_CLIENT_SECRET_PATH` and
+`GMAIL_TOKEN_PATH` configure. Because that account is new, there is no
+historical archive to replay — 7C.1's backlog note about replaying 2025/2026
+mail describes a corpus that does not exist.
+
+OAuth stays `gmail.readonly`, enforced by the existing client, which this slice
+neither modifies nor weakens. No message is read into any file: the audit
+prints counts, and never a message id, thread id, subject, snippet, body,
+sender or URL.
+
+### The one local file that does change
+
+The audit persists nothing it reads, but "nothing is written anywhere" would be
+false, and it is worth being exact about why. Authorizing any Gmail entry point
+in this repository lets `services/collector/gmail/client.py` maintain its own
+credential file: it tightens the permissions of `GMAIL_TOKEN_PATH` to `0600`,
+and rewrites that file when a token is refreshed or a new authorization is
+granted.
+
+That is pre-existing OAuth behaviour, shared with the Gmail probe, the LinkedIn
+alert probe and the production collector. 7C.2A delegates to it unchanged — no
+new credential loader, no second token path, no weakening of the read-only
+scope — and does not claim it away. So the accurate guarantee is:
+
+| The audit | The OAuth client it delegates to |
+| --- | --- |
+| persists no Gmail message data — no subject, snippet, body or message id | may `chmod` the local token file |
+| creates no evaluation dump and no business artefact | may rewrite the token file on refresh or new authorization |
+| writes no SQLite or other database data | touches nothing else on disk |
+| modifies no Gmail message or label | |
+
+### `truncated`
+
+`truncated` is true whenever `messages_found == message_limit`. The Gmail
+client stops at the bound it was given and cannot prove nothing lies beyond it,
+so a reached bound means **the window may be incomplete**.
+
+`truncated: false` is a narrower statement than it looks. It says the caller's
+bound did not cut the window short — nothing more. It is never evidence about
+mail outside the query's own window, about mail the query does not match, or
+about jobs that were never mailed at all.
+
+### What 7C.2A deliberately does not do
+
+* **No production change.** `config/sources.yaml` is untouched: LinkedIn still
+  runs `newer_than:7d from:linkedin.com` with a limit of 50 in production. That
+  query is broader than job alerts and also matches newsletters; correcting it
+  to `from:jobalerts-noreply@linkedin.com` is an operational decision and is
+  7C.2B's, not this slice's. The 30-day audit query is an **evaluation**
+  default and configures nothing.
+* **No data write.** No SQLite write, no migration, no new table, no JSONL
+  dump, no raw Gmail export, no new credential storage mechanism. Gmail →
+  parser → operational database has *not* been exercised by this slice, and the
+  `linkedin_job_alert_email` rows in `opportunity_sources` and `source_runs`
+  remain whatever they already were. The existing OAuth client's own credential
+  maintenance at `GMAIL_TOKEN_PATH` is the one exception, and it is described
+  above rather than denied.
+* **No parser or collector change.** The parser is reused, not reimplemented;
+  the collector, the factory and `RadarAgent` are untouched.
+
+### The real numbers live outside the code
+
+No observed count is hardcoded anywhere in this repository, and none should be.
+The audit's baseline is whatever a run against the real dedicated account
+printed, recorded as external validation evidence with its query, its limit and
+its date. The unit tests use invented messages to prove the aggregation rules;
+a synthetic fixture is never evidence of what the mailbox contains, and no test
+here is a validation of live coverage.
+
 ## Validation
 
 `validator.py` is offline and deterministic. It opens no socket — no
@@ -264,10 +374,13 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
 
 ## Backlog (numbers are the architect's to fix)
 
-* **7C.2** — LinkedIn Gmail coverage evaluation, including replay of historical
-  2025/2026 job-alert mail. Any such replay must stay read-only against Gmail,
-  write nothing to the production database, modify no message or label, and
-  scrape no LinkedIn page. Not implemented here.
+* **7C.2A** — LinkedIn Gmail intake audit. Implemented, above: read-only
+  against Gmail, persists nothing it reads, scrapes no LinkedIn page. There is
+  no historical replay and there will not be one — the dedicated account is new
+  and the personal account is out of scope.
+* **7C.2B** — the operational follow-up: correcting the production LinkedIn
+  Gmail query, and exercising Gmail → parser → operational database. Neither is
+  implemented here.
 * **7C.3** — ReKrute collector.
 * **7C.4** — Stagiaires.ma collector.
 * **7C.5** — Stage.ma collector.

@@ -12,8 +12,24 @@ used to score the radar, and is never re-injected as an active opportunity.
 
     validator.py  the offline, deterministic checks both artefacts must pass
     README.md     the scope, the metric definitions, and what stays out
+
+Phase 7C.2A adds one measurement beside them, and no artefact:
+
+    linkedin_gmail_audit.py  aggregate Gmail intake quality of LinkedIn alerts
+
+It reads mail read-only through the existing Gmail client, reuses the existing
+LinkedIn parser, persists nothing it reads, and reports counts — parser yield
+over a bounded Gmail window, which is not LinkedIn recall. The OAuth client
+keeps maintaining its own credential file, as it always has.
 """
 
+from evaluation.morocco_pfe.linkedin_gmail_audit import (
+    DEFAULT_AUDIT_MESSAGE_LIMIT,
+    DEFAULT_AUDIT_QUERY,
+    GmailIntakeAuditError,
+    GmailIntakeAuditReport,
+    audit_gmail_intake,
+)
 from evaluation.morocco_pfe.validator import (
     BENCHMARK_COUNTRY_CODE,
     BenchmarkReport,
@@ -41,6 +57,10 @@ __all__ = [
     "BenchmarkValidationError",
     "COLLECTION_STRATEGIES",
     "COVERAGE_ROLES",
+    "DEFAULT_AUDIT_MESSAGE_LIMIT",
+    "DEFAULT_AUDIT_QUERY",
+    "GmailIntakeAuditError",
+    "GmailIntakeAuditReport",
     "INTEGRATION_STATUSES",
     "OBSERVATION_HORIZONS",
     "PRIORITIES",
@@ -49,6 +69,7 @@ __all__ = [
     "SourceMap",
     "SourceMapEntry",
     "SourceMapValidationError",
+    "audit_gmail_intake",
     "check_source_map_against_production_registry",
     "load_benchmark_records",
     "load_manifest",
