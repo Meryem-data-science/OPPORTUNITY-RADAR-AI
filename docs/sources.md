@@ -7,7 +7,7 @@ active sources:
 | --- | --- | --- |
 | `scale_ai_greenhouse` | Greenhouse | Public Scale AI board (`scaleai`) |
 | `artefact_greenhouse` | Greenhouse | Public Artefact board (`artefact`) |
-| `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:linkedin.com`, at most 50 messages |
+| `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:jobalerts-noreply@linkedin.com`, at most 50 messages |
 
 ## Greenhouse
 
@@ -34,6 +34,20 @@ content and deduplicates repeated numeric LinkedIn job IDs across messages in
 one run. It emits canonical URLs of the form
 `https://www.linkedin.com/jobs/view/<JOB_ID>`.
 
+### The production query
+
+The operational query is exactly:
+
+```text
+newer_than:7d from:jobalerts-noreply@linkedin.com
+```
+
+with a bound of 50 messages. The sender is the LinkedIn Job Alert address
+specifically. The broader `from:linkedin.com` used before Phase 7C.2B also
+matched newsletters and other LinkedIn mail, so it was not a job-alert intake
+query. The 30-day window belongs to the read-only 7C.2A evaluation audit in
+`evaluation/morocco_pfe/` and configures nothing operational.
+
 Only normalized opportunity fields reach persistence. Email bodies, snippets,
 Gmail message/thread IDs, and LinkedIn email tracking parameters are not stored
 as opportunity data. OAuth client and token files stay local, should live in an
@@ -48,7 +62,9 @@ merged solely because an audit considers it similar; see
 [database.md](database.md) for the confirmed-merge and rollback safeguards.
 
 Source `frequency_minutes` values are catalogue metadata only. No scheduled or
-continuous production runner is implemented.
+continuous production runner is implemented: an operational run is the explicit
+`python -m services.collector.cli.run_radar --once --apply` command described in
+[operations.md](operations.md).
 
 ## Watching a source
 
