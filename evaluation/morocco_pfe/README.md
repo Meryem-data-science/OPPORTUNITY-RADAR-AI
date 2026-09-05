@@ -42,7 +42,16 @@ exist (`greenhouse`, `gmail_linkedin_alert`):
 So exactly one entry of the source map is `ACTIVE`, and the map's fourteen
 entries are otherwise a statement of intent. The validator cross-checks every
 `ACTIVE` entry against `config/sources.yaml` and rejects the map if an entry
-claims a collector that is not configured and enabled there.
+claims a collector the operational catalogue does not actually run.
+
+`ACTIVE` means exactly what `RadarAgent.run_once` means by it — the configured
+source is **enabled *and* has `status: active`** — because those are the two
+conditions under which a source is really collected. A source that is enabled
+but inactive is never read, so calling it `ACTIVE` here would put a source in
+the coverage numerator that contributes nothing to it. An `ACTIVE` entry
+declaring `GMAIL_ALERT` must additionally name a production source of type
+`gmail_linkedin_alert`, so a strategy and the collector behind it cannot drift
+apart.
 
 ## LinkedIn is Gmail-only
 
@@ -80,6 +89,11 @@ Rules that make it worth trusting:
   employer-side URL is unknown, which is the case for both seed rows. 7C.1
   resolves nothing over the network; a later slice may store the aggregator URL
   and the official one side by side.
+* **`pfe_cohort_year` is observed, never inferred.** A publication date is not
+  a cohort: a campaign published in October 2025 can be PFE 2026, and one
+  published in August 2026 can be PFE 2027. The field is a reviewed gold fact,
+  so it stays null unless the evidence states the cohort — it is never derived
+  from `published_at`, and no code here derives it. Both seed rows are null.
 * **`expected_opportunity_type` uses the existing closed registry**
   (`services/digital_twin/preferences/models.py`), imported by the validator.
   No third taxonomy is created here.
@@ -216,7 +230,8 @@ It enforces:
 * `expected_data_ai` ∈ {`true`, `false`, `null`};
 * `published_at` is null or ISO `YYYY-MM-DD`; `observed_at` is ISO
   `YYYY-MM-DD` and is not before `published_at`;
-* `pfe_cohort_year` is null or a plausible integer year;
+* `pfe_cohort_year` is null or a plausible integer year — validated, never
+  derived: nothing infers a cohort from `published_at`;
 * no record reads as synthetic (placeholder words in identity fields,
   placeholder URL hosts);
 * the manifest's `current_rows` equals the number of rows in the JSONL;
@@ -228,8 +243,10 @@ For the source map it enforces the closed registries for `source_class`,
 `is_production_registry` false; that a `LINKEDIN_ALERT` source is `GMAIL_ALERT`
 and nothing else; that a null `homepage_url` is declared `UNKNOWN` rather than
 left ambiguous; and that an entry may call itself `ACTIVE` only when
-`config/sources.yaml` really configures and enables the `production_source_id`
-it names.
+`config/sources.yaml` really configures the `production_source_id` it names,
+with that source both `enabled` and of `status: active` — the `RadarAgent`'s
+own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
+`gmail_linkedin_alert`.
 
 ## Out of scope in 7C.1, on purpose
 

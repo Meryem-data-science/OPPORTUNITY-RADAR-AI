@@ -126,6 +126,17 @@ INTEGRATION_STATUSES = frozenset(
 #: either of them must name a real row of `config/sources.yaml`.
 IMPLEMENTED_STRATEGIES = frozenset({"EXISTING_COLLECTOR", "GMAIL_ALERT"})
 
+#: The `status` a configured source must carry for the `RadarAgent` to run it.
+#: Mirrors `RadarAgent.run_once`, which keeps a source only when it is both
+#: enabled and of this status.
+PRODUCTION_ACTIVE_STATUS = "active"
+
+#: The production collector type a strategy commits to, where it commits to a
+#: specific one. `EXISTING_COLLECTOR` is deliberately absent: it says "some
+#: collector already exists", not which. `GMAIL_ALERT` is not that loose — it
+#: names the Gmail LinkedIn alert intake and nothing else.
+STRATEGY_PRODUCTION_TYPES = {"GMAIL_ALERT": "gmail_linkedin_alert"}
+
 #: How much we actually know about a homepage URL. No URL in this slice was
 #: fetched, so a URL is either evidence somebody handed us, a domain we wrote
 #: down from public knowledge and have not confirmed, or nothing at all.
@@ -459,6 +470,11 @@ def _validate_record(record: Any, where: str) -> dict[str, Any]:
             f"{where}: observed_at precedes published_at"
         )
 
+    # An observed, reviewed fact — never derived. A publication date is not a
+    # cohort: a campaign published in October 2025 can be PFE 2026, and one
+    # published in August 2026 can be PFE 2027. Where no evidence states the
+    # cohort, the field stays null rather than being guessed from published_at,
+    # and nothing in this module infers it.
     cohort_year = value["pfe_cohort_year"]
     if cohort_year is not None:
         if isinstance(cohort_year, bool) or not isinstance(cohort_year, int):
@@ -795,6 +811,13 @@ def check_source_map_against_production_registry(
     reads it to be contradicted: an entry may only call itself ACTIVE if
     `config/sources.yaml` really configures the id it names. Writing a row here
     activates nothing, and this check is what keeps that true as the map grows.
+
+    "ACTIVE" means exactly what the `RadarAgent` means by it: `run_once` keeps
+    a configured source only when `source.enabled and source.status ==
+    "active"`. A source that is enabled but inactive is never collected, so
+    calling it ACTIVE here would put a source in the coverage numerator that
+    contributes nothing to it — the denominator would silently absorb a source
+    nobody is reading.
     """
     configured = {source.id: source for source in load_source_registry(registry_path)}
     active = source_map.active_sources
@@ -808,6 +831,19 @@ def check_source_map_against_production_registry(
         if not configured_source.enabled:
             raise SourceMapValidationError(
                 f"source {entry.id!r} is ACTIVE but production source "
-                f"{configured_source.id!r} is disabled"
+                f"{configured_source.id!r} is disabled in {registry_path}"
+            )
+        if configured_source.status != PRODUCTION_ACTIVE_STATUS:
+            raise SourceMapValidationError(
+                f"source {entry.id!r} is ACTIVE but production source "
+                f"{configured_source.id!r} has status "
+                f"{configured_source.status!r}, so the RadarAgent never runs it"
+            )
+        expected_type = STRATEGY_PRODUCTION_TYPES.get(entry.collection_strategy)
+        if expected_type is not None and configured_source.type != expected_type:
+            raise SourceMapValidationError(
+                f"source {entry.id!r} declares {entry.collection_strategy}, but "
+                f"production source {configured_source.id!r} is of type "
+                f"{configured_source.type!r}, not {expected_type!r}"
             )
     return active

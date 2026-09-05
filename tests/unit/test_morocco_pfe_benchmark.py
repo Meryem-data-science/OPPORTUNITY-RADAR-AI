@@ -27,6 +27,7 @@ from evaluation.morocco_pfe.validator import (
     INTEGRATION_STATUSES,
     OBSERVATION_HORIZONS,
     PRIORITIES,
+    PRODUCTION_ACTIVE_STATUS,
     SOURCE_AUTHORITIES,
     SOURCE_CLASSES,
     BenchmarkValidationError,
@@ -91,10 +92,36 @@ def test_seed_rows_are_the_two_real_observed_stage_ma_opportunities() -> None:
         # No official employer URL is known for either row, and none is invented.
         assert record["official_application_url"] is None
 
+        # A publication date is not a cohort, so nothing derives one from it.
+        assert record["pfe_cohort_year"] is None
+
     assert by_id["stage-ma-9279"]["organization"] == "ARRA Engineering"
     assert by_id["stage-ma-9279"]["published_at"] == "2026-03-02"
     assert by_id["stage-ma-9233"]["organization"] == "PionovaAI"
     assert by_id["stage-ma-9233"]["published_at"] == "2026-01-31"
+
+
+def test_seed_cohort_year_is_null_because_no_evidence_states_it() -> None:
+    """`pfe_cohort_year` is an observed gold fact, never a derived one.
+
+    A PFE campaign published in October 2025 can be the 2026 cohort, and one
+    published in August 2026 can be the 2027 cohort. Neither seed posting
+    states its cohort, so the field stays null rather than inheriting the year
+    of `published_at` — a benchmark that guesses a label cannot be used to
+    score anything against that label.
+    """
+    records = load_benchmark_records(DEFAULT_BENCHMARK_PATH)
+
+    assert records
+    for record in records:
+        assert record["pfe_cohort_year"] is None
+        published_year = int(str(record["published_at"])[:4])
+        assert record["pfe_cohort_year"] != published_year
+
+    # Null is a real answer here, and a stated cohort is still accepted.
+    record = seed_record()
+    record["pfe_cohort_year"] = 2027
+    assert parse_benchmark_lines(as_jsonl(record))[0]["pfe_cohort_year"] == 2027
 
 
 def test_benchmark_ids_are_unique_and_a_duplicate_is_rejected() -> None:
@@ -432,6 +459,91 @@ def test_an_active_claim_without_a_configured_collector_is_rejected() -> None:
         check_source_map_against_production_registry(
             source_map, PRODUCTION_SOURCE_REGISTRY
         )
+
+
+def test_an_enabled_but_inactive_production_source_may_not_be_active(
+    tmp_path: Path,
+) -> None:
+    """ACTIVE means what `RadarAgent.run_once` means: enabled *and* active.
+
+    A source that is enabled but carries any other status is never collected,
+    so representing it as ACTIVE would credit the coverage map with a source
+    nobody reads.
+    """
+    registry_path = tmp_path / "sources.yaml"
+    registry_path.write_text(
+        "sources:\n"
+        "  - id: linkedin_job_alert_email\n"
+        "    type: gmail_linkedin_alert\n"
+        "    enabled: true\n"
+        "    status: inactive\n"
+        "    gmail_query: from:linkedin.com\n"
+        "    gmail_message_limit: 50\n",
+        encoding="utf-8",
+    )
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    with pytest.raises(SourceMapValidationError, match="never runs it"):
+        check_source_map_against_production_registry(source_map, registry_path)
+
+
+def test_a_disabled_production_source_may_not_be_active(tmp_path: Path) -> None:
+    registry_path = tmp_path / "sources.yaml"
+    registry_path.write_text(
+        "sources:\n"
+        "  - id: linkedin_job_alert_email\n"
+        "    type: gmail_linkedin_alert\n"
+        "    enabled: false\n"
+        "    status: active\n"
+        "    gmail_query: from:linkedin.com\n"
+        "    gmail_message_limit: 50\n",
+        encoding="utf-8",
+    )
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    with pytest.raises(SourceMapValidationError, match="is disabled"):
+        check_source_map_against_production_registry(source_map, registry_path)
+
+
+def test_a_gmail_alert_entry_must_name_a_gmail_alert_production_source(
+    tmp_path: Path,
+) -> None:
+    """The strategy and the configured collector type have to agree."""
+    registry_path = tmp_path / "sources.yaml"
+    registry_path.write_text(
+        "sources:\n"
+        "  - id: linkedin_job_alert_email\n"
+        "    type: greenhouse\n"
+        "    enabled: true\n"
+        "    status: active\n"
+        "    organization: Scale AI\n"
+        "    board_token: scaleai\n",
+        encoding="utf-8",
+    )
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    with pytest.raises(SourceMapValidationError, match="not 'gmail_linkedin_alert'"):
+        check_source_map_against_production_registry(source_map, registry_path)
+
+
+def test_the_active_invariant_matches_what_the_radar_agent_runs() -> None:
+    """The map's ACTIVE rule is the agent's eligibility rule, not a copy of it.
+
+    `RadarAgent.run_once` keeps `source.enabled and source.status == "active"`.
+    Reading the real catalogue through both makes a future divergence a test
+    failure rather than a silently overstated coverage denominator.
+    """
+    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+    collected_by_the_agent = {
+        source.id
+        for source in configured
+        if source.enabled and source.status == PRODUCTION_ACTIVE_STATUS
+    }
+    active = check_source_map_against_production_registry(
+        load_source_map(DEFAULT_SOURCE_MAP_PATH), PRODUCTION_SOURCE_REGISTRY
+    )
+
+    assert {entry.production_source_id for entry in active} <= collected_by_the_agent
 
 
 def test_a_candidate_source_may_not_claim_an_implemented_strategy() -> None:
