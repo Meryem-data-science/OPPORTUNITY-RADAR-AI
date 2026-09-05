@@ -79,3 +79,67 @@ published" from "this collector or parser may be broken". An unknown
 `items_found` is never counted as a zero. The rule is specified in
 [database.md](database.md). Nothing is alerted, retried, or rescheduled as a
 result.
+
+## ReKrute — evaluated in Phase 7C.3, not selected
+
+ReKrute is **not** a source. It has no row in `config/sources.yaml`, no
+`SourceConfig` type, no entry in the collector factory and no
+`production_source_id` in the Morocco PFE source map, where it is recorded as
+`NOT_SELECTED`. No collector, no production parser, no `RadarAgent` run, no
+database row, no migration and no scheduler exist for it, and none is planned.
+
+Phase 7C.3 is therefore complete as a **source feasibility evaluation**, with
+no production activation. It is not a paused integration.
+
+### What was actually observed
+
+A GET-only, bounded, robots-obeying audit was run locally against public pages:
+
+| Check | Result |
+|---|---|
+| `robots.txt` | HTTP 200, retrieved and parsed; the target path was **not** disallowed |
+| `conditions-utilisation.html` (public terms) | HTTP 200, publicly reachable |
+| `emploi-PFE` (PFE listing target), automated GET | **HTTP 403**, 14-byte body |
+
+The same listing page is visible to a human in an ordinary browser. **No bypass
+of that refusal was attempted or implemented** — no browser impersonation, no
+Selenium or Playwright, no proxy rotation, no CAPTCHA handling, no
+authenticated access, no user cookies, no private API.
+
+### What this evidence does and does not say
+
+It does **not** say that ReKrute prohibits automated access. `robots.txt` did
+not disallow the target path. The terms page was reachable but was not read as
+a permission and still requires human review; the audit's automated-access
+keyword indicators were all false, and their absence is not permission either.
+This project makes no legal claim about ReKrute in either direction.
+
+What it does say is narrower and sufficient for the decision: honest,
+non-evasive automated access to the PFE listing is refused today.
+
+### Why it was not selected
+
+The decision is a product one. The PFA target is narrowly Morocco + PFE/stage
+(with Data & AI targeting later). ReKrute is a general employment board rather
+than a PFE/stage-specialised source, so its expected PFE coverage benefit does
+not justify further integration effort — particularly when automated listing
+access is already refused without resorting to evasion.
+
+Higher-value internship/PFE-specific sources remain ahead of it: Stagiaires.ma,
+Stage.ma, and official employer/ATS sources. ReKrute stays in the source map as
+an `AUDIT` reference for manual coverage comparison, which is what `P2` /
+`AUDIT` / `MANUAL_BENCHMARK` now record.
+
+Reconsider only if an official or public integration channel suitable for this
+purpose becomes available, or if the product scope changes.
+
+### `NOT_SELECTED` in the source map
+
+`NOT_SELECTED` is a closed `integration_status` meaning: *the source was
+evaluated and intentionally not selected for production in the current PFA
+scope.* It deliberately does **not** imply that a source is legally forbidden,
+permanently impossible, or fake. Keeping that distinct from
+`NEEDS_VERIFICATION` matters — otherwise "we decided against it" and "we have
+not looked yet" become indistinguishable a year from now.
+
+No ReKrute page body, and no terms text, is stored in this repository.

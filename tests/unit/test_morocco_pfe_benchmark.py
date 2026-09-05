@@ -24,6 +24,7 @@ from evaluation.morocco_pfe.validator import (
     DEFAULT_BENCHMARK_PATH,
     DEFAULT_MANIFEST_PATH,
     DEFAULT_SOURCE_MAP_PATH,
+    FUTURE_STRATEGIES,
     INTEGRATION_STATUSES,
     OBSERVATION_HORIZONS,
     PRIORITIES,
@@ -392,7 +393,9 @@ def test_every_mapped_source_is_morocco_scoped_and_uses_closed_registries() -> N
 def test_the_expected_morocco_sources_are_mapped() -> None:
     by_id = {entry.id: entry for entry in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources}
 
-    assert by_id["rekrute"].priority == "P1"
+    # ReKrute was evaluated in 7C.3 and deliberately not selected; it is no
+    # longer a P1 collector candidate. See the not-selected tests below.
+    assert by_id["rekrute"].priority == "P2"
     assert by_id["stagiaires_ma"].priority == "P1"
     assert by_id["stage_ma"].priority == "P1"
     assert by_id["talentsoft_hosted_career_sites"].source_class == "ATS"
@@ -641,3 +644,112 @@ def test_no_benchmark_row_is_an_operational_opportunity() -> None:
         assert record["source_authority"] in SOURCE_AUTHORITIES
         # Identity is the source's, so it survives a rebuilt database file.
         assert not str(record["benchmark_id"]).isdigit()
+
+
+def test_not_selected_is_a_closed_integration_status() -> None:
+    """A source can be real, reachable, and still deliberately not chosen.
+
+    Without this member, "we evaluated it and said no" would have to be spelled
+    as NEEDS_VERIFICATION or CANDIDATE, both of which claim the decision is
+    still open. It carries no legal meaning whatsoever.
+    """
+    assert "NOT_SELECTED" in INTEGRATION_STATUSES
+
+
+def test_rekrute_records_the_evaluated_but_not_selected_decision() -> None:
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["rekrute"]
+
+    assert entry.integration_status == "NOT_SELECTED"
+    assert entry.priority == "P2"
+    assert entry.coverage_role == "AUDIT"
+    assert entry.collection_strategy == "MANUAL_BENCHMARK"
+    assert entry.production_source_id is None
+    assert entry.country == BENCHMARK_COUNTRY_CODE
+    assert entry.live_canary is False
+    # The domain and its public robots/terms URLs were reached for real, so the
+    # homepage is no longer merely written down from public knowledge.
+    assert entry.homepage_url == "https://www.rekrute.com"
+    assert entry.homepage_url_status == "EVIDENCED"
+
+
+def test_the_rekrute_note_records_the_decision_without_a_legal_claim() -> None:
+    """The note must not turn "we chose not to" into "we are not allowed to"."""
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["rekrute"]
+    assert entry.notes is not None
+    note = entry.notes.lower()
+
+    assert "not selected" in note
+    assert "403" in note
+    assert "no bypass" in note or "bypass" in note
+    for forbidden in ("forbids", "prohibits scraping", "illegal", "not allowed to"):
+        assert forbidden not in note
+
+
+def test_a_not_selected_source_cannot_claim_production_activity() -> None:
+    """NOT_SELECTED is subject to the same rule as every other non-ACTIVE status."""
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["production_source_id"] = "rekrute"
+
+    with pytest.raises(SourceMapValidationError, match="only an ACTIVE source"):
+        parse_source_map(document)
+
+
+def test_linkedin_remains_the_only_active_production_mapped_source() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    assert [entry.id for entry in source_map.active_sources] == [
+        "linkedin_job_alert_email"
+    ]
+    assert source_map.active_sources[0].production_source_id == (
+        "linkedin_job_alert_email"
+    )
+
+
+def test_the_source_map_still_validates_with_unique_ids() -> None:
+    sources = load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    identifiers = [entry.id for entry in sources]
+
+    assert len(identifiers) == len(set(identifiers))
+    assert "rekrute" in identifiers
+
+
+@pytest.mark.parametrize("strategy", sorted(FUTURE_STRATEGIES))
+def test_a_not_selected_source_cannot_claim_a_future_strategy(strategy: str) -> None:
+    """Declined and planned are contradictory claims about the same source."""
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["collection_strategy"] = strategy
+
+    with pytest.raises(SourceMapValidationError, match="NOT_SELECTED"):
+        parse_source_map(document)
+
+
+def test_the_committed_not_selected_entry_uses_a_present_tense_strategy() -> None:
+    """MANUAL_BENCHMARK describes how ReKrute is read today, not a plan."""
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["rekrute"]
+
+    assert entry.integration_status == "NOT_SELECTED"
+    assert entry.collection_strategy == "MANUAL_BENCHMARK"
+    assert entry.collection_strategy not in FUTURE_STRATEGIES
+
+
+def test_future_strategies_remain_valid_for_undecided_sources() -> None:
+    """The invariant is narrow: it constrains NOT_SELECTED and nothing else."""
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["integration_status"] = "CANDIDATE"
+            entry["collection_strategy"] = "FUTURE_COLLECTOR"
+
+    source_map = parse_source_map(document)
+    rekrute = {item.id: item for item in source_map.sources}["rekrute"]
+    assert rekrute.collection_strategy == "FUTURE_COLLECTOR"

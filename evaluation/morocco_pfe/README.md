@@ -422,7 +422,38 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
 * **7C.2B** — the operational follow-up: correcting the production LinkedIn
   Gmail query, and exercising Gmail → parser → operational database. Neither is
   implemented here.
-* **7C.3** — ReKrute collector.
+* **7C.3** — ReKrute source feasibility evaluation. **Complete, and the answer
+  was no.** ReKrute is evaluated and deliberately **not selected** for
+  production; the source map records it as `NOT_SELECTED`, `P2`, `AUDIT`,
+  `MANUAL_BENCHMARK`, with a null `production_source_id`. There is no 7C.3B.
+
+  What a local GET-only, bounded, robots-obeying audit actually observed:
+  `robots.txt` returned HTTP 200 and did **not** disallow the target path; the
+  public terms page returned HTTP 200; and an automated GET of the PFE listing
+  target `/emploi-PFE` returned **HTTP 403** with a 14-byte body, while the
+  same page is visible to a human in an ordinary browser. No bypass was
+  attempted or implemented — no browser impersonation, Selenium, Playwright,
+  proxy rotation, CAPTCHA handling, authenticated access, user cookies or
+  private API.
+
+  This is **not** a finding that ReKrute prohibits automated access, and no
+  legal claim is made in either direction: robots did not disallow the path,
+  and the terms were not read as a permission and still require human review
+  (the audit's keyword indicators were all false, and their absence is not
+  permission). The narrower, sufficient fact is that honest automated access to
+  the listing is refused today.
+
+  The decision itself is a product one: ReKrute is a general employment board
+  rather than a PFE/stage-specialised source, so its expected PFE coverage
+  benefit does not justify further integration effort for a product narrowed to
+  Morocco PFE/stage. The investigation's parser and audit code was removed
+  rather than merged, since carrying source-specific code for a source we will
+  not collect is dead weight; the evaluation and its evidence live in the
+  source map and in `docs/sources.md`. Nothing exists for ReKrute in
+  `config/sources.yaml`, `SourceConfig`, the collector factory, the database,
+  migrations or any scheduler. Reconsider only if an official or public
+  integration channel suitable for this purpose becomes available, or if the
+  product scope changes.
 * **7C.4** — Stagiaires.ma collector.
 * **7C.5** — Stage.ma collector.
 * **7C.x** — official ATS integration, where a reusable ATS is confirmed to
