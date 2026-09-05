@@ -119,8 +119,17 @@ COLLECTION_STRATEGIES = frozenset(
         "MANUAL_BENCHMARK",
     }
 )
+#: Where an entry stands with respect to being collected.
+#:
+#: `NOT_SELECTED` records a *product* decision and nothing more: the source was
+#: evaluated and deliberately not chosen for production in the current PFA
+#: scope. It is emphatically **not** a claim that a source is legally
+#: forbidden, permanently impossible, or fake — a source can be perfectly real,
+#: perfectly reachable by a human, and still not be worth integrating. Keeping
+#: that distinction in the vocabulary is the point: without it, "we decided
+#: against it" and "we are not allowed" collapse into the same silence.
 INTEGRATION_STATUSES = frozenset(
-    {"ACTIVE", "CANDIDATE", "BENCHMARK_ONLY", "NEEDS_VERIFICATION"}
+    {"ACTIVE", "CANDIDATE", "BENCHMARK_ONLY", "NEEDS_VERIFICATION", "NOT_SELECTED"}
 )
 #: The strategies that describe something that already runs. An entry claiming
 #: either of them must name a real row of `config/sources.yaml`.

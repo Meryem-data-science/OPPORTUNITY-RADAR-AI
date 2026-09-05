@@ -80,114 +80,66 @@ published" from "this collector or parser may be broken". An unknown
 [database.md](database.md). Nothing is alerted, retried, or rescheduled as a
 result.
 
-## ReKrute (Phase 7C.3A — foundation only, not a source)
+## ReKrute — evaluated in Phase 7C.3, not selected
 
-ReKrute is **not** a configured source. It has no row in `config/sources.yaml`,
-no `SourceConfig` type, no entry in the collector factory and no
-`production_source_id` in the Morocco PFE source map, where it stays
-`CANDIDATE`. The `RadarAgent` cannot run it and nothing about it is written to
-the database.
+ReKrute is **not** a source. It has no row in `config/sources.yaml`, no
+`SourceConfig` type, no entry in the collector factory and no
+`production_source_id` in the Morocco PFE source map, where it is recorded as
+`NOT_SELECTED`. No collector, no production parser, no `RadarAgent` run, no
+database row, no migration and no scheduler exist for it, and none is planned.
 
-**The access audit did not succeed.** 7C.3A was required to verify ReKrute's
-public access before writing a parser against it. Outbound HTTPS from the
-Claude Code Cloud session is filtered, and the egress proxy answered 403 to
-`CONNECT` for `www.rekrute.com:443` and `rekrute.com:443`. DNS resolved and
-unrelated hosts returned 200, so the denial is that sandbox's allow-list rather
-than ReKrute blocking the request: no robots.txt, no terms page, no listing
-page and no detail page was ever received. No CAPTCHA, bot challenge, site 403
-or forced login was observed — not because none exists, but because no response
-ever arrived.
+Phase 7C.3 is therefore complete as a **source feasibility evaluation**, with
+no production activation. It is not a paused integration.
 
-Consequently `services/collector/parsers/rekrute.py` contains **no listing
-parser and no detail parser**. Extracting offer links or offer fields requires
-ReKrute's real markup, and inventing it is the one thing this phase forbids.
-What the module does contain owes nothing to the site's HTML:
+### What was actually observed
 
-* `RekruteOfferRecord` — a source-shaped record whose field list is the
-  architect's specification, not observed evidence. It keeps `deadline` and
-  `contract_type`, which `OpportunityCandidate` has no column for, so the
-  evidence is not discarded; `to_opportunity_candidate` bridges only what the
-  shared model already supports and smuggles nothing into another field. The
-  shared model is unchanged in this slice.
-* `canonical_offer_url` — deterministic canonicalization: https, canonical
-  host, fragment dropped, universal tracking parameters (`utm_*`, `gclid`, …)
-  dropped, remaining query sorted. Unrecognised parameters are **kept**,
-  because where ReKrute puts an offer id is unverified and discarding one could
-  destroy identity. Non-http(s) schemes, foreign hosts and URLs carrying
-  RFC 3986-invalid characters are rejected.
-* `assess_target_evidence` — the locked PFE/stage rule (below).
+A GET-only, bounded, robots-obeying audit was run locally against public pages:
 
-### Completing the audit
-
-    python -m evaluation.morocco_pfe.cli.rekrute_access_audit
-    python -m evaluation.morocco_pfe.cli.rekrute_access_audit \
-        --url https://www.rekrute.com/<public listing path> --follow-links --limit 5
-
-GET-only, sequential, with a delay and an explicit timeout, hard bounded at 10
-pages, and **every page is fetched exactly once** — the target's links come
-from that single response rather than a second request. It stops at any wall it
-meets — 403, 429, CAPTCHA, login redirect — and reports it. It never bypasses a
-CAPTCHA, rotates a proxy, impersonates a browser, drives a browser engine,
-authenticates or sends a cookie; the user agent names the audit truthfully. It
-writes nothing: no SQLite, no benchmark row, no HTML on disk.
-
-`robots.txt` is fetched first, under an explicit status policy:
-
-| robots.txt response | audit behaviour |
+| Check | Result |
 |---|---|
-| 200 | parse and obey; a disallowed path is not fetched (exit `3`) |
-| 404, 410 | file definitively absent — no explicit rule applies, audit continues |
-| 401, 403, 407, 429 | we were **refused** the file — stop before the target |
-| 5xx / unexpected status | unresolved — stop before the target |
-| challenge page or login redirect served as robots | stop |
-| transport failure or timeout | stop |
+| `robots.txt` | HTTP 200, retrieved and parsed; the target path was **not** disallowed |
+| `conditions-utilisation.html` (public terms) | HTTP 200, publicly reachable |
+| `emploi-PFE` (PFE listing target), automated GET | **HTTP 403**, 14-byte body |
 
-The asymmetry is the point: a robots.txt we were refused tells us nothing about
-what is allowed, and an unknown rule is never read as a permissive one. A 404
-means no rule exists — a statement about robots.txt only, and **not**
-permission of any kind.
+The same listing page is visible to a human in an ordinary browser. **No bypass
+of that refusal was attempted or implemented** — no browser impersonation, no
+Selenium or Playwright, no proxy rotation, no CAPTCHA handling, no
+authenticated access, no user cookies, no private API.
 
-The audit also checks the public terms page
-(`https://www.rekrute.com/conditions-utilisation.html`) once, GET-only, and
-reports it structurally: URL, status, availability, any barrier, and — when
-reachable — which automation-related words (`robot`, `crawler`, `scrap`,
-`scraping`, `aspir`, `automatis`, `bot`) appear in its **visible text**, with
-markup excluded so a `<meta name="robots">` tag cannot manufacture a finding.
-No clause, sentence or page text is emitted. There is no legal classifier here:
-`manual_review_required` is always true, and the absence of those words is
-explicitly **not** permission. A barrier on the terms page is reported, not
-bypassed; if robots disallows that path, or robots itself was unusable, the
-terms page is not fetched at all.
+### What this evidence does and does not say
 
-It prints **structure, not content** — JSON-LD types and `JobPosting` key
-*names*, response codes, link counts, and path shapes with digit runs collapsed
-so an offer-URL grammar becomes visible without anyone having guessed it. Exit
-codes: `0` completed, `1` transport/usage failure, `2` access barrier, `3`
-robots.txt disallows the path. No listing URL is hardcoded, because none was
-verified; an operator passes the page they can see.
+It does **not** say that ReKrute prohibits automated access. `robots.txt` did
+not disallow the target path. The terms page was reachable but was not read as
+a permission and still requires human review; the audit's automated-access
+keyword indicators were all false, and their absence is not permission either.
+This project makes no legal claim about ReKrute in either direction.
 
-Its report records what a public GET returned. It does **not** establish that
-automated collection is permitted — robots.txt and ReKrute's terms are both
-still unread, and this project makes no legal claim about either.
+What it does say is narrower and sufficient for the decision: honest,
+non-evasive automated access to the PFE listing is refused today.
 
-### PFE/stage targeting, and where classification lives
+### Why it was not selected
 
-An offer is PFE/stage evidence only when **either** the source's own structured
-contract field explicitly says stage, **or** the title/offer text carries
-explicit PFE evidence ("PFE", "projet de fin d'études"). Incidental internship
-wording in prose is never sufficient: a CDI whose description reads "une
-première expérience ou un stage est appréciée" is a CDI.
+The decision is a product one. The PFA target is narrowly Morocco + PFE/stage
+(with Data & AI targeting later). ReKrute is a general employment board rather
+than a PFE/stage-specialised source, so its expected PFE coverage benefit does
+not justify further integration effort — particularly when automated listing
+access is already refused without resorting to evasion.
 
-The division of responsibility: **source parsing** reports facts ReKrute states
-and answers that one narrow question from the source's own contract field;
-**shared classification**
-(`services/collector/qualification/classifier.py`) keeps the cross-source
-questions — `OpportunityType`, `Domain`, Data/AI qualification — and stays
-source- and geography-neutral. The parser imports the Phase 7B vocabulary
-rather than re-declaring a taxonomy, and adds only what 7B has no notion of: a
-source-published contract field. Data & AI filtering is Phase 8 and appears
-nowhere here.
+Higher-value internship/PFE-specific sources remain ahead of it: Stagiaires.ma,
+Stage.ma, and official employer/ATS sources. ReKrute stays in the source map as
+an `AUDIT` reference for manual coverage comparison, which is what `P2` /
+`AUDIT` / `MANUAL_BENCHMARK` now record.
 
-Phase **7C.3B** is the operational activation: finishing the audit from a
-permitted network, writing the listing and detail parsers against the structure
-it reports, and only then registering a collector.
+Reconsider only if an official or public integration channel suitable for this
+purpose becomes available, or if the product scope changes.
+
+### `NOT_SELECTED` in the source map
+
+`NOT_SELECTED` is a closed `integration_status` meaning: *the source was
+evaluated and intentionally not selected for production in the current PFA
+scope.* It deliberately does **not** imply that a source is legally forbidden,
+permanently impossible, or fake. Keeping that distinct from
+`NEEDS_VERIFICATION` matters — otherwise "we decided against it" and "we have
+not looked yet" become indistinguishable a year from now.
+
+No ReKrute page body, and no terms text, is stored in this repository.
