@@ -135,6 +135,12 @@ INTEGRATION_STATUSES = frozenset(
 #: either of them must name a real row of `config/sources.yaml`.
 IMPLEMENTED_STRATEGIES = frozenset({"EXISTING_COLLECTOR", "GMAIL_ALERT"})
 
+#: The strategies that describe an integration somebody still intends to build.
+#: They are a statement about the future, which is exactly why a NOT_SELECTED
+#: source may not carry one: an entry cannot simultaneously be declined and
+#: queued for work.
+FUTURE_STRATEGIES = frozenset({"FUTURE_COLLECTOR", "FUTURE_GENERIC_ATS"})
+
 #: The `status` a configured source must carry for the `RadarAgent` to run it.
 #: Mirrors `RadarAgent.run_once`, which keeps a source only when it is both
 #: enabled and of this status.
@@ -725,6 +731,17 @@ def _validate_source_entry(entry: Any, where: str) -> SourceMapEntry:
                 f"{where}: {collection_strategy} claims an implemented collector, "
                 f"so integration_status cannot be {integration_status}"
             )
+
+    # A declined source may not also be a planned one. Without this, an entry
+    # could read NOT_SELECTED while still naming a strategy that promises a
+    # future collector, and the map would state both that we decided against a
+    # source and that we intend to integrate it. A source we have declined
+    # describes how it is read *today* — by hand, or not at all.
+    if integration_status == "NOT_SELECTED" and collection_strategy in FUTURE_STRATEGIES:
+        raise SourceMapValidationError(
+            f"{where}: a NOT_SELECTED source was decided against, so it cannot "
+            f"also claim the future integration strategy {collection_strategy}"
+        )
 
     return SourceMapEntry(
         id=identifier,

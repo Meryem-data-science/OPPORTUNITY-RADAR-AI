@@ -24,6 +24,7 @@ from evaluation.morocco_pfe.validator import (
     DEFAULT_BENCHMARK_PATH,
     DEFAULT_MANIFEST_PATH,
     DEFAULT_SOURCE_MAP_PATH,
+    FUTURE_STRATEGIES,
     INTEGRATION_STATUSES,
     OBSERVATION_HORIZONS,
     PRIORITIES,
@@ -716,3 +717,39 @@ def test_the_source_map_still_validates_with_unique_ids() -> None:
 
     assert len(identifiers) == len(set(identifiers))
     assert "rekrute" in identifiers
+
+
+@pytest.mark.parametrize("strategy", sorted(FUTURE_STRATEGIES))
+def test_a_not_selected_source_cannot_claim_a_future_strategy(strategy: str) -> None:
+    """Declined and planned are contradictory claims about the same source."""
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["collection_strategy"] = strategy
+
+    with pytest.raises(SourceMapValidationError, match="NOT_SELECTED"):
+        parse_source_map(document)
+
+
+def test_the_committed_not_selected_entry_uses_a_present_tense_strategy() -> None:
+    """MANUAL_BENCHMARK describes how ReKrute is read today, not a plan."""
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["rekrute"]
+
+    assert entry.integration_status == "NOT_SELECTED"
+    assert entry.collection_strategy == "MANUAL_BENCHMARK"
+    assert entry.collection_strategy not in FUTURE_STRATEGIES
+
+
+def test_future_strategies_remain_valid_for_undecided_sources() -> None:
+    """The invariant is narrow: it constrains NOT_SELECTED and nothing else."""
+    document = source_map_document()
+    for entry in document["sources"]:
+        if entry["id"] == "rekrute":
+            entry["integration_status"] = "CANDIDATE"
+            entry["collection_strategy"] = "FUTURE_COLLECTOR"
+
+    source_map = parse_source_map(document)
+    rekrute = {item.id: item for item in source_map.sources}["rekrute"]
+    assert rekrute.collection_strategy == "FUTURE_COLLECTOR"
