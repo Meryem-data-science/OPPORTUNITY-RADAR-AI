@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+from itertools import count
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -38,11 +39,16 @@ from services.collector.collectors.stage_ma import (
     StageMaPayloadError,
 )
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
+from services.collector.database.opportunities import PersistenceSummary
 from services.collector.models.opportunity import OpportunityCandidate
+from services.collector.models.source_run import SourceRunAttempt
 from services.collector.parsers.stage_ma import (
     LISTING_URL,
     PARSER_VERSION,
     ROBOTS_URL,
+)
+from services.collector.qualification.persistence import (
+    PersistenceSummary as QualificationPersistenceSummary,
 )
 from services.collector.sources import (
     MAX_DETAIL_PAGE_LIMIT,
@@ -210,39 +216,35 @@ def test_the_committed_production_row_matches_the_approved_values() -> None:
     assert configured.category == "jobs"
     assert configured.country == "MA"
     assert configured.frequency_minutes == 360
-    assert configured.status == "candidate"
+    assert configured.status == "active"
     assert configured.detail_page_limit == 25
 
 
-# ================================== DORMANCY ================================
+# ================================= ACTIVATION ===============================
 #
-# Stage.ma is configured and enabled but deliberately NOT active. The real
+# Stage.ma is enabled AND active, on the Architect's decision, after the real
 # Phase 7C.5B validation run read ten live offers off the approved specialty
-# listing and every one of them was expired, so zero admissible candidates
-# remained. That is a successful technical read and a failed activation gate,
-# and the two must not be confused: the collector works, and the source still
-# must not be scheduled.
+# listing and found every one of them expired. Zero admissible candidates is
+# what the site had that day; it is not a defect in the collector, which read
+# the site correctly and reported honestly, and holding the source back would
+# only guarantee that a newly published offer is never seen.
 #
 # Nothing below is a Stage.ma special case in the runtime. `enabled` and
 # `status` are the generic fields every source already has, and the agent's
 # existing `enabled and status == "active"` filter does all of the work.
 
 
-def test_stage_ma_is_enabled_but_not_active() -> None:
-    """The whole dormancy mechanism, in two fields."""
+def test_stage_ma_is_enabled_and_active() -> None:
+    """The whole activation mechanism, in two fields."""
     configured = {item.id: item for item in load_source_registry()}["stage_ma"]
 
     assert configured.enabled is True
-    assert configured.status != "active"
-    assert configured.status == "candidate"
+    assert configured.status == "active"
 
 
 def test_a_manual_dry_run_can_still_resolve_stage_ma() -> None:
-    """`enabled: true` is what keeps `collect_source --source stage_ma` usable.
-
-    Dormant must not mean unreachable: the next activation attempt is a manual
-    run, and disabling the row would make that run impossible.
-    """
+    """`collect_source --source stage_ma` keeps working; it turns on `enabled`
+    alone, which activation did not touch."""
     resolved = get_enabled_source("stage_ma", Path("config/sources.yaml"))
 
     assert resolved.id == "stage_ma"
@@ -250,40 +252,61 @@ def test_a_manual_dry_run_can_still_resolve_stage_ma() -> None:
     assert resolved.detail_page_limit == 25
 
 
-def test_the_agent_leaves_stage_ma_out_of_an_ordinary_run() -> None:
-    """No agent branch names Stage.ma; the generic status filter excludes it."""
+def test_the_agent_now_includes_stage_ma_in_an_ordinary_run() -> None:
+    """No agent branch names Stage.ma; the generic status filter admits it."""
     eligible = [
         item.id
         for item in load_source_registry()
         if item.enabled and item.status == "active"
     ]
 
-    assert "stage_ma" not in eligible
+    assert "stage_ma" in eligible
     assert "stagiaires_ma" in eligible
 
 
-def test_asking_the_agent_for_stage_ma_by_name_is_refused() -> None:
-    """An explicit request does not override the status, and the refusal comes
-    from the same generic rule rather than from anything Stage.ma-specific."""
-    agent = RadarAgent(
+def test_the_agent_actually_runs_the_committed_stage_ma_row() -> None:
+    """The end-to-end shape of activation, against the real committed config.
+
+    Naming Stage.ma used to raise "source is disabled or inactive"; now the run
+    reaches the collector. The collector here is a stub returning nothing —
+    persistence and the network stay out of a unit test — but the source that
+    reaches it is the row this repository really ships, which is the part that
+    activation changed.
+    """
+    counter = count(1)
+    collector = Mock()
+    collector.collect.return_value = []
+    factory = Mock(return_value=collector)
+    persister = Mock(return_value=PersistenceSummary(0, 0))
+
+    summary = RadarAgent(
         source_loader=load_source_registry,
-        collector_factory=Mock(),
-        persister=Mock(),
+        collector_factory=factory,
+        persister=persister,
+        qualification_persister=Mock(
+            return_value=QualificationPersistenceSummary(0, 0, 0, 0)
+        ),
         settings_loader=lambda: Settings(
             ApplicationEnvironment.TEST, DatabaseBackend.SQLITE
         ),
+        run_starter=lambda unused_settings, config: SourceRunAttempt(
+            next(counter), config.id, "2026-01-01T00:00:00.000000+00:00"
+        ),
+        run_finalizer=Mock(return_value=None),
         source_ids=["stage_ma"],
-    )
+    ).run_once()
 
-    with pytest.raises(ValueError, match="disabled or inactive"):
-        agent.run_once()
+    assert factory.call_args.args[0].id == "stage_ma"
+    assert factory.call_args.args[0].type == "stage_ma_html"
+    collector.collect.assert_called_once_with()
+    assert (summary.sources_total, summary.sources_succeeded) == (1, 1)
 
 
-def test_the_dormant_row_did_not_disturb_the_other_sources() -> None:
-    """Four active sources; Stage.ma is the only one held back."""
+def test_activating_stage_ma_did_not_disturb_the_other_sources() -> None:
+    """Five sources, all enabled and active; none of the other four moved."""
     statuses = {item.id: (item.enabled, item.status) for item in load_source_registry()}
 
-    assert statuses["stage_ma"] == (True, "candidate")
+    assert statuses["stage_ma"] == (True, "active")
     for other in (
         "scale_ai_greenhouse",
         "artefact_greenhouse",
@@ -293,9 +316,9 @@ def test_the_dormant_row_did_not_disturb_the_other_sources() -> None:
         assert statuses[other] == (True, "active")
 
 
-def test_the_collector_is_still_registered_for_the_dormant_source() -> None:
-    """Dormancy is an operational decision, not a removal: the row, the type,
-    the factory entry and the collector all remain."""
+def test_the_collector_is_registered_for_the_activated_source() -> None:
+    """Activation is an operational decision about existing code: the row, the
+    type, the factory entry and the collector are the same ones."""
     configured = {item.id: item for item in load_source_registry()}["stage_ma"]
 
     assert isinstance(collector_for(configured), StageMaCollector)
@@ -1326,18 +1349,27 @@ def test_a_source_failure_reaches_the_agent_as_a_failed_run() -> None:
 # ================================= SOURCE MAP ===============================
 
 
-def test_stage_ma_remains_a_non_production_candidate_in_the_source_map() -> None:
-    """Code existing is not evidence that it works. Activation needs a real run."""
+def test_the_source_map_and_the_config_row_agree_about_stage_ma() -> None:
+    """The map's ACTIVE and the config's `status: active` are one claim.
+
+    They are stored in two files, so they can disagree; the validator's job is
+    to make that disagreement impossible, and this test is the reason to trust
+    it. `live_canary` stays false — activation schedules nothing continuous.
+    """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
+        DEFAULT_SOURCE_REGISTRY,
+        check_source_map_against_production_registry,
         load_source_map,
     )
 
-    entry = {
-        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
-    }["stage_ma"]
+    active = check_source_map_against_production_registry(
+        load_source_map(DEFAULT_SOURCE_MAP_PATH), DEFAULT_SOURCE_REGISTRY
+    )
+    entry = {item.id: item for item in active}["stage_ma"]
+    configured = {item.id: item for item in load_source_registry()}["stage_ma"]
 
-    assert entry.integration_status == "CANDIDATE"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.production_source_id is None
+    assert entry.integration_status == "ACTIVE"
+    assert entry.collection_strategy == "EXISTING_COLLECTOR"
+    assert entry.production_source_id == configured.id
     assert entry.live_canary is False

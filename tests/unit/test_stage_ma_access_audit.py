@@ -1212,26 +1212,32 @@ def test_the_audit_itself_remains_evaluation_only() -> None:
     assert report["wrote_database"] is False
 
 
-def test_implementing_a_collector_did_not_activate_the_source_map() -> None:
-    """Phase 7C.5B built the collector; activation is still a separate decision.
+def test_activating_the_source_map_required_a_real_configured_row() -> None:
+    """Phase 7C.5B built the collector and a live run validated it; activation
+    followed from that run, never from the code merely existing.
 
     7C.5A asserted no production row existed at all, which was true of that
-    phase. The invariant that replaces it is the one that still matters: code
-    existing is not evidence that it works, so the source map stays a CANDIDATE
-    until a real dry-run and SQLite double-run say otherwise.
+    phase. The invariant that replaces it is the one that outlives every phase:
+    an ACTIVE map entry may not be a claim on its own. The validator resolves
+    `production_source_id` against `config/sources.yaml` and refuses the entry
+    unless that row is really configured, really enabled and really `active`, so
+    the map and the agent cannot drift apart.
     """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
+        DEFAULT_SOURCE_REGISTRY,
+        check_source_map_against_production_registry,
         load_source_map,
     )
 
-    entry = {
-        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
-    }["stage_ma"]
+    active = check_source_map_against_production_registry(
+        load_source_map(DEFAULT_SOURCE_MAP_PATH), DEFAULT_SOURCE_REGISTRY
+    )
+    entry = {item.id: item for item in active}["stage_ma"]
 
-    assert entry.integration_status == "CANDIDATE"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.production_source_id is None
+    assert entry.integration_status == "ACTIVE"
+    assert entry.collection_strategy == "EXISTING_COLLECTOR"
+    assert entry.production_source_id == "stage_ma"
     assert entry.live_canary is False
 
 
@@ -1302,8 +1308,15 @@ def test_the_audit_never_issues_a_non_get_request() -> None:
 # ================================ SOURCE MAP ================================
 
 
-def test_stage_ma_remains_a_non_production_candidate() -> None:
-    """7C.5A audits a source. It does not promote one."""
+def test_the_audit_did_not_promote_the_source_by_itself() -> None:
+    """7C.5A audits a source; it never promotes one.
+
+    Stage.ma is ACTIVE today, and this test is about *what made it so*. The
+    audit established feasibility; a 7C.5B collector and a real live run
+    established that it works. What did not change either way is the rest of the
+    entry — priority, coverage role and country are the audit's findings and no
+    activation may quietly rewrite them.
+    """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
         load_source_map,
@@ -1313,23 +1326,22 @@ def test_stage_ma_remains_a_non_production_candidate() -> None:
         item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
     }["stage_ma"]
 
-    assert entry.integration_status == "CANDIDATE"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.production_source_id is None
     assert entry.live_canary is False
     assert entry.priority == "P1"
     assert entry.coverage_role == "PRIMARY"
     assert entry.country == "MA"
+    assert entry.homepage_url_status == "EVIDENCED"
+    assert "PHASE 7C.5B" in " ".join(entry.notes.split())
 
 
-def test_the_stage_ma_note_claims_no_activation() -> None:
-    """Phase 7C.5B built the collector, so "no collector exists" is no longer
-    the invariant — that sentence would now be a lie in the source map.
+def test_the_stage_ma_note_claims_no_more_than_the_evidence_supports() -> None:
+    """Stage.ma is activated, so "claims no activation" is no longer the
+    invariant — that assertion would now contradict the map itself.
 
-    What survives the phase is the part that mattered all along: the note may
-    never claim Stage.ma is activated or production-mapped. The live 7C.5B run
-    read ten offers and every one was expired, so the activation gate was not
-    met, and the note says so in those words rather than by omission.
+    Two claims survive the promotion, because neither was ever earned: nothing
+    proved SQLite idempotence for this source, and nothing established coverage
+    beyond one specialty listing. An ACTIVE status is exactly the moment those
+    two would be easiest to quietly assume.
     """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
@@ -1342,16 +1354,14 @@ def test_the_stage_ma_note_claims_no_activation() -> None:
         }["stage_ma"].notes.split()
     )
 
-    assert "Nothing here claims Stage.ma is ACTIVE" in note
-    assert "remains non-production" in note
-    assert "production_source_id: stage_ma" not in note
-    assert "production_source_id stays null" in note
+    assert "idempotence is NOT proven for Stage.ma" in note
+    assert "this is NOT Stage.ma as a whole" in note
+    assert "all TEN were explicitly EXPIRED" in note
     for overclaim in (
-        "integration_status: ACTIVE",
-        "is now ACTIVE",
-        "an ACTIVE production source",
-        "activation succeeded",
-        "SQLite double-run passed",
+        "double-run passed",
+        "idempotence proven",
+        "comprehensive",
+        "all specialties",
     ):
         assert overclaim not in note
 

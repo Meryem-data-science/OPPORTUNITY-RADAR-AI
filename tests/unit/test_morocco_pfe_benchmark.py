@@ -444,6 +444,7 @@ def test_only_really_configured_sources_may_claim_to_be_active() -> None:
     assert [entry.id for entry in active] == [
         "linkedin_job_alert_email",
         "stagiaires_ma",
+        "stage_ma",
     ]
     for entry in source_map.sources:
         if entry.integration_status == "ACTIVE":
@@ -553,9 +554,16 @@ def test_the_active_invariant_matches_what_the_radar_agent_runs() -> None:
 
 
 def test_a_candidate_source_may_not_claim_an_implemented_strategy() -> None:
+    """The rule is unchanged; only the example moved.
+
+    Stage.ma used to be the handy non-active entry here, and Phase 7C.5B made it
+    ACTIVE with a real collector behind it. So the mutation now goes to a source
+    that genuinely has no collector: claiming EXISTING_COLLECTOR while not being
+    ACTIVE is still rejected, which is the whole point of the check.
+    """
     document = source_map_document()
     for entry in document["sources"]:
-        if entry["id"] == "stage_ma":
+        if entry["id"] == "dreamjob_ma":
             entry["collection_strategy"] = "EXISTING_COLLECTOR"
     with pytest.raises(SourceMapValidationError, match="claims an implemented collector"):
         parse_source_map(document)
@@ -714,20 +722,26 @@ def test_a_not_selected_source_cannot_claim_production_activity() -> None:
 
 
 def test_every_active_entry_names_the_production_row_it_really_runs() -> None:
-    """Two ACTIVE entries since Phase 7C.4B, each pointing at a real row.
+    """Three ACTIVE entries since Phase 7C.5B, each pointing at a real row.
 
-    LinkedIn was alone until Stagiaires.ma was validated end to end. What has
-    not changed is the rule underneath: ACTIVE means a configured, enabled,
-    active `config/sources.yaml` row exists and is named here.
+    LinkedIn was alone until Stagiaires.ma was validated end to end, and
+    Stage.ma joined them once its collector was validated against the live site.
+    What has not changed is the rule underneath: ACTIVE means a configured,
+    enabled, active `config/sources.yaml` row exists and is named here.
     """
     source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
     active = {entry.id: entry for entry in source_map.active_sources}
 
-    assert set(active) == {"linkedin_job_alert_email", "stagiaires_ma"}
+    assert set(active) == {
+        "linkedin_job_alert_email",
+        "stagiaires_ma",
+        "stage_ma",
+    }
     assert active["linkedin_job_alert_email"].production_source_id == (
         "linkedin_job_alert_email"
     )
     assert active["stagiaires_ma"].production_source_id == "stagiaires_ma"
+    assert active["stage_ma"].production_source_id == "stage_ma"
 
 
 def test_the_source_map_still_validates_with_unique_ids() -> None:
@@ -906,14 +920,19 @@ def test_the_source_map_still_records_stagiaires_honestly() -> None:
 def test_no_entry_claims_production_identity_without_being_active() -> None:
     """Activation is earned one source at a time, and only with evidence.
 
-    Two entries are ACTIVE. Every other entry in the map must still carry a null
-    `production_source_id`, so a source cannot drift into looking operational
-    without the ACTIVE status — and the validated review — that goes with it.
+    Three entries are ACTIVE. Every other entry in the map must still carry a
+    null `production_source_id`, so a source cannot drift into looking
+    operational without the ACTIVE status — and the validated review — that goes
+    with it.
     """
     source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
 
     activated = {entry.id for entry in source_map.active_sources}
-    assert activated == {"linkedin_job_alert_email", "stagiaires_ma"}
+    assert activated == {
+        "linkedin_job_alert_email",
+        "stagiaires_ma",
+        "stage_ma",
+    }
 
     for entry in source_map.sources:
         if entry.id in activated:
@@ -936,20 +955,20 @@ def stage_ma_note() -> str:
     return " ".join(stage_ma_entry().notes.split())
 
 
-def test_stage_ma_stays_non_production_after_its_audit() -> None:
-    """A completed audit is evidence about a source, and so is a completed run.
+def test_stage_ma_is_activated_behind_its_real_production_row() -> None:
+    """Activated on the Architect's decision, after the live run validated the
+    collector rather than after the code merely existed.
 
-    7C.5A reached the site, discovered real offer URLs and sampled real detail
-    pages. 7C.5B then built a collector and validated it live. Neither makes
-    Stage.ma collected: the live run found ten offers and every one was expired,
-    so the activation gate was not met and these four fields are exactly what
-    they were before either phase.
+    The four fields move together or not at all: an EXISTING_COLLECTOR strategy,
+    ACTIVE status and a named `production_source_id` are one claim, and the
+    validator refuses any partial version of it. `live_canary` stays false —
+    nothing runs continuously against the live site.
     """
     entry = stage_ma_entry()
 
-    assert entry.integration_status == "CANDIDATE"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.production_source_id is None
+    assert entry.collection_strategy == "EXISTING_COLLECTOR"
+    assert entry.integration_status == "ACTIVE"
+    assert entry.production_source_id == "stage_ma"
     assert entry.live_canary is False
     assert entry.priority == "P1"
     assert entry.coverage_role == "PRIMARY"
@@ -1067,67 +1086,106 @@ def test_the_stage_ma_note_does_not_call_the_expired_rows_opportunities() -> Non
     assert "not ten current opportunities" in note
 
 
-def test_the_stage_ma_note_says_why_sqlite_was_not_run() -> None:
-    """Not run is not the same as failed, and a zero-row double-run would prove
-    nothing about idempotence."""
+def test_the_stage_ma_note_does_not_claim_sqlite_idempotence() -> None:
+    """Activation did not come with a candidate double-run, and the note may
+    never let a reader assume it did.
+
+    With zero admissible candidates there was nothing to persist twice, so
+    opportunity idempotence is simply unproven for this source. Unproven is a
+    fact the note states outright rather than leaves to inference.
+    """
     note = stage_ma_note()
 
-    assert "No SQLite double-run was performed" in note
+    assert "NO SQLite candidate double-run was performed" in note
     assert "N=0" in note
-    assert "must never be presented as activation evidence" in note
-
-
-def test_the_stage_ma_note_records_the_dormant_operational_config() -> None:
-    """Dormant, not deleted: manual runs stay possible, automatic ones do not."""
-    note = stage_ma_note()
-
-    assert "intentionally DORMANT" in note
-    assert "enabled: true" in note
-    assert "status: candidate" in note
-    assert "leaves it out of every automatic run" in note
-
-
-def test_the_stage_ma_note_states_what_a_future_activation_requires() -> None:
-    note = stage_ma_note()
-
-    assert "at least ONE admissible current opportunity" in note
-    assert "no historical or expired offer may be used to satisfy that gate" in note
-    assert "code existing has never been evidence that a source works" in note
-
-
-def test_the_stage_ma_note_records_the_collector_without_claiming_activation() -> None:
-    """The collector exists — saying otherwise is now false — and Stage.ma is
-    still not ACTIVE. Both halves have to survive together."""
-    note = stage_ma_note()
-
-    assert "collector now EXISTS" in note
-    assert "no collector exists" not in note
-    assert "remains non-production" in note
-    assert "Nothing here claims Stage.ma is ACTIVE" in note
+    assert "idempotence is NOT proven for Stage.ma" in note
+    assert "this note does not claim it is" in note
     for overclaim in (
-        "integration_status: ACTIVE",
-        "is now ACTIVE",
-        "an ACTIVE production source",
-        "activation succeeded",
-        "SQLite double-run passed",
+        "double-run passed",
+        "idempotence proven",
+        "idempotence is proven",
+        "double-run succeeded",
     ):
         assert overclaim not in note
 
 
-def test_the_stage_ma_note_still_refuses_to_generalize_to_the_whole_site() -> None:
-    """One specialty surface was audited and collected from. That is not
-    Stage.ma."""
+def test_the_stage_ma_note_records_the_active_operational_config() -> None:
+    """The map's ACTIVE and the config's `status: active` mean the same thing,
+    and the note names the row so the two cannot drift apart silently."""
     note = stage_ma_note()
 
-    assert "represents Stage.ma as a whole" in note
+    assert "production_source_id is stage_ma" in note
+    assert "status: active row in config/sources.yaml" in note
+    assert "RadarAgent reads" in note
+
+
+def test_the_stage_ma_note_explains_what_a_future_run_can_and_cannot_do() -> None:
+    """Activation buys the next run, not a scheduler.
+
+    Phase 7C.5B added none, so "future run" has to mean the next execution of
+    RadarAgent and nothing more — otherwise `frequency_minutes: 360` reads as a
+    promise the repository does not keep.
+    """
+    note = stage_ma_note()
+
+    assert "Future RadarAgent runs may collect newly published admissible" in note
+    assert "the next time RadarAgent is executed" in note
+    assert "added no scheduler" in note
+    assert "frequency_minutes remains metadata that nothing acts on yet" in note
+
+
+def test_the_stage_ma_note_records_why_activation_was_approved() -> None:
+    """A zero-candidate run activating a source is surprising enough that the
+    reasoning has to be written down, not assumed.
+
+    What the run had to demonstrate was that the collector reads the site
+    correctly and reports honestly. It did both. An empty result that truthfully
+    describes a surface carrying only expired offers is a valid successful run.
+    """
+    note = stage_ma_note()
+
+    assert "The Architect nevertheless approved activation" in note
+    assert "reads the site correctly and reports honestly" in note
+    assert "valid successful run, not a failure" in note
+    assert "no collector exists" not in note
+
+
+def test_the_stage_ma_note_still_refuses_to_generalize_to_the_whole_site() -> None:
+    """One specialty surface was audited and is collected from. That is not
+    Stage.ma, and activation does not quietly widen the claim."""
+    note = stage_ma_note()
+
+    assert "only /specialites/computer-science" in note
+    assert "this is NOT Stage.ma as a whole" in note
+    assert "no other specialty is crawled" in note
     assert "comprehensive" not in note
 
 
-def test_stage_ma_is_still_not_an_active_production_mapped_source() -> None:
+def test_stage_ma_joined_the_active_sources_without_displacing_the_others() -> None:
+    """Activating one source must not quietly alter another's standing."""
     source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
 
-    assert "stage_ma" not in {entry.id for entry in source_map.active_sources}
     assert {entry.id for entry in source_map.active_sources} == {
         "linkedin_job_alert_email",
         "stagiaires_ma",
+        "stage_ma",
     }
+
+
+def test_the_stage_ma_note_keeps_the_real_zero_candidate_evidence() -> None:
+    """Activation may not launder the evidence it was granted on.
+
+    A later reader must still be able to see that the validating run collected
+    nothing, and why. Losing that would make the ACTIVE status look like it
+    rested on a successful harvest.
+    """
+    note = stage_ma_note()
+
+    assert "all TEN were explicitly EXPIRED" in note
+    assert "ZERO admissible candidates remained on the validation date" in note
+    assert "pages_checked was 12 and parser_version was stage-ma-html-v1" in note
+    assert "not ten current opportunities" in note
+    assert (
+        "no historical or expired offer was persisted to manufacture an activation"
+        in note
+    )
