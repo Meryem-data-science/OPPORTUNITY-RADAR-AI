@@ -439,7 +439,19 @@ location, contract type, internship type, work mode, description, publication
 date, deadline, application URL — whether the public HTML carries it and
 **through which generic mechanism**: JSON-LD `JobPosting`, microdata,
 OpenGraph/`<meta>`, `<title>`/`<h1>`/`<time>`. Nothing site-specific is
-consulted. A signal reported as absent means the page does not publish it
+consulted.
+
+`application_url` is deliberately stricter than the rest. It is **not** read
+from `JobPosting.url`, `itemprop="url"` or `og:url`: those name the posting —
+the page you are already on — and every offer has a canonical URL, so treating
+one as an application link would report "you can apply here" for every offer
+ever published, including ones whose only route is an email address. It is
+reported only when a control *says* it applies: an anchor, button or submit
+input whose accessible name (its text, `aria-label` or `title`) carries an
+application verb — `postuler`, `candidater`, `apply`. A relative href is
+resolved against the detail page's own URL. The href is **reported, never
+fetched**; it may legitimately point at an employer's ATS on another host, and
+recording a URL is not requesting it. A signal reported as absent means the page does not publish it
 through any standard mechanism, which is a structural finding, not an
 instruction to go and invent a selector for it. Descriptions are reported by
 **length only** — third-party job text is counted, never copied into this
@@ -459,6 +471,20 @@ else. It stops at any wall — 403, 429, a CAPTCHA or bot challenge, a login
 redirect — and reports it. No browser automation, no browser impersonation, no
 proxy, no CAPTCHA handling, no authentication, no user cookies, no private API
 taken from a JS bundle.
+
+**It never follows a redirect off the Stagiaires.ma hosts.** Redirects are
+resolved by the audit itself rather than by the HTTP client, because a client
+told to follow them would take a same-host URL's `302 Location:
+https://elsewhere/…` and issue a GET to a host the audit never chose to talk
+to — the same-host rule would then hold only until a site decided otherwise.
+Resolution is bounded to a few hops and only ever stays on the same host; an
+off-domain `Location` is recorded as a finding and its target is left
+unfetched.
+
+There is also **no flag that names a URL**. An earlier `--sitemap-url` override
+was removed: it let an operator point the audit at an arbitrary address, which
+turns "the official discovery chain" into "whatever was typed". The sitemap is
+whatever `robots.txt` declares, or the audit stops.
 
 The terms check is deliberately incomplete: **no terms URL is hardcoded**,
 because none has been evidenced. Inventing a plausible-looking

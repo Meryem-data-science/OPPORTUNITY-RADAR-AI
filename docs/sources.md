@@ -167,6 +167,20 @@ rule is never read as a permissive one. Detail sampling is hard bounded at
 **three** pages, chosen deterministically (highest numeric ID first, ties broken
 by canonical URL).
 
+It **never issues a GET to a host outside `www.stagiaires.ma` / `stagiaires.ma`**.
+Redirects are resolved by the audit itself, bounded and same-host only; an
+off-domain `Location` is reported and its target left unfetched. There is no
+option that names a URL to fetch — the sitemap comes from robots' own
+declaration or the audit stops — so no invocation can turn it into a
+general-purpose fetcher.
+
+An application link is reported only on explicit evidence of an application
+action: a control whose accessible text says `postuler`, `candidater` or
+`apply`. The posting's own canonical URL (`JobPosting.url`, `og:url`) is never
+read as one — every offer has a canonical URL, and treating it as an apply link
+would claim an application route the page may not offer. A reported apply href
+may point off-domain; it is recorded, never fetched.
+
 It writes nothing: no SQLite, no raw HTML on disk, no `config/sources.yaml`
 change. It prints one JSON object of structural findings — statuses, counts,
 JSON-LD type and key *names*, and per-signal presence with a short excerpt for

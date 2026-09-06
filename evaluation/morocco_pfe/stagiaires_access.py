@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 import json
 import re
+from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
@@ -178,10 +179,18 @@ def parse_robots_txt(text: str) -> tuple[RobotsGroup, ...]:
             expecting_agents = False
             if agents and value:
                 rules.append(RobotsRule(allow=field_name == "allow", pattern=value))
-            elif agents and field_name == "disallow":
-                # "Disallow:" with an empty value allows everything; it is a
-                # real REP idiom and dropping it would misread the file.
-                rules.append(RobotsRule(allow=True, pattern="/"))
+            # An empty `Disallow:` imposes **no rule at all**. It must never be
+            # turned into `Allow: /`: the two are not equivalent, and treating
+            # them as if they were is how
+            #
+            #     User-agent: *
+            #     Disallow: /
+            #     Disallow:
+            #
+            # becomes "everything is allowed" — a synthesized `Allow: /` ties
+            # with the real `Disallow: /` on length and then wins the tie,
+            # silently reversing a site-wide refusal. Dropping the empty line
+            # leaves the real rule standing, which is what the file says.
     flush()
     return tuple(groups)
 
@@ -221,30 +230,75 @@ def _rule_regex(pattern: str) -> re.Pattern[str]:
     return re.compile(f"^{expression}$" if anchored else f"^{expression}")
 
 
-def _select_group(
+def product_token(user_agent: str) -> str:
+    """Return the REP product token of a user-agent string, lowercased.
+
+    `OpportunityRadarAI-AccessAudit/1.0 (+...)` has the product token
+    `opportunityradarai-accessaudit`: everything before the version and the
+    comment.
+    """
+    return (user_agent or "").split("/", 1)[0].strip().lower()
+
+
+def _agent_applies(agent: str, token: str) -> bool:
+    """Whether a `User-agent:` value addresses our product token.
+
+    Exact match, or the file naming a shorter product token we extend
+    (`opportunityradarai` addressing `opportunityradarai-accessaudit`), which is
+    the convention `googlebot` / `googlebot-news` follows. Deliberately **not**
+    a substring test in either direction: an unrelated group whose short name
+    happened to occur somewhere inside ours would otherwise be picked up, and a
+    group we match by accident can just as easily be a permissive one as a
+    restrictive one.
+    """
+    return bool(agent) and (agent == token or token.startswith(agent))
+
+
+def _applicable_rules(
     groups: tuple[RobotsGroup, ...], user_agent: str
-) -> RobotsGroup | None:
-    """Prefer a group naming this agent; fall back to the wildcard group."""
-    token = user_agent.split("/", 1)[0].strip().lower()
+) -> tuple[tuple[RobotsRule, ...], tuple[str, ...]]:
+    """Collect every rule that applies to this agent, and who it came from.
+
+    Two corrections over "find the first matching group and stop":
+
+    * **all** applicable groups are merged, not just the first. A file may name
+      the same agent in several records, and returning the first one silently
+      discards every rule after it — including a `Disallow` that a later record
+      adds. Merging can only ever add rules, never remove one;
+    * the wildcard fallback merges **all** `*` groups for the same reason, and
+      is used only when no group names us specifically, which is what the REP
+      requires.
+    """
+    token = product_token(user_agent)
+    rules: list[RobotsRule] = []
+    matched: list[str] = []
     for group in groups:
-        if any(agent and (agent == token or agent in token) for agent in group.agents):
-            return group
+        if any(_agent_applies(agent, token) for agent in group.agents):
+            rules.extend(group.rules)
+            matched.extend(group.agents)
+    if rules or matched:
+        return tuple(rules), tuple(dict.fromkeys(matched))
     for group in groups:
         if "*" in group.agents:
-            return group
-    return None
+            rules.extend(group.rules)
+            matched.extend(group.agents)
+    return tuple(rules), tuple(dict.fromkeys(matched))
 
 
 def robots_verdict(
     groups: tuple[RobotsGroup, ...], path: str, user_agent: str = AUDIT_USER_AGENT
 ) -> RobotsVerdict:
-    """Decide whether ``path`` is fetchable: longest match wins, Allow breaks ties."""
-    group = _select_group(groups, user_agent)
-    if group is None:
-        return RobotsVerdict(allowed=True, matched_rule=None, matched_agent=None)
+    """Decide whether ``path`` is fetchable: longest match wins, Allow breaks ties.
+
+    The rules considered are every rule that applies to this agent, merged
+    across records — see `_applicable_rules`. A path no rule matches is allowed,
+    which is the REP's default and not an opinion of ours.
+    """
+    rules, agents = _applicable_rules(groups, user_agent)
+    matched_agent = ", ".join(agents) or None
     target = path or "/"
     best: RobotsRule | None = None
-    for rule in group.rules:
+    for rule in rules:
         if not _rule_regex(rule.pattern).match(target):
             continue
         if (
@@ -254,11 +308,11 @@ def robots_verdict(
         ):
             best = rule
     if best is None:
-        return RobotsVerdict(True, None, ", ".join(group.agents) or None)
+        return RobotsVerdict(True, None, matched_agent)
     return RobotsVerdict(
         allowed=best.allow,
         matched_rule=f"{'Allow' if best.allow else 'Disallow'}: {best.pattern}",
-        matched_agent=", ".join(group.agents) or None,
+        matched_agent=matched_agent,
     )
 
 
@@ -861,6 +915,14 @@ class _HtmlCollector(HTMLParser):
         self.itemprops: dict[str, str] = {}
         self.times: list[str] = []
         self.hrefs: list[str] = []
+        #: (tag, element text, aria-label/title, href or None) for every
+        #: anchor/button/submit on the page. This is how an *application
+        #: action* is recognized — from what the control says, not from a class
+        #: name. Both name sources are kept because an `aria-label` overrides
+        #: the element's content in the accessible-name computation, so a
+        #: control can say "Candidater" in its label and "envoyer" in its text.
+        self.controls: list[tuple[str, str, str, str | None]] = []
+        self._control_stack: list[list[Any]] = []
         self.title: str | None = None
         self.first_h1: str | None = None
         self.has_next_data = False
@@ -900,6 +962,30 @@ class _HtmlCollector(HTMLParser):
                 self._capture = name
                 self._capture_buffer = []
 
+        if name in {"a", "button"}:
+            # An accessible name can come from the element's own text or from
+            # aria-label/title; both are collected and the text wins if present.
+            self._control_stack.append(
+                [
+                    name,
+                    attributes.get("aria-label", "").strip()
+                    or attributes.get("title", "").strip(),
+                    attributes.get("href", "").strip() or None,
+                    [],
+                ]
+            )
+        elif name == "input" and attributes.get("type", "").lower() in {
+            "submit",
+            "button",
+        }:
+            # Void, so it has no text: its label is the value or aria-label.
+            label = (
+                attributes.get("value", "").strip()
+                or attributes.get("aria-label", "").strip()
+            )
+            if label:
+                self.controls.append(("input", "", normalize_text(label), None))
+
         prop = attributes.get("itemprop", "").strip().lower() or None
         if prop:
             # `content`/`datetime` win over element text: microdata puts the
@@ -927,6 +1013,13 @@ class _HtmlCollector(HTMLParser):
             self._in_jsonld = False
             if (payload := "".join(self._buffer).strip()):
                 self.jsonld.append(payload)
+        if name in {"a", "button"} and self._control_stack:
+            tag, labelled, href, parts = self._control_stack.pop()
+            text = normalize_text("".join(parts))
+            if text or labelled or href:
+                self.controls.append(
+                    (str(tag), text, normalize_text(labelled), href)
+                )
         if self._capture == name:
             text = normalize_text("".join(self._capture_buffer))
             if name == "title" and self.title is None:
@@ -946,6 +1039,8 @@ class _HtmlCollector(HTMLParser):
             return
         if self._capture is not None:
             self._capture_buffer.append(data)
+        if self._control_stack:
+            self._control_stack[-1][3].append(data)
         for prop in reversed(self._itemprop_stack):
             if prop and prop not in self.itemprops:
                 if (text := normalize_text(data)):
@@ -1063,6 +1158,7 @@ class DetailSignal:
     carrier: str | None = None
     value: str | None = None
     chars: int | None = None
+    href: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -1070,7 +1166,77 @@ class DetailSignal:
             "carrier": self.carrier,
             "value": self.value,
             "chars": self.chars,
+            "href": self.href,
         }
+
+
+#: Words that mark a control as an *application action* rather than a link to
+#: the posting. Matched case-insensitively against a control's accessible name.
+#: French first, because the site is Moroccan and francophone.
+APPLICATION_INTENT_MARKERS = (
+    "postuler",
+    "postulez",
+    "postule",
+    "candidater",
+    "candidature",
+    "apply",
+    "application form",
+)
+
+
+def application_action(
+    html: str, base_url: str | None = None
+) -> DetailSignal:
+    """Find explicit evidence that the page offers an *application action*.
+
+    This is deliberately not `JobPosting.url`, `itemprop="url"` or `og:url`.
+    Those name the posting — the page you are already on — and a page always
+    has a canonical URL, so reading one as an application link would report
+    "you can apply here" for every offer ever published, including offers whose
+    application route is an email address or an expired posting with no route
+    at all. That is a false positive dressed as a finding, and 7C.4A exists to
+    avoid exactly that.
+
+    What counts instead is a control that *says* it applies: an anchor, button
+    or submit input whose accessible name carries an application verb. No
+    site-specific selector or class name is used, so this keeps working if the
+    site restyles, and reports nothing when the page genuinely offers no
+    application control.
+
+    A relative `href` is resolved against ``base_url`` when the caller supplies
+    the detail page's URL. The href is **reported, never fetched** — it may
+    legitimately point at another host (an employer's ATS), and recording a URL
+    is not requesting it.
+    """
+    collector = _HtmlCollector()
+    collector.feed(html or "")
+    for tag, text, labelled, href in collector.controls:
+        # Either accessible name may carry the intent; the one that does is
+        # what gets reported, so a reviewer sees the words that convinced us.
+        matched = next(
+            (
+                name
+                for name in (text, labelled)
+                if name
+                and any(
+                    marker in name.lower() for marker in APPLICATION_INTENT_MARKERS
+                )
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+        resolved: str | None = None
+        if href and not href.lower().startswith(("javascript:", "#")):
+            resolved = urljoin(base_url, href) if base_url else href
+        return DetailSignal(
+            found=True,
+            carrier=f"html:{tag}[explicit-application-text]",
+            value=_short(matched),
+            chars=len(matched),
+            href=resolved,
+        )
+    return DetailSignal(found=False)
 
 
 def _short(value: object) -> str | None:
@@ -1105,7 +1271,7 @@ def _flatten(value: object) -> str:
     return ""
 
 
-def detail_signals(html: str) -> dict[str, DetailSignal]:
+def detail_signals(html: str, base_url: str | None = None) -> dict[str, DetailSignal]:
     """Report, per signal, whether the public HTML carries it and through what.
 
     The lookup order per signal runs from most to least structured — JSON-LD
@@ -1119,7 +1285,12 @@ def detail_signals(html: str) -> dict[str, DetailSignal]:
 
     `publication_date` deliberately has no sitemap input of any kind. If the
     page states no date, the answer is "not found" — never the `<lastmod>` of
-    the sitemap row that led us here.
+    the sitemap row that led us here. `application_url` is equally strict: it
+    requires a control that says it applies, never the posting's own canonical
+    URL — see `application_action`.
+
+    ``base_url`` is the detail page's own URL, used only to resolve a relative
+    application href. Nothing here fetches anything.
     """
     collector = _HtmlCollector()
     collector.feed(html or "")
@@ -1204,9 +1375,9 @@ def detail_signals(html: str) -> dict[str, DetailSignal]:
             from_microdata("validthrough"),
             from_meta("article:expiration_time"),
         ),
-        "application_url": signal(
-            from_jsonld("url"), from_microdata("url"), from_meta("og:url")
-        ),
+        # Not from JobPosting.url / itemprop=url / og:url: those name the
+        # posting, not an application route.
+        "application_url": application_action(html, base_url),
     }
 
     # The description is measured, never quoted: a full job description is
@@ -1258,15 +1429,22 @@ class DetailObservation:
         }
 
 
-def describe_detail_page(html: str) -> dict[str, object]:
-    """Summarize one offer page: JSON-LD shape, signal presence, nothing more."""
+def describe_detail_page(
+    html: str, base_url: str | None = None
+) -> dict[str, object]:
+    """Summarize one offer page: JSON-LD shape, signal presence, nothing more.
+
+    ``base_url`` is the page's own URL and is used only to resolve a relative
+    application link into something a reviewer can read.
+    """
     collector = _HtmlCollector()
     collector.feed(html or "")
     return {
         "has_next_data_script": collector.has_next_data,
         "jsonld": summarize_jsonld(html).as_dict(),
         "signals": {
-            name: found.as_dict() for name, found in detail_signals(html).items()
+            name: found.as_dict()
+            for name, found in detail_signals(html, base_url).items()
         },
     }
 
@@ -1316,6 +1494,7 @@ TERMS_REVIEW_NOTE = (
 
 
 __all__ = [
+    "APPLICATION_INTENT_MARKERS",
     "AUDIT_USER_AGENT",
     "DEFAULT_DETAIL_LIMIT",
     "DETAIL_SAMPLE_STRATEGY",
@@ -1351,6 +1530,7 @@ __all__ = [
     "SitemapIndexParse",
     "SitemapOfferEntry",
     "StagiairesAccessError",
+    "application_action",
     "canonical_url",
     "classify_robots_response",
     "combine_offer_sitemaps",
@@ -1362,6 +1542,7 @@ __all__ = [
     "normalize_text",
     "parse_offer_sitemap",
     "parse_robots_txt",
+    "product_token",
     "parse_sitemap_index",
     "robots_verdict",
     "select_detail_sample",

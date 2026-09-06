@@ -506,23 +506,51 @@ def test_malformed_json_ld_is_counted_not_crashed_on() -> None:
 
 
 class _FakeResponse:
-    def __init__(self, url: str, status_code: int, text: str, content_type: str) -> None:
+    def __init__(
+        self,
+        url: str,
+        status_code: int,
+        text: str,
+        content_type: str,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.url = url
         self.status_code = status_code
         self.text = text
         self.content = text.encode("utf-8")
-        self.headers = {"content-type": content_type}
+        self.headers = {"content-type": content_type, **(extra_headers or {})}
 
 
 class _FakeClient:
-    """A recording stand-in for `httpx.Client`. Serves fixtures, counts GETs."""
+    """A recording stand-in for `httpx.Client`. Serves fixtures, counts GETs.
 
-    def __init__(self, routes: dict[str, tuple[int, str, str]]) -> None:
+    `redirects` maps a URL to the `Location` it answers with, so a test can
+    prove where the audit does — and does not — go next. The client refuses to
+    be asked to follow redirects itself: that is the audit's decision to make,
+    and a regression that handed it back to httpx would silently reopen the
+    off-domain hole.
+    """
+
+    def __init__(
+        self,
+        routes: dict[str, tuple[int, str, str]],
+        redirects: dict[str, str] | None = None,
+        redirect_status: int = 302,
+    ) -> None:
         self.routes = routes
+        self.redirects = redirects or {}
+        self.redirect_status = redirect_status
         self.requested: list[str] = []
 
     def get(self, url: str, timeout: float | None = None, follow_redirects: bool = False):
+        assert follow_redirects is False, (
+            "the audit must resolve redirects itself, never hand them to httpx"
+        )
         self.requested.append(url)
+        if url in self.redirects:
+            return _FakeResponse(
+                url, self.redirect_status, "", "text/html", {"location": self.redirects[url]}
+            )
         status, body, content_type = self.routes.get(
             url, (404, "not found", "text/html")
         )
@@ -794,3 +822,373 @@ def test_the_audit_imports_nothing_that_could_write_or_collect() -> None:
             assert "libsql" not in lowered, f"{module}: {line}"
             assert "selenium" not in lowered, f"{module}: {line}"
             assert "playwright" not in lowered, f"{module}: {line}"
+
+
+# ====================================================================
+# Architect review fixes — regression tests
+# ====================================================================
+
+# ------------------------------- 1. robots.txt semantics --------------------
+
+
+def test_an_empty_disallow_does_not_cancel_a_site_wide_disallow() -> None:
+    """The finding: `Disallow:` was being turned into `Allow: /`.
+
+        User-agent: *
+        Disallow: /
+        Disallow:
+
+    An empty `Disallow` imposes no rule. Synthesizing `Allow: /` from it made a
+    rule that tied with the real `Disallow: /` on length and then won the tie,
+    silently converting a site-wide refusal into blanket permission.
+    """
+    groups = parse_robots_txt("User-agent: *\nDisallow: /\nDisallow:\n")
+
+    for path in ("/anything", "/", "/stage-emploi-maroc/6159-a"):
+        verdict = robots_verdict(groups, path)
+        assert verdict.allowed is False, path
+        assert verdict.matched_rule == "Disallow: /"
+
+
+def test_an_empty_disallow_alone_imposes_no_rule_at_all() -> None:
+    """No rule matched is the REP default of allowed — not a synthesized rule."""
+    verdict = robots_verdict(parse_robots_txt("User-agent: *\nDisallow:\n"), "/x")
+
+    assert verdict.allowed is True
+    assert verdict.matched_rule is None
+
+
+def test_a_later_applicable_group_is_not_silently_ignored() -> None:
+    """The finding: only the first matching record was consulted."""
+    groups = parse_robots_txt(
+        "User-agent: *\n"
+        "Allow: /\n"
+        "\n"
+        "User-agent: *\n"
+        "Disallow: /stage-emploi-maroc/\n"
+    )
+
+    assert robots_verdict(groups, "/stage-emploi-maroc/6159-a").allowed is False
+    assert robots_verdict(groups, "/autre-page").allowed is True
+
+
+def test_a_later_group_naming_the_audit_agent_is_merged_too() -> None:
+    groups = parse_robots_txt(
+        "User-agent: OpportunityRadarAI-AccessAudit\n"
+        "Allow: /\n"
+        "\n"
+        "User-agent: OpportunityRadarAI-AccessAudit\n"
+        "Disallow: /prive/\n"
+    )
+
+    assert robots_verdict(groups, "/prive/x").allowed is False
+    assert robots_verdict(groups, "/public/x").allowed is True
+
+
+def test_every_wildcard_group_is_merged_when_no_group_names_us() -> None:
+    groups = parse_robots_txt(
+        "User-agent: *\nDisallow: /a/\n\nUser-agent: *\nDisallow: /b/\n"
+    )
+
+    assert robots_verdict(groups, "/a/x").allowed is False
+    assert robots_verdict(groups, "/b/x").allowed is False
+
+
+def test_a_group_naming_us_wins_over_the_wildcard_group() -> None:
+    """REP precedence: the specific record replaces `*`, it does not add to it."""
+    groups = parse_robots_txt(
+        "User-agent: *\nDisallow: /\n"
+        "\n"
+        "User-agent: OpportunityRadarAI-AccessAudit\nAllow: /\n"
+    )
+
+    assert robots_verdict(groups, "/stage-emploi-maroc/1-a").allowed is True
+
+
+def test_an_unrelated_agent_group_does_not_capture_this_audit() -> None:
+    """Matching is exact or a product-token prefix, never a loose substring."""
+    groups = parse_robots_txt(
+        "User-agent: ai\nAllow: /\n\nUser-agent: *\nDisallow: /secret/\n"
+    )
+
+    # `ai` occurs inside our token but does not address us; the wildcard rules do.
+    assert robots_verdict(groups, "/secret/x").allowed is False
+
+
+def test_a_shorter_product_token_prefix_still_addresses_us() -> None:
+    groups = parse_robots_txt("User-agent: OpportunityRadarAI\nDisallow: /prive/\n")
+
+    assert robots_verdict(groups, "/prive/x").allowed is False
+
+
+def test_the_real_audit_style_wildcard_rules_still_behave() -> None:
+    """Finding C: the ordinary Allow/Disallow file is unaffected by the fix."""
+    groups = parse_robots_txt(ROBOTS_BODY)
+
+    assert robots_verdict(groups, "/stage-emploi-type-stage/stage-de-fin-d-etudes").allowed
+    assert robots_verdict(groups, "/stage-emploi-maroc/6159-a").allowed
+    assert robots_verdict(groups, "/admin/secret").allowed is False
+    assert robots_verdict(groups, "/admin/secret").matched_rule == "Disallow: /admin/"
+
+
+def test_longest_match_and_allow_tie_break_are_preserved() -> None:
+    groups = parse_robots_txt(
+        "User-agent: *\nDisallow: /a/\nAllow: /a/public/\nDisallow: /a/public/deep/\n"
+    )
+
+    assert robots_verdict(groups, "/a/x").allowed is False
+    assert robots_verdict(groups, "/a/public/x").allowed is True
+    assert robots_verdict(groups, "/a/public/deep/x").allowed is False
+
+
+# ---------------------- 2. the same-host network boundary -------------------
+
+
+def test_an_off_domain_redirect_is_reported_and_never_followed() -> None:
+    """The finding: httpx followed redirects, so a site could hand us any host.
+
+    A same-host URL answering `302 Location: https://tracker.example.com/...`
+    would previously have been followed automatically, and the audit would have
+    issued a GET to a host it never chose to talk to.
+    """
+    routes = _routes()
+    elsewhere = "https://tracker.example.com/landing"
+    client = _FakeClient(routes, redirects={PFE_TARGET_URL: elsewhere})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert elsewhere not in client.requested
+    assert not any("tracker.example.com" in item for item in client.requested)
+    listing = report["pfe_listing"]
+    assert listing["barrier"] == cli.OFF_DOMAIN_REDIRECT
+    assert listing["redirect_target"] == elsewhere
+    assert listing["redirect_target_host"] == "tracker.example.com"
+    assert cli.OFF_DOMAIN_REDIRECT in report["barriers"]
+
+
+def test_no_get_in_a_whole_run_ever_leaves_the_stagiaires_hosts() -> None:
+    """The hard invariant, asserted over every request the audit makes."""
+    routes = _routes()
+    client = _FakeClient(
+        routes,
+        redirects={
+            f"{OFFER}/6107-slug-7": "https://ats.example.net/apply/7",
+            f"{HOST}/offre-sitemap2.xml": "https://cdn.example.org/sitemap2.xml",
+        },
+    )
+
+    cli.run(client=client, delay=0.0)
+
+    for requested in client.requested:
+        assert is_stagiaires_host(requested), requested
+
+
+def test_a_same_host_redirect_is_followed_and_bounded() -> None:
+    routes = _routes()
+    moved = f"{HOST}/stage-emploi-type-stage/pfe-2026"
+    routes[moved] = (200, "<html><body>" + "x" * 500 + "</body></html>", "text/html")
+    client = _FakeClient(routes, redirects={PFE_TARGET_URL: moved})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert moved in client.requested
+    assert report["pfe_listing"]["barrier"] is None
+    assert report["pfe_listing"]["redirect_chain"] == [moved]
+    assert report["pfe_listing"]["status_code"] == 200
+
+
+def test_a_redirect_loop_is_bounded_rather_than_followed_forever() -> None:
+    routes = _routes()
+    first, second = f"{HOST}/loop-a", f"{HOST}/loop-b"
+    client = _FakeClient(
+        routes, redirects={PFE_TARGET_URL: first, first: second, second: first}
+    )
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["pfe_listing"]["barrier"] == "TOO_MANY_REDIRECTS"
+    assert client.requested.count(first) <= cli.MAX_REDIRECTS + 1
+
+
+def test_the_audit_never_asks_httpx_to_follow_redirects() -> None:
+    """`follow_redirects=True` is the regression this asserts against.
+
+    The fake client raises if it is ever passed, so a completed run is itself
+    the proof; this states it explicitly so the reason is not lost.
+    """
+    client = _FakeClient(_routes())
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] == "COMPLETED"
+    assert client.requested
+
+
+def test_an_ordinary_200_run_is_unchanged_by_the_redirect_handling() -> None:
+    client = _FakeClient(_routes())
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] == "COMPLETED"
+    assert len(client.requested) == 8
+    assert report["detail_audit"]["sampled"] == 3
+    assert "redirect_chain" not in report["pfe_listing"]
+
+
+# ------------------- 3. no arbitrary sitemap override -----------------------
+
+
+def test_the_cli_offers_no_way_to_name_a_sitemap_url() -> None:
+    """The finding: `--sitemap-url` let an operator make the audit GET anything."""
+    options = set(cli.build_parser()._option_string_actions)
+
+    assert "--sitemap-url" not in options
+    assert options == {"-h", "--help", "--limit", "--terms-url", "--timeout", "--delay"}
+
+
+def test_run_takes_no_sitemap_override_parameter_either() -> None:
+    """Removing the flag alone would leave a programmatic bypass behind."""
+    import inspect
+
+    parameters = set(inspect.signature(cli.run).parameters)
+
+    assert "sitemap_url" not in parameters
+    assert parameters == {"limit", "terms_url", "timeout", "delay", "client"}
+
+
+def test_only_the_sitemap_robots_declares_is_ever_fetched() -> None:
+    """A same-host sitemap robots does not declare stays unfetched."""
+    routes = _routes()
+    undeclared = f"{HOST}/sitemap_secret.xml"
+    routes[undeclared] = (200, SITEMAP_INDEX, "application/xml")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert undeclared not in client.requested
+    assert report["sitemap_index"]["selected"] == f"{HOST}/sitemap_v9.xml"
+    assert report["sitemap_index"]["selected_from"] == "robots.txt"
+
+
+def test_an_off_domain_sitemap_declaration_is_not_selected() -> None:
+    routes = _routes()
+    routes[ROBOTS_URL] = (
+        200,
+        "User-agent: *\nAllow: /\nSitemap: https://cdn.example.com/sitemap.xml\n",
+        "text/plain",
+    )
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] == "NO_SITEMAP_DECLARED"
+    assert not any("cdn.example.com" in item for item in client.requested)
+
+
+# ------------------------ 4. application_url semantics ----------------------
+
+
+def test_a_posting_url_is_not_an_application_url() -> None:
+    """Finding A: `og:url` / `JobPosting.url` name the page, not a way to apply.
+
+    Reading them as an application link reports "you can apply here" for every
+    offer ever published, including ones whose only route is an email address.
+    """
+    html = (
+        '<html><head>'
+        '<meta property="og:url" content="https://www.stagiaires.ma/stage-emploi-maroc/1-a">'
+        '<script type="application/ld+json">'
+        '{"@type":"JobPosting","title":"T",'
+        '"url":"https://www.stagiaires.ma/stage-emploi-maroc/1-a"}'
+        "</script></head><body><a href='/'>Accueil</a></body></html>"
+    )
+
+    signal = detail_signals(html)["application_url"]
+
+    assert signal.found is False
+    assert signal.carrier is None
+    assert signal.href is None
+
+
+def test_an_explicit_application_link_is_recognized_by_its_own_words() -> None:
+    """Finding B: an anchor that says it applies is the evidence that counts."""
+    signal = detail_signals(
+        '<html><body><a href="/postuler/6159">Postuler</a></body></html>'
+    )["application_url"]
+
+    assert signal.found is True
+    assert signal.carrier == "html:a[explicit-application-text]"
+    assert "explicit-application" in signal.carrier
+    assert signal.value == "Postuler"
+    assert signal.href == "/postuler/6159"
+
+
+def test_a_relative_application_link_resolves_against_the_detail_page() -> None:
+    """Finding C: the caller supplies the page's own URL, and only for this."""
+    signal = detail_signals(
+        '<html><body><a href="/postuler/6159">Postuler</a></body></html>',
+        f"{OFFER}/6159-ad-simulation-sw-developer-junior-h-f",
+    )["application_url"]
+
+    assert signal.href == f"{HOST}/postuler/6159"
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<button aria-label="Candidater a cette offre">envoyer</button>',
+        '<input type="submit" value="Apply now">',
+        '<a href="/x" title="Postulez maintenant"></a>',
+        "<a href='/x'>Candidature spontanee</a>",
+    ],
+)
+def test_application_intent_is_read_from_any_ordinary_control(markup: str) -> None:
+    """No site-specific selector: the control's accessible name is the signal."""
+    assert detail_signals(f"<html><body>{markup}</body></html>")[
+        "application_url"
+    ].found is True
+
+
+def test_a_navigation_link_is_not_an_application_link() -> None:
+    signals = detail_signals(
+        "<html><body><a href='/'>Accueil</a>"
+        "<a href='/offres'>Toutes les offres</a>"
+        "<button>Partager</button></body></html>"
+    )
+
+    assert signals["application_url"].found is False
+
+
+def test_an_off_domain_application_href_is_reported_but_never_fetched() -> None:
+    """Reporting a URL is not requesting it — an ATS link is a finding.
+
+    The same-host rule binds what the audit *fetches*; an employer's ATS is
+    exactly the kind of destination a reviewer needs to see recorded.
+    """
+    routes = _routes()
+    apply_html = (
+        "<html><body><h1>Offre</h1><p>" + "contenu " * 40 + "</p>"
+        "<a href='https://ats.example.com/apply/1'>Postuler</a>"
+        "</body></html>"
+    )
+    for number in range(8):
+        routes[f"{OFFER}/{6100 + number}-slug-{number}"] = (200, apply_html, "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    hrefs = {
+        page["signals"]["application_url"]["href"]
+        for page in report["detail_audit"]["pages"]
+    }
+    assert hrefs == {"https://ats.example.com/apply/1"}
+    assert not any("ats.example.com" in item for item in client.requested)
+
+
+def test_a_javascript_only_control_reports_intent_without_a_url() -> None:
+    signal = detail_signals(
+        "<html><body><a href='javascript:void(0)'>Postuler</a></body></html>"
+    )["application_url"]
+
+    assert signal.found is True
+    assert signal.href is None

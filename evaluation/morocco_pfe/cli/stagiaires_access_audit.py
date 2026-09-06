@@ -10,6 +10,10 @@ read, and does an offer page carry the fields a PFE opportunity needs?
     python -m evaluation.morocco_pfe.cli.stagiaires_access_audit \
         --terms-url https://www.stagiaires.ma/<a real public terms path>
 
+There is deliberately no flag that names a sitemap, a listing or an offer URL.
+The chain below is the only way this command chooses what to fetch, so no
+invocation of it can make it GET an arbitrary address.
+
 It follows the site's **own published discovery chain**, and nothing else:
 
     robots.txt -> the Sitemap: it declares -> offre-sitemap*.xml
@@ -36,8 +40,12 @@ What it does, and refuses to do:
   file, so we do not know what it says, and an unknown rule is never assumed
   permissive: the audit stops before requesting anything else;
 * it discovers the sitemap from robots' `Sitemap:` declaration rather than from
-  a URL written here. If robots declares none, the audit stops and says so
-  instead of guessing one;
+  a URL written here or passed to it. If robots declares none, the audit stops
+  and says so instead of guessing one;
+* it **never follows a redirect off the Stagiaires.ma hosts.** Redirects are
+  resolved by the audit itself, bounded, and only while they stay on the same
+  host; an off-domain `Location` is reported as a finding and its target is
+  never requested;
 * it **writes nothing**: no SQLite, no benchmark row, no raw HTML on disk, no
   `config/sources.yaml` change. It prints one JSON object to stdout;
 * it prints **structure, not content**: statuses, counts, JSON-LD type and key
@@ -67,7 +75,7 @@ import json
 import sys
 import time
 from typing import Any, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -85,7 +93,6 @@ from evaluation.morocco_pfe.stagiaires_access import (
     TERMS_REVIEW_NOTE,
     DetailObservation,
     StagiairesAccessError,
-    canonical_url,
     classify_robots_response,
     combine_offer_sitemaps,
     describe_detail_page,
@@ -131,14 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"offer detail pages to sample (1-{MAX_DETAIL_LIMIT})",
     )
     parser.add_argument(
-        "--sitemap-url",
-        default=None,
-        help=(
-            "override the sitemap index to read; by default it is taken from "
-            "the Sitemap: line robots.txt publishes"
-        ),
-    )
-    parser.add_argument(
         "--terms-url",
         default=None,
         help=(
@@ -152,12 +151,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Redirect statuses this audit will resolve itself. It resolves them itself
+#: precisely because httpx's own `follow_redirects=True` would follow a
+#: same-host URL off to another host without ever asking us.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+#: A redirect chain longer than this is a loop or a misconfiguration, not a
+#: page move. Bounded so the audit cannot be walked around the web by a chain
+#: of Location headers.
+MAX_REDIRECTS = 3
+
+#: The barrier reported when a public Stagiaires.ma URL tries to hand the audit
+#: to another host. It is reported, never followed.
+OFF_DOMAIN_REDIRECT = "OFF_DOMAIN_REDIRECT_NOT_FOLLOWED"
+
+
 def _get(
     client: httpx.Client, url: str, timeout: float
 ) -> tuple[httpx.Response | None, str | None]:
-    """One polite GET. Transport failures are named, never retried in a loop."""
+    """One polite GET that does **not** follow redirects on its own.
+
+    `follow_redirects=False` is the network boundary, not a detail. With it
+    left on, a same-host URL answering `302 Location: https://elsewhere/...`
+    would be followed automatically and the audit would issue a GET to a host
+    it never decided to talk to — the same-host rule enforced everywhere else
+    in this slice would be true only until a site chose otherwise. Redirects
+    are resolved by `_follow_same_host` instead, which can refuse.
+    """
     try:
-        response = client.get(url, timeout=timeout, follow_redirects=True)
+        response = client.get(url, timeout=timeout, follow_redirects=False)
     except httpx.TimeoutException:
         return None, "TIMEOUT"
     except httpx.TooManyRedirects:
@@ -167,6 +189,47 @@ def _get(
     return response, None
 
 
+def _redirect_target(response: httpx.Response, current_url: str) -> str | None:
+    """The absolute URL a redirect response points at, or None."""
+    if response.status_code not in _REDIRECT_STATUSES:
+        return None
+    location = (response.headers.get("location") or "").strip()
+    if not location:
+        return None
+    return urljoin(current_url, location)
+
+
+def _follow_same_host(
+    client: httpx.Client, url: str, timeout: float
+) -> tuple[httpx.Response | None, str | None, list[str], str | None]:
+    """GET ``url``, resolving only redirects that stay on a Stagiaires.ma host.
+
+    Returns the final response, a transport error, the redirect chain, and a
+    barrier. The one rule that matters: an off-domain `Location` is **recorded
+    and refused**. The audit never issues a GET to a host outside
+    `STAGIAIRES_HOSTS`, and a site cannot obtain one by redirecting — the
+    off-domain URL is reported as a finding and left unfetched.
+
+    Bounded at `MAX_REDIRECTS` hops so this stays a redirect resolver and not a
+    crawler that follows wherever it is sent.
+    """
+    chain: list[str] = []
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        response, error = _get(client, current, timeout)
+        if response is None:
+            return None, error, chain, None
+        target = _redirect_target(response, current)
+        if target is None:
+            return response, None, chain, None
+        chain.append(target)
+        if not is_stagiaires_host(target):
+            # Recorded, not followed. Reporting a URL is not fetching it.
+            return response, None, chain, OFF_DOMAIN_REDIRECT
+        current = target
+    return None, None, chain, "TOO_MANY_REDIRECTS"
+
+
 def _fetch_document(
     client: httpx.Client, url: str, timeout: float
 ) -> tuple[dict[str, Any], str | None]:
@@ -174,19 +237,31 @@ def _fetch_document(
 
     Returns the report row and the body. The body is handed back to the caller
     to be *analysed*, never stored: no code path writes it to disk, puts it in
-    the report, or logs it.
+    the report, or logs it. A body is returned only for a response the audit
+    actually resolved — a refused off-domain redirect yields none.
     """
     row: dict[str, Any] = {"url": url}
-    response, error = _get(client, url, timeout)
+    response, error, chain, barrier = _follow_same_host(client, url, timeout)
+    if chain:
+        row["redirect_chain"] = list(chain)
     if response is None:
         row["error"] = error
+        if barrier:
+            row["barrier"] = barrier
         return row, None
     body = response.text
     row["status_code"] = response.status_code
     row["final_url"] = str(response.url)
     row["content_type"] = response.headers.get("content-type")
     row["body_bytes"] = len(response.content)
-    row["barrier"] = detect_access_barrier(
+    if barrier == OFF_DOMAIN_REDIRECT:
+        # The response in hand is the redirect itself, not a page. Its body is
+        # not analysed and the destination is not requested.
+        row["barrier"] = barrier
+        row["redirect_target"] = chain[-1]
+        row["redirect_target_host"] = urlsplit(chain[-1]).hostname
+        return row, None
+    row["barrier"] = barrier or detect_access_barrier(
         response.status_code, row["final_url"], body
     )
     return row, body
@@ -243,7 +318,6 @@ def _audit_terms(
 def run(
     *,
     limit: int = DEFAULT_DETAIL_LIMIT,
-    sitemap_url: str | None = None,
     terms_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     delay: float = DEFAULT_DELAY_SECONDS,
@@ -340,13 +414,19 @@ def run(
         report["pfe_listing"] = target_report
 
         # --- the official sitemap index, as robots declares it ---------------
+        # The sitemap index is whatever robots.txt declares, and there is no
+        # way to say otherwise. An override flag was removed deliberately: it
+        # let an operator point the audit at an arbitrary URL, which turns "the
+        # official discovery chain" into "whatever was typed" and makes the
+        # audit a general-purpose fetcher. If robots declares no same-host
+        # sitemap, the audit stops rather than guessing one.
         same_host = [item for item in declarations if is_stagiaires_host(item)]
-        chosen = sitemap_url or (same_host[0] if same_host else None)
+        chosen = same_host[0] if same_host else None
         sitemap_report: dict[str, Any] = {
             "declared_by_robots": list(declarations),
             "same_host_declarations": same_host,
             "selected": chosen,
-            "selected_from": "--sitemap-url" if sitemap_url else "robots.txt",
+            "selected_from": "robots.txt",
         }
         report["sitemap_index"] = sitemap_report
         if chosen is None:
@@ -443,7 +523,9 @@ def run(
             observation.barrier = row.get("barrier")
             observation.error = row.get("error")
             if body is not None and not observation.barrier:
-                described = describe_detail_page(body)
+                described = describe_detail_page(
+                    body, observation.final_url or entry.canonical_url
+                )
                 observation.has_next_data = bool(described["has_next_data_script"])
                 observation.jsonld = dict(described["jsonld"])
                 observation.signals = dict(described["signals"])
@@ -492,11 +574,8 @@ def run(
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
-        if args.sitemap_url is not None:
-            canonical_url(args.sitemap_url)
         report = run(
             limit=args.limit,
-            sitemap_url=args.sitemap_url,
             terms_url=args.terms_url,
             timeout=args.timeout,
             delay=args.delay,
