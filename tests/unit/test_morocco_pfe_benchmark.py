@@ -441,7 +441,10 @@ def test_only_really_configured_sources_may_claim_to_be_active() -> None:
     active = check_source_map_against_production_registry(
         source_map, PRODUCTION_SOURCE_REGISTRY
     )
-    assert [entry.id for entry in active] == ["linkedin_job_alert_email"]
+    assert [entry.id for entry in active] == [
+        "linkedin_job_alert_email",
+        "stagiaires_ma",
+    ]
     for entry in source_map.sources:
         if entry.integration_status == "ACTIVE":
             assert entry.production_source_id in configured
@@ -619,18 +622,25 @@ def test_a_map_declaring_itself_a_production_registry_is_rejected() -> None:
         parse_source_map(document)
 
 
-def test_the_production_catalogue_is_untouched_by_this_slice() -> None:
-    """7C.1 activates nothing: the operational catalogue is still Phase 2's."""
+def test_the_production_catalogue_holds_only_sources_a_phase_really_added() -> None:
+    """The catalogue grows only when a phase actually integrates a collector.
+
+    It was Phase 2's three rows through 7C.1-7C.4A, which activated nothing.
+    Phase 7C.4B added the fourth: Stagiaires.ma, with a real collector behind it.
+    The list is pinned so a source cannot appear here without a phase claiming it.
+    """
     configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
 
     assert {source.id for source in configured} == {
         "scale_ai_greenhouse",
         "artefact_greenhouse",
         "linkedin_job_alert_email",
+        "stagiaires_ma",
     }
     assert {source.type for source in configured} == {
         "greenhouse",
         "gmail_linkedin_alert",
+        "stagiaires_sitemap",
     }
 
 
@@ -700,15 +710,21 @@ def test_a_not_selected_source_cannot_claim_production_activity() -> None:
         parse_source_map(document)
 
 
-def test_linkedin_remains_the_only_active_production_mapped_source() -> None:
-    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+def test_every_active_entry_names_the_production_row_it_really_runs() -> None:
+    """Two ACTIVE entries since Phase 7C.4B, each pointing at a real row.
 
-    assert [entry.id for entry in source_map.active_sources] == [
-        "linkedin_job_alert_email"
-    ]
-    assert source_map.active_sources[0].production_source_id == (
+    LinkedIn was alone until Stagiaires.ma was validated end to end. What has
+    not changed is the rule underneath: ACTIVE means a configured, enabled,
+    active `config/sources.yaml` row exists and is named here.
+    """
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+    active = {entry.id: entry for entry in source_map.active_sources}
+
+    assert set(active) == {"linkedin_job_alert_email", "stagiaires_ma"}
+    assert active["linkedin_job_alert_email"].production_source_id == (
         "linkedin_job_alert_email"
     )
+    assert active["stagiaires_ma"].production_source_id == "stagiaires_ma"
 
 
 def test_the_source_map_still_validates_with_unique_ids() -> None:
@@ -758,25 +774,46 @@ def test_future_strategies_remain_valid_for_undecided_sources() -> None:
 # ------------------------------------------- 7C.4A — Stagiaires.ma audit -----
 
 
-def test_stagiaires_remains_an_unactivated_p1_candidate_after_the_audit() -> None:
-    """7C.4A evidences a source. It does not promote one.
+def test_stagiaires_is_active_and_points_at_its_production_row() -> None:
+    """Activated by real local validation, not by the collector existing.
 
-    The audit answered "is this collectable?" and the answer changed nothing
-    operational: Stagiaires.ma is still the next candidate, still has no
-    production identity, and is still not a canary. If a later slice activates
-    it, that slice — not this one — has to say so here.
+    7C.4A asserted the opposite, and correctly: an audit that promoted its own
+    subject would have been evidence of nothing. What moved this entry was the
+    user's local run — a successful production dry-run, then a fresh-database
+    double run that created 25 opportunities and then updated the same 25
+    without recreating any of them.
     """
     entry = {
         item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
     }["stagiaires_ma"]
 
+    assert entry.integration_status == "ACTIVE"
+    assert entry.collection_strategy == "EXISTING_COLLECTOR"
+    assert entry.production_source_id == "stagiaires_ma"
+    # Unchanged by activation: it is still the P1 internship board it was.
     assert entry.priority == "P1"
     assert entry.coverage_role == "PRIMARY"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.integration_status == "CANDIDATE"
+    assert entry.source_class == "INTERNSHIP_BOARD"
     assert entry.country == BENCHMARK_COUNTRY_CODE
-    assert entry.production_source_id is None
+    # Still not a canary: it is a collected source, not a reachability probe.
     assert entry.live_canary is False
+
+
+def test_the_active_stagiaires_entry_names_a_real_enabled_active_row() -> None:
+    """The map's claim is checked against the operational catalogue itself."""
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+    active = check_source_map_against_production_registry(
+        source_map, PRODUCTION_SOURCE_REGISTRY
+    )
+    entry = {item.id: item for item in active}["stagiaires_ma"]
+
+    configured = {
+        source.id: source for source in load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+    }[entry.production_source_id]
+    assert configured.type == "stagiaires_sitemap"
+    assert configured.enabled is True
+    assert configured.status == "active"
+    assert configured.detail_page_limit == 25
 
 
 def test_the_audited_stagiaires_homepage_is_recorded_as_evidenced() -> None:
@@ -803,33 +840,81 @@ def test_the_stagiaires_note_records_evidence_without_a_legal_or_date_claim() ->
         }["stagiaires_ma"].notes.split()
     )
 
+    # The claims that must survive every future edit of this entry.
     assert "NO legal claim" in note
     assert "reachability, not permission" in note
     assert "NOT a publication date" in note
     assert "CANDIDATE source_external_id" in note
     assert "no bypass" in note.lower()
-    assert "No collector" in note
+    assert "NOT treated as evidence of a more recent publication" in note
+
+    # And the claims that must no longer appear: the entry collects now, so a
+    # note still saying it does not would be the map lying about production.
+    for stale in (
+        "nothing collects it",
+        "No collector",
+        "no production parser",
+        "no config/sources.yaml row",
+        "no SourceConfig type",
+        "no factory registration",
+        "no RadarAgent run",
+        "planned next step is Phase 7C.4B",
+    ):
+        assert stale not in note, stale
 
 
-def test_the_audit_did_not_add_stagiaires_to_the_production_catalogue() -> None:
-    """The production-isolation invariant, asserted from the source-map side."""
-    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+def test_the_stagiaires_production_source_is_configured_and_bounded() -> None:
+    """Phase 7C.4B's row, pinned to the values the architecture approved.
 
-    assert {source.id for source in configured} == {
-        "scale_ai_greenhouse",
-        "artefact_greenhouse",
-        "linkedin_job_alert_email",
+    7C.4A asserted the opposite — that no such row existed — because an audit
+    that quietly activated its subject would have been an audit of nothing. That
+    invariant belonged to that phase; this one records what replaced it, and
+    keeps the bound from being widened without a test failing.
+    """
+    configured = {
+        source.id: source for source in load_source_registry(PRODUCTION_SOURCE_REGISTRY)
     }
-    assert not any("stagiaires" in source.id.lower() for source in configured)
-    assert {source.type for source in configured} == {
-        "greenhouse",
-        "gmail_linkedin_alert",
-    }
+    stagiaires = configured["stagiaires_ma"]
+
+    assert stagiaires.type == "stagiaires_sitemap"
+    assert stagiaires.enabled is True
+    assert stagiaires.country == "MA"
+    assert stagiaires.detail_page_limit == 25
+    assert stagiaires.frequency_minutes == 360
 
 
-def test_linkedin_is_still_the_only_active_entry_after_7c4a() -> None:
+def test_the_source_map_still_records_stagiaires_honestly() -> None:
+    """Code existing is not evidence that it works.
+
+    The map moves to ACTIVE only on a real dry-run and SQLite double-run, not
+    because a collector was written. Until that evidence exists it stays a
+    CANDIDATE with no production identity — which is also why the validator's
+    "only an ACTIVE entry may name a production_source_id" rule still holds.
+    """
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["stagiaires_ma"]
+
+    assert entry.integration_status in {"CANDIDATE", "ACTIVE"}
+    if entry.integration_status == "CANDIDATE":
+        assert entry.production_source_id is None
+
+
+def test_no_entry_claims_production_identity_without_being_active() -> None:
+    """Activation is earned one source at a time, and only with evidence.
+
+    Two entries are ACTIVE. Every other entry in the map must still carry a null
+    `production_source_id`, so a source cannot drift into looking operational
+    without the ACTIVE status — and the validated review — that goes with it.
+    """
     source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
 
-    assert [entry.id for entry in source_map.active_sources] == [
-        "linkedin_job_alert_email"
-    ]
+    activated = {entry.id for entry in source_map.active_sources}
+    assert activated == {"linkedin_job_alert_email", "stagiaires_ma"}
+
+    for entry in source_map.sources:
+        if entry.id in activated:
+            assert entry.production_source_id is not None
+        else:
+            assert entry.production_source_id is None, entry.id
+            assert entry.integration_status != "ACTIVE", entry.id

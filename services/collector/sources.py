@@ -8,6 +8,11 @@ import yaml
 
 DEFAULT_SOURCE_REGISTRY = Path("config/sources.yaml")
 
+#: The most detail pages one sitemap-driven run may ever fetch. A hard ceiling
+#: rather than a suggestion: the configured limit bounds a normal run, and this
+#: bounds what any configuration is allowed to ask for.
+MAX_DETAIL_PAGE_LIMIT = 50
+
 
 class SourceConfigurationError(ValueError):
     """Raised when the source registry or one of its entries is invalid."""
@@ -36,6 +41,7 @@ class SourceConfig:
     status: str = "active"
     gmail_query: str | None = None
     gmail_message_limit: int | None = None
+    detail_page_limit: int | None = None
 
     @classmethod
     def from_mapping(cls, value: Any) -> "SourceConfig":
@@ -53,9 +59,14 @@ class SourceConfig:
         status = value.get("status", "active")
         gmail_query = value.get("gmail_query")
         gmail_message_limit = value.get("gmail_message_limit")
+        detail_page_limit = value.get("detail_page_limit")
         if not isinstance(source_id, str) or not source_id.strip():
             raise SourceConfigurationError("source id must be a non-empty string")
-        if source_type not in {"greenhouse", "gmail_linkedin_alert"}:
+        if source_type not in {
+            "greenhouse",
+            "gmail_linkedin_alert",
+            "stagiaires_sitemap",
+        }:
             raise SourceConfigurationError(
                 f"source {source_id!r} has unsupported type {source_type!r}"
             )
@@ -69,6 +80,20 @@ class SourceConfig:
                     raise SourceConfigurationError(
                         f"source {source_id!r} {field_name} must be a non-empty string"
                     )
+        elif source_type == "stagiaires_sitemap":
+            # Required, because this collector fetches one page per offer and an
+            # unbounded run would read the whole site. There is no default: a
+            # source that does not state its bound does not get to have one
+            # chosen for it silently.
+            if (
+                isinstance(detail_page_limit, bool)
+                or not isinstance(detail_page_limit, int)
+                or not 1 <= detail_page_limit <= MAX_DETAIL_PAGE_LIMIT
+            ):
+                raise SourceConfigurationError(
+                    f"source {source_id!r} detail_page_limit must be an integer "
+                    f"between 1 and {MAX_DETAIL_PAGE_LIMIT}"
+                )
         else:
             if not isinstance(gmail_query, str) or not gmail_query.strip():
                 raise SourceConfigurationError(
@@ -113,6 +138,7 @@ class SourceConfig:
             status=status.strip(),
             gmail_query=gmail_query.strip() if isinstance(gmail_query, str) else None,
             gmail_message_limit=gmail_message_limit,
+            detail_page_limit=detail_page_limit,
         )
 
 

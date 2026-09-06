@@ -10,6 +10,7 @@ from services.collector.collectors.factory import (
     collector_for,
 )
 from services.collector.collectors.greenhouse import GreenhouseCollector
+from services.collector.collectors.stagiaires import StagiairesCollector
 from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCollector
 from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.database.opportunities import PersistenceSummary
@@ -54,18 +55,29 @@ def in_memory_runs():
     return {"run_starter": start, "run_finalizer": Mock(return_value=None)}
 
 
-def test_factory_builds_greenhouse_for_every_configured_source_and_rejects_unsupported_type():
+def test_factory_builds_the_registered_collector_for_every_configured_source():
+    """Every configured source resolves through the factory, and only through it.
+
+    Phase 7C.4B added the fourth source; the agent needed no change to run it,
+    which is the property this asserts. An unregistered type is still refused
+    rather than silently skipped.
+    """
     configured_sources = load_source_registry()
-    assert {item.id for item in configured_sources} == {
+    by_id = {item.id: item for item in configured_sources}
+    assert set(by_id) == {
         "scale_ai_greenhouse",
         "artefact_greenhouse",
         "linkedin_job_alert_email",
+        "stagiaires_ma",
     }
     assert all(
         isinstance(collector_for(item), GreenhouseCollector)
         for item in configured_sources if item.type == "greenhouse"
     )
-    assert isinstance(collector_for(configured_sources[2]), LinkedInJobAlertCollector)
+    assert isinstance(
+        collector_for(by_id["linkedin_job_alert_email"]), LinkedInJobAlertCollector
+    )
+    assert isinstance(collector_for(by_id["stagiaires_ma"]), StagiairesCollector)
     with pytest.raises(UnsupportedCollectorTypeError, match="unsupported collector type"):
         collector_for(source(source_type="lever"))
 

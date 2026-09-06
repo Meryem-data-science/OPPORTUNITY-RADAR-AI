@@ -27,3 +27,11 @@ sources:
     status: active
     gmail_query: "newer_than:7d from:jobalerts-noreply@linkedin.com"
     gmail_message_limit: 50
+  - id: stagiaires_ma
+    type: stagiaires_sitemap
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 360
+    status: active
+    detail_page_limit: 25
