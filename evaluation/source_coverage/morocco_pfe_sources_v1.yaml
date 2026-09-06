@@ -173,8 +173,10 @@ sources:
     notes: >-
       The source of both seed rows of morocco_pfe_gold_v1, which is why its
       domain is evidenced rather than assumed. Being a benchmark source does not
-      make it a collected one: no collector exists, nothing collects it, and this
-      entry stays a CANDIDATE. Phase 7C.5A ran a bounded, GET-only,
+      make it a collected one. A Phase 7C.5B collector now EXISTS, and this entry
+      is still a CANDIDATE, because the real validation run found nothing
+      admissible to collect; the 7C.5B paragraph at the end of this note records
+      that run in full. Phase 7C.5A ran a bounded, GET-only,
       robots-obeying public audit locally and it COMPLETED with exit 0 and a
       feasibility of PUBLIC_HTML_CANDIDATE — evidence for considering a later
       7C.5B, not approval of one. What that run actually observed:
@@ -213,8 +215,37 @@ sources:
       CAPTCHA handling, private API or bypass of any kind was used. This entry
       makes NO legal claim in either direction: a public HTTP 200 is
       reachability, not permission, and the site's terms remain a question for a
-      human. Stage.ma remains non-production, and Phase 7C.5B is a separate
-      Architect decision.
+      human. Phase 7C.5B — the production collector — is recorded next.
+      PHASE 7C.5B, real local production evidence. The collector code exists and
+      was validated live at collector SHA
+      2cbb703c7eb769e927667915bb237ac9de019903. The user ran a bounded, GET-only
+      production dry-run locally against the approved discovery surface
+      /specialites/computer-science, and it COMPLETED successfully with exit 0:
+      the run succeeded, items_found was 0 and items_returned was 0. A read-only
+      diagnostic through the same configured collector explains the zero. Ten
+      live-discovered offer detail pages were actually read, and all TEN were
+      explicitly EXPIRED, so ZERO admissible candidates remained. pages_checked
+      was 12 and parser_version was stage-ma-html-v1. That is a successful
+      technical read and a FAILED ACTIVATION GATE, and the two must not be
+      conflated: no network barrier, no robots refusal, no parser structural
+      failure and no organization failure produced the zero, and no candidate was
+      invented to avoid it. Ten expired offers are ten discovered listing entries,
+      not ten current opportunities. No SQLite double-run was performed, and this
+      is deliberate rather than an omission: with N=0 admissible candidates a
+      zero-row double-run would demonstrate nothing about opportunity idempotence
+      and must never be presented as activation evidence. Stage.ma therefore
+      remains non-production: collection_strategy stays FUTURE_COLLECTOR,
+      integration_status stays CANDIDATE, production_source_id stays null and
+      live_canary stays false. The operational row in config/sources.yaml is
+      intentionally DORMANT rather than removed — enabled: true so a manual
+      collect_source dry-run stays possible, status: candidate so RadarAgent,
+      which runs only sources that are enabled AND status == "active", leaves it
+      out of every automatic run. Nothing here claims Stage.ma is ACTIVE, and
+      nothing here claims the audited specialty surface represents Stage.ma as a
+      whole. Later activation requires a NEW real validation run producing at
+      least ONE admissible current opportunity; no historical or expired offer
+      may be used to satisfy that gate, and code existing has never been evidence
+      that a source works.
 
   - id: talentsoft_hosted_career_sites
     name: TalentSoft-hosted employer career sites

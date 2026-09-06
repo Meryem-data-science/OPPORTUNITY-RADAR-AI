@@ -1322,7 +1322,15 @@ def test_stage_ma_remains_a_non_production_candidate() -> None:
     assert entry.country == "MA"
 
 
-def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
+def test_the_stage_ma_note_claims_no_activation() -> None:
+    """Phase 7C.5B built the collector, so "no collector exists" is no longer
+    the invariant — that sentence would now be a lie in the source map.
+
+    What survives the phase is the part that mattered all along: the note may
+    never claim Stage.ma is activated or production-mapped. The live 7C.5B run
+    read ten offers and every one was expired, so the activation gate was not
+    met, and the note says so in those words rather than by omission.
+    """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
         load_source_map,
@@ -1334,9 +1342,18 @@ def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
         }["stage_ma"].notes.split()
     )
 
-    assert "ACTIVE" not in note
-    assert "no collector" in note.lower()
+    assert "Nothing here claims Stage.ma is ACTIVE" in note
+    assert "remains non-production" in note
     assert "production_source_id: stage_ma" not in note
+    assert "production_source_id stays null" in note
+    for overclaim in (
+        "integration_status: ACTIVE",
+        "is now ACTIVE",
+        "an ACTIVE production source",
+        "activation succeeded",
+        "SQLite double-run passed",
+    ):
+        assert overclaim not in note
 
 
 def test_stagiaires_activation_is_untouched_by_this_slice() -> None:

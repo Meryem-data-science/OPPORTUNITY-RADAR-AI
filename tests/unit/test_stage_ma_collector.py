@@ -17,10 +17,12 @@ from __future__ import annotations
 import ast
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import httpx
 import pytest
 
+from services.collector.agent import RadarAgent
 from services.collector.collectors.factory import (
     COLLECTOR_REGISTRY,
     UnsupportedCollectorTypeError,
@@ -35,6 +37,7 @@ from services.collector.collectors.stage_ma import (
     StageMaCollector,
     StageMaPayloadError,
 )
+from services.collector.config import ApplicationEnvironment, DatabaseBackend, Settings
 from services.collector.models.opportunity import OpportunityCandidate
 from services.collector.parsers.stage_ma import (
     LISTING_URL,
@@ -45,6 +48,7 @@ from services.collector.sources import (
     MAX_DETAIL_PAGE_LIMIT,
     SourceConfig,
     SourceConfigurationError,
+    get_enabled_source,
     load_source_registry,
 )
 
@@ -206,8 +210,95 @@ def test_the_committed_production_row_matches_the_approved_values() -> None:
     assert configured.category == "jobs"
     assert configured.country == "MA"
     assert configured.frequency_minutes == 360
-    assert configured.status == "active"
+    assert configured.status == "candidate"
     assert configured.detail_page_limit == 25
+
+
+# ================================== DORMANCY ================================
+#
+# Stage.ma is configured and enabled but deliberately NOT active. The real
+# Phase 7C.5B validation run read ten live offers off the approved specialty
+# listing and every one of them was expired, so zero admissible candidates
+# remained. That is a successful technical read and a failed activation gate,
+# and the two must not be confused: the collector works, and the source still
+# must not be scheduled.
+#
+# Nothing below is a Stage.ma special case in the runtime. `enabled` and
+# `status` are the generic fields every source already has, and the agent's
+# existing `enabled and status == "active"` filter does all of the work.
+
+
+def test_stage_ma_is_enabled_but_not_active() -> None:
+    """The whole dormancy mechanism, in two fields."""
+    configured = {item.id: item for item in load_source_registry()}["stage_ma"]
+
+    assert configured.enabled is True
+    assert configured.status != "active"
+    assert configured.status == "candidate"
+
+
+def test_a_manual_dry_run_can_still_resolve_stage_ma() -> None:
+    """`enabled: true` is what keeps `collect_source --source stage_ma` usable.
+
+    Dormant must not mean unreachable: the next activation attempt is a manual
+    run, and disabling the row would make that run impossible.
+    """
+    resolved = get_enabled_source("stage_ma", Path("config/sources.yaml"))
+
+    assert resolved.id == "stage_ma"
+    assert resolved.type == "stage_ma_html"
+    assert resolved.detail_page_limit == 25
+
+
+def test_the_agent_leaves_stage_ma_out_of_an_ordinary_run() -> None:
+    """No agent branch names Stage.ma; the generic status filter excludes it."""
+    eligible = [
+        item.id
+        for item in load_source_registry()
+        if item.enabled and item.status == "active"
+    ]
+
+    assert "stage_ma" not in eligible
+    assert "stagiaires_ma" in eligible
+
+
+def test_asking_the_agent_for_stage_ma_by_name_is_refused() -> None:
+    """An explicit request does not override the status, and the refusal comes
+    from the same generic rule rather than from anything Stage.ma-specific."""
+    agent = RadarAgent(
+        source_loader=load_source_registry,
+        collector_factory=Mock(),
+        persister=Mock(),
+        settings_loader=lambda: Settings(
+            ApplicationEnvironment.TEST, DatabaseBackend.SQLITE
+        ),
+        source_ids=["stage_ma"],
+    )
+
+    with pytest.raises(ValueError, match="disabled or inactive"):
+        agent.run_once()
+
+
+def test_the_dormant_row_did_not_disturb_the_other_sources() -> None:
+    """Four active sources; Stage.ma is the only one held back."""
+    statuses = {item.id: (item.enabled, item.status) for item in load_source_registry()}
+
+    assert statuses["stage_ma"] == (True, "candidate")
+    for other in (
+        "scale_ai_greenhouse",
+        "artefact_greenhouse",
+        "linkedin_job_alert_email",
+        "stagiaires_ma",
+    ):
+        assert statuses[other] == (True, "active")
+
+
+def test_the_collector_is_still_registered_for_the_dormant_source() -> None:
+    """Dormancy is an operational decision, not a removal: the row, the type,
+    the factory entry and the collector all remain."""
+    configured = {item.id: item for item in load_source_registry()}["stage_ma"]
+
+    assert isinstance(collector_for(configured), StageMaCollector)
 
 
 def test_the_other_source_types_are_unaffected() -> None:

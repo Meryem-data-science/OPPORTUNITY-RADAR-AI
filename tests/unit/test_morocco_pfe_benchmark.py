@@ -923,7 +923,7 @@ def test_no_entry_claims_production_identity_without_being_active() -> None:
             assert entry.integration_status != "ACTIVE", entry.id
 
 
-# ------------------------------------------- 7C.5A — Stage.ma audit evidence --
+# ------------------------------- 7C.5A / 7C.5B — Stage.ma source evidence -----
 
 
 def stage_ma_entry():
@@ -937,11 +937,13 @@ def stage_ma_note() -> str:
 
 
 def test_stage_ma_stays_non_production_after_its_audit() -> None:
-    """A completed audit is evidence about a source, not a promotion of one.
+    """A completed audit is evidence about a source, and so is a completed run.
 
     7C.5A reached the site, discovered real offer URLs and sampled real detail
-    pages. None of that makes Stage.ma collected: no collector exists, and the
-    entry's operational fields are exactly what they were before the run.
+    pages. 7C.5B then built a collector and validated it live. Neither makes
+    Stage.ma collected: the live run found ten offers and every one was expired,
+    so the activation gate was not met and these four fields are exactly what
+    they were before either phase.
     """
     entry = stage_ma_entry()
 
@@ -1029,13 +1031,96 @@ def test_the_stage_ma_note_keeps_the_legal_boundary() -> None:
     assert "remain a question for a human" in note
 
 
-def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
+def test_the_stage_ma_note_records_the_real_7c5b_production_dry_run() -> None:
+    """The run that decided this: a real local, bounded, GET-only dry-run at a
+    named collector SHA, so the evidence can be traced back to code."""
     note = stage_ma_note()
 
-    assert "no collector exists" in note
+    assert "PHASE 7C.5B, real local production evidence" in note
+    assert "2cbb703c7eb769e927667915bb237ac9de019903" in note
+    assert "COMPLETED successfully with exit 0" in note
+    assert "items_found was 0 and items_returned was 0" in note
+    assert "/specialites/computer-science" in note
+
+
+def test_the_stage_ma_note_explains_the_zero_rather_than_just_stating_it() -> None:
+    """Ten offers read, ten expired, none admissible.
+
+    Without the explanation a future reader has no way to tell this zero from a
+    broken collector, and "0 opportunities" is exactly the shape a silent
+    structural failure takes.
+    """
+    note = stage_ma_note()
+
+    assert "Ten live-discovered offer detail pages were actually read" in note
+    assert "all TEN were explicitly EXPIRED" in note
+    assert "ZERO admissible candidates remained" in note
+    assert "pages_checked was 12 and parser_version was stage-ma-html-v1" in note
+    assert "no parser structural failure" in note
+    assert "no candidate was invented" in note
+
+
+def test_the_stage_ma_note_does_not_call_the_expired_rows_opportunities() -> None:
+    """Ten discovered listing entries is not ten current opportunities."""
+    note = stage_ma_note()
+
+    assert "not ten current opportunities" in note
+
+
+def test_the_stage_ma_note_says_why_sqlite_was_not_run() -> None:
+    """Not run is not the same as failed, and a zero-row double-run would prove
+    nothing about idempotence."""
+    note = stage_ma_note()
+
+    assert "No SQLite double-run was performed" in note
+    assert "N=0" in note
+    assert "must never be presented as activation evidence" in note
+
+
+def test_the_stage_ma_note_records_the_dormant_operational_config() -> None:
+    """Dormant, not deleted: manual runs stay possible, automatic ones do not."""
+    note = stage_ma_note()
+
+    assert "intentionally DORMANT" in note
+    assert "enabled: true" in note
+    assert "status: candidate" in note
+    assert "leaves it out of every automatic run" in note
+
+
+def test_the_stage_ma_note_states_what_a_future_activation_requires() -> None:
+    note = stage_ma_note()
+
+    assert "at least ONE admissible current opportunity" in note
+    assert "no historical or expired offer may be used to satisfy that gate" in note
+    assert "code existing has never been evidence that a source works" in note
+
+
+def test_the_stage_ma_note_records_the_collector_without_claiming_activation() -> None:
+    """The collector exists — saying otherwise is now false — and Stage.ma is
+    still not ACTIVE. Both halves have to survive together."""
+    note = stage_ma_note()
+
+    assert "collector now EXISTS" in note
+    assert "no collector exists" not in note
     assert "remains non-production" in note
-    assert "ACTIVE" not in note
-    assert "7C.5B is a separate Architect decision" in note
+    assert "Nothing here claims Stage.ma is ACTIVE" in note
+    for overclaim in (
+        "integration_status: ACTIVE",
+        "is now ACTIVE",
+        "an ACTIVE production source",
+        "activation succeeded",
+        "SQLite double-run passed",
+    ):
+        assert overclaim not in note
+
+
+def test_the_stage_ma_note_still_refuses_to_generalize_to_the_whole_site() -> None:
+    """One specialty surface was audited and collected from. That is not
+    Stage.ma."""
+    note = stage_ma_note()
+
+    assert "represents Stage.ma as a whole" in note
+    assert "comprehensive" not in note
 
 
 def test_stage_ma_is_still_not_an_active_production_mapped_source() -> None:

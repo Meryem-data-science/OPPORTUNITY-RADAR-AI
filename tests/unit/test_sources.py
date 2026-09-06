@@ -55,13 +55,18 @@ def test_load_valid_source_registry() -> None:
     for source in (scale_ai, artefact, linkedin):
         assert source.detail_page_limit is None
 
+    # Stage.ma is deliberately the one source that is enabled but NOT active.
+    # The real Phase 7C.5B validation read ten live offers and found every one
+    # expired, so nothing admissible was collected and the activation gate was
+    # not met. `enabled: true` keeps a manual dry-run available; `candidate`
+    # keeps the agent from scheduling it.
     stage_ma = by_id["stage_ma"]
     assert stage_ma.type == "stage_ma_html"
     assert stage_ma.enabled is True
     assert stage_ma.category == "jobs"
     assert stage_ma.country == "MA"
     assert stage_ma.frequency_minutes == 360
-    assert stage_ma.status == "active"
+    assert stage_ma.status == "candidate"
     assert stage_ma.detail_page_limit == 25
     assert stage_ma.organization is None
     assert stage_ma.board_token is None

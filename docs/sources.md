@@ -1,15 +1,27 @@
 # Opportunity sources
 
-The operational catalogue in `config/sources.yaml` currently has five enabled,
-active sources:
+The operational catalogue in `config/sources.yaml` currently has five **enabled**
+sources, of which four are **active**.
 
-| Source ID | Type | Intake |
-| --- | --- | --- |
-| `scale_ai_greenhouse` | Greenhouse | Public Scale AI board (`scaleai`) |
-| `artefact_greenhouse` | Greenhouse | Public Artefact board (`artefact`) |
-| `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:jobalerts-noreply@linkedin.com`, at most 50 messages |
-| `stagiaires_ma` | Stagiaires.ma sitemap | Official sitemap chain, at most 25 detail pages per run |
-| `stage_ma` | Stage.ma specialty HTML | `/specialites/computer-science` only, at most 25 detail pages per run |
+Enabled and active are different things, and the difference is operational.
+`RadarAgent` runs a source only when it is `enabled` **and** its `status` is
+`active`; `enabled` on its own is what keeps a manual
+`collect_source --source <id> --dry-run` possible. A source can therefore be
+configured, registered and reachable by hand while still being kept out of every
+automatic run.
+
+| Source ID | Type | Status | Intake |
+| --- | --- | --- | --- |
+| `scale_ai_greenhouse` | Greenhouse | active | Public Scale AI board (`scaleai`) |
+| `artefact_greenhouse` | Greenhouse | active | Public Artefact board (`artefact`) |
+| `linkedin_job_alert_email` | Gmail LinkedIn alert | active | `newer_than:7d from:jobalerts-noreply@linkedin.com`, at most 50 messages |
+| `stagiaires_ma` | Stagiaires.ma sitemap | active | Official sitemap chain, at most 25 detail pages per run |
+| `stage_ma` | Stage.ma specialty HTML | **candidate — dormant** | `/specialites/computer-science` only, at most 25 detail pages per run |
+
+Stage.ma is enabled but dormant: its live validation read ten offers and found
+every one expired, so no admissible opportunity was collected and it was not
+activated. The [Stage.ma section](#stagema--informatique-specialty-only-phase-7c5b)
+records what that run actually observed.
 
 ## Greenhouse
 
@@ -280,13 +292,44 @@ alone, and is `None` when it is missing, malformed or an epoch sentinel —
 collector observes; the existing qualification layer classifies; later ranking
 prioritizes.
 
-### Status
+### Status — implemented, live-validated, and dormant
 
 The collector, its `stage_ma_html` source type, its `config/sources.yaml` row and
-its factory registration exist. **Activation is a separate question**: the
-Morocco PFE source map still records Stage.ma as `FUTURE_COLLECTOR` /
-`CANDIDATE` with a null `production_source_id`, because code existing is not
-evidence that it works. A real local dry-run and SQLite double-run come first.
+its factory registration all exist, and a real local bounded GET-only production
+dry-run against the approved surface **completed successfully** at collector SHA
+`2cbb703c7eb769e927667915bb237ac9de019903`, exit 0.
+
+It collected nothing, and the reason is the point:
+
+* **10** current listing entries were discovered and their detail pages read;
+* **all 10 were expired**;
+* **0** admissible candidates remained;
+* `pages_checked` 12, `parser_version` `stage-ma-html-v1`.
+
+Those ten were current *discovered listing entries* at validation time. They were
+not current opportunities — an expired offer is not an opportunity, and this
+document will not call it one. Nothing here was a network barrier, a robots
+refusal, a parser failure or a missing organization; the read worked, and the
+surface simply had nothing admissible on it.
+
+So this is a **successful technical read and a failed activation gate**, and the
+two must not be confused:
+
+* **No SQLite double-run was performed.** With zero admissible candidates a
+  zero-row double-run would demonstrate nothing about idempotence, and it must
+  never be offered as activation evidence. Not run — not failed.
+* **The operational row is dormant, not deleted.** `enabled: true` keeps a
+  manual `collect_source --source stage_ma --dry-run` available;
+  `status: candidate` keeps `RadarAgent` from collecting it automatically, using
+  the same generic rule that governs every source — there is no Stage.ma branch
+  anywhere in the agent.
+* **The Morocco PFE source map still records `FUTURE_COLLECTOR` / `CANDIDATE`**
+  with a null `production_source_id` and `live_canary: false`, because code
+  existing has never been evidence that a source works.
+
+Activation needs a **fresh** real validation run yielding at least one admissible
+current opportunity, followed by the SQLite double-run. No historical or expired
+offer can satisfy that gate.
 
 ## ReKrute — evaluated in Phase 7C.3, not selected
 
