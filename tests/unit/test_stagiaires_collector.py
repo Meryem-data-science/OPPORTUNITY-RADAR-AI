@@ -1169,3 +1169,128 @@ def test_the_same_offer_yields_a_stable_identity_across_two_runs() -> None:
     identity = lambda batch: sorted((c.source_id, c.source_url) for c in batch)
     assert identity(first) == identity(second)
     assert len(set(identity(first))) == len(first)
+
+
+# ==================== the sitemap safety bound is a refusal ================
+
+
+def index_declaring(count: int) -> str:
+    """A sitemap index declaring ``count`` offer sitemaps in the known family."""
+    entries = "".join(
+        f"<sitemap><loc>{HOST}/offre-sitemap{'' if n == 0 else n + 1}.xml</loc></sitemap>"
+        for n in range(count)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}</sitemapindex>"
+    )
+
+
+def routes_for_index(count: int) -> dict:
+    """An index declaring ``count`` offer sitemaps, each of them readable."""
+    table = {
+        ROBOTS_URL: (200, ROBOTS_BODY, "text/plain"),
+        SITEMAP: (200, index_declaring(count), "application/xml"),
+        f"{OFFER}/6100-slug-0": (200, detail_html(), "text/html"),
+    }
+    for n in range(count):
+        name = f"offre-sitemap{'' if n == 0 else n + 1}.xml"
+        rows = [(f"{OFFER}/6100-slug-0", "2026-09-01")] if n == 0 else []
+        table[f"{HOST}/{name}"] = (200, urlset(rows), "application/xml")
+    return table
+
+
+def test_exactly_the_bound_is_allowed() -> None:
+    """Twenty declared sitemaps is the largest set this collector will read."""
+    client = _FakeClient(routes_for_index(StagiairesCollector.MAX_OFFER_SITEMAPS))
+
+    _, candidates = collect(client)
+
+    fetched = [item for item in client.requested if "offre-sitemap" in item]
+    assert len(fetched) == StagiairesCollector.MAX_OFFER_SITEMAPS
+    assert len(candidates) == 1
+
+
+def test_one_sitemap_above_the_bound_fails_before_anything_is_fetched() -> None:
+    """The finding: the bound truncated silently instead of refusing.
+
+    Reading the first twenty and returning a candidate batch would present a
+    materially partial read of the source as a complete one — the same failure
+    as an unreadable sitemap, only quieter, because nothing would look wrong.
+    """
+    over = StagiairesCollector.MAX_OFFER_SITEMAPS + 1
+    client = _FakeClient(routes_for_index(over))
+
+    with pytest.raises((StagiairesCollectionError, StagiairesPayloadError)):
+        collect(client)
+
+    # robots and the index only: the refusal happens before the bounded subset
+    # is touched, so no offer sitemap and no detail page is ever requested.
+    assert client.requested == [ROBOTS_URL, SITEMAP]
+    assert not any("offre-sitemap" in item for item in client.requested)
+    assert not any("/stage-emploi-maroc/" in item for item in client.requested)
+
+
+def test_no_candidate_is_returned_when_the_bound_is_exceeded() -> None:
+    """A partial-success mode is exactly what must not exist here."""
+    collector = StagiairesCollector(
+        stagiaires_source(),
+        client=_FakeClient(routes_for_index(StagiairesCollector.MAX_OFFER_SITEMAPS + 5)),
+    )
+    collector.DELAY_SECONDS = 0.0
+
+    with pytest.raises((StagiairesCollectionError, StagiairesPayloadError)):
+        collector.collect()
+
+
+def test_the_error_names_the_declared_count_and_the_production_bound() -> None:
+    """A reader of the failed run must see why, not just that."""
+    over = StagiairesCollector.MAX_OFFER_SITEMAPS + 1
+
+    with pytest.raises(StagiairesPayloadError) as failure:
+        collect(_FakeClient(routes_for_index(over)))
+
+    message = str(failure.value)
+    assert str(over) in message
+    assert str(StagiairesCollector.MAX_OFFER_SITEMAPS) in message
+    assert "bound" in message.lower()
+    assert "partial" in message.lower()
+
+
+def test_the_bound_is_not_raised_to_accommodate_a_larger_index() -> None:
+    """The safety bound stays put; what changed is how exceeding it is handled."""
+    assert StagiairesCollector.MAX_OFFER_SITEMAPS == 20
+
+
+def test_the_ordinary_two_sitemap_run_is_unchanged() -> None:
+    """The real site declares two today, and that path is untouched."""
+    client = _FakeClient(routes())
+
+    _, candidates = collect(client)
+
+    fetched = [item for item in client.requested if "offre-sitemap" in item]
+    assert fetched == [f"{HOST}/offre-sitemap.xml", f"{HOST}/offre-sitemap2.xml"]
+    assert len(candidates) == 5
+
+
+def test_an_index_declaring_no_offer_sitemap_still_fails_the_same_way() -> None:
+    """The zero case is unchanged by the new upper guard."""
+    with pytest.raises(StagiairesPayloadError, match="no offer sitemap"):
+        collect(_FakeClient(routes_for_index(0)))
+
+
+def test_an_unreadable_required_sitemap_within_the_bound_still_fails() -> None:
+    """Truncation and unreadability are different faults; both still fail."""
+    client = _FakeClient(routes(), failing_url=f"{HOST}/offre-sitemap2.xml")
+
+    with pytest.raises(StagiairesCollectionError, match="offre-sitemap2.xml"):
+        collect(client)
+
+
+def test_a_malformed_required_sitemap_within_the_bound_still_fails() -> None:
+    table = routes()
+    table[f"{HOST}/offre-sitemap2.xml"] = (200, "<html>nope</html>", "text/html")
+
+    with pytest.raises(StagiairesPayloadError):
+        collect(_FakeClient(table))

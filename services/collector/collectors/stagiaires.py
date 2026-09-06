@@ -100,6 +100,11 @@ class StagiairesCollector(BaseCollector):
     #: expected to declare two or three; it is not expected to declare fifty,
     #: and a collector that would fetch fifty because a document said so is a
     #: crawler wearing a collector's name.
+    #:
+    #: Exceeding it is a **refusal, not a truncation**. Reading the first twenty
+    #: and returning candidates anyway would turn a materially partial read into
+    #: an apparently successful one, which is the failure this collector exists
+    #: to make impossible.
     MAX_OFFER_SITEMAPS = 20
 
     def __init__(
@@ -254,14 +259,28 @@ class StagiairesCollector(BaseCollector):
             raise StagiairesPayloadError(
                 "Stagiaires sitemap index declares no offer sitemap"
             )
+        if len(offer_sitemaps) > self.MAX_OFFER_SITEMAPS:
+            # Reading the first twenty and returning candidates would present a
+            # materially partial read as a complete one — the same failure as an
+            # unreadable sitemap, only quieter, because nothing would look wrong.
+            # The safety bound stays where it is; what changes is that exceeding
+            # it is a refusal rather than a truncation. Nothing below this line
+            # is requested: no offer sitemap, no detail page, no candidate.
+            raise StagiairesPayloadError(
+                f"Stagiaires sitemap index declares {len(offer_sitemaps)} offer "
+                f"sitemaps, above the production bound of "
+                f"{self.MAX_OFFER_SITEMAPS}; refusing to collect a partial "
+                f"subset of the source"
+            )
 
         entries: list[SitemapOfferEntry] = []
-        for sitemap_url in offer_sitemaps[: self.MAX_OFFER_SITEMAPS]:
+        # The full declared set, because the bound above proved it fits. Every
+        # declared offer sitemap is required: the offer set is their union, so
+        # one file we cannot read makes the result a silent subset of the truth.
+        # Both `_fetch` and `parse_offer_sitemap` raise, and neither failure is
+        # swallowed into an empty list.
+        for sitemap_url in offer_sitemaps:
             time.sleep(self.DELAY_SECONDS)
-            # Every declared offer sitemap is required: the offer set is their
-            # union, so one file we cannot read makes the result a silent subset
-            # of the truth. Both `_fetch` and `parse_offer_sitemap` raise, and
-            # neither failure is swallowed into an empty list.
             _, body = self._fetch(sitemap_url)
             entries.extend(parse_offer_sitemap(body, sitemap_url))
 
