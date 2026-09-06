@@ -477,6 +477,19 @@ def _element_text(element: _Element) -> str:
     return normalize_text("".join(parts))
 
 
+#: Apostrophe variants a French page mixes freely. Normalized to one form so a
+#: marker list stays readable instead of doubling for typography.
+_APOSTROPHES = "\u2019\u2018\u201b\u00b4"
+
+
+def _matchable(text: str) -> str:
+    """Lowercase text with its apostrophes normalized, for marker matching."""
+    lowered = (text or "").casefold()
+    for character in _APOSTROPHES:
+        lowered = lowered.replace(character, "'")
+    return lowered
+
+
 def _anchors(element: _Element) -> list[_Element]:
     found: list[_Element] = []
 
@@ -502,28 +515,42 @@ def _resolved_href(anchor: _Element, base_url: str) -> str | None:
         return None
 
 
-def _offer_anchor_count(element: _Element, base_url: str) -> int:
-    return sum(
-        1
-        for anchor in _anchors(element)
-        if (resolved := _resolved_href(anchor, base_url)) and is_offer_detail_url(resolved)
-    )
+def _distinct_offer_urls(element: _Element, base_url: str) -> set[str]:
+    """The set of distinct canonical offer URLs beneath ``element``.
+
+    A **set**, because the real listing links the same offer more than once from
+    one card — a title link and a "+ Voir Offre de Stage" link both pointing at
+    `/offres-stage/9355-…`. Counting anchors would make such a card look like
+    two offers and collapse it, which is exactly the bug this replaces.
+    """
+    found: set[str] = set()
+    for anchor in _anchors(element):
+        resolved = _resolved_href(anchor, base_url)
+        if resolved and is_offer_detail_url(resolved):
+            found.add(resolved)
+    return found
 
 
 def _card_for(anchor: _Element, base_url: str) -> _Element:
     """Return the offer card containing ``anchor``.
 
-    The card is the **largest ancestor that still contains exactly one offer
-    link**. Deriving it from the document's own structure rather than from CSS
+    The card is the largest ancestor that still contains exactly **one distinct
+    offer identity** — one canonical URL, however many anchors point at it. That
+    is the real invariant: the live listing gives each offer both a title link
+    and a "+ Voir Offre de Stage" link, so a card holding two anchors is
+    ordinarily still a card holding one offer, and climbing stops only when a
+    *second offer* appears.
+
+    Deriving the boundary from the document's own structure rather than from CSS
     class names matters twice over: generated class names change on the next
     redesign, and this definition makes cross-card leakage impossible by
-    construction — an organization anchor sitting in a container with two offer
-    links is outside every card, so it is attributed to neither.
+    construction — an organization anchor sitting beside two distinct offers
+    belongs to no card, so it is attributed to neither.
     """
     card = anchor
     node = anchor.parent
     while node is not None and node.tag != "#document":
-        if _offer_anchor_count(node, base_url) != 1:
+        if len(_distinct_offer_urls(node, base_url)) != 1:
             break
         card = node
         node = node.parent
@@ -647,7 +674,7 @@ def has_explicit_empty_state(html: str) -> bool:
     """Whether the page says, in its own words, that it holds no offers."""
     builder = _DocumentBuilder()
     builder.feed(html or "")
-    text = _element_text(builder.root).casefold()
+    text = _matchable(_element_text(builder.root))
     return any(marker in text for marker in _EMPTY_STATE_MARKERS)
 
 
@@ -823,13 +850,28 @@ _EXPIRED_MARKERS = (
     "date limite dépassée",
     "date limite depassee",
 )
+#: Including the sentence the live Stage.ma detail page really renders:
+#: "Cette offre de stage n'est pas publiée. Seul le recruteur et
+#: l'administrateur peuvent la visualiser." That same page also prints
+#: "Publiée le 01/01/1970", so a parser that knew only "non publiée" fell
+#: through to the PUBLISHED marker and would have stored a hidden offer as live.
+#: Apostrophes are normalized before matching, so the typographic and ASCII
+#: forms need not both be listed.
 _UNPUBLISHED_MARKERS = (
+    "n'est pas publiée",
+    "n'est pas publiee",
+    "n'est pas publié",
+    "n'est pas publie",
     "non publiée",
     "non publiee",
+    "non publié",
+    "non publie",
     "unpublished",
     "en attente de validation",
     "en cours de validation",
 )
+
+
 _PUBLISHED_MARKERS = (
     "publiée le",
     "publiee le",
@@ -851,7 +893,7 @@ def publication_state(html: str) -> str:
     """
     builder = _DocumentBuilder()
     builder.feed(html or "")
-    text = _element_text(builder.root).casefold()
+    text = _matchable(_element_text(builder.root))
     if any(marker in text for marker in _EXPIRED_MARKERS):
         return STATE_EXPIRED
     if any(marker in text for marker in _UNPUBLISHED_MARKERS):

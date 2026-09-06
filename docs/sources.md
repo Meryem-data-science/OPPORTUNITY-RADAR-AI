@@ -82,19 +82,24 @@ published" from "this collector or parser may be broken". An unknown
 [database.md](database.md). Nothing is alerted, retried, or rescheduled as a
 result.
 
-## Stagiaires.ma — audited in Phase 7C.4A, not collected
+## Stagiaires.ma — audited in Phase 7C.4A, collected since Phase 7C.4B
 
-Stagiaires.ma is **not** a source. It has no row in `config/sources.yaml`, no
-`SourceConfig` type, no entry in the collector factory and no
-`production_source_id` in the Morocco PFE source map, where it stays a `P1`
-`CANDIDATE` with `collection_strategy: FUTURE_COLLECTOR`. No collector, no
-production parser, no `RadarAgent` run, no database row, no migration and no
-scheduler exist for it.
+Stagiaires.ma **is** a source. `stagiaires_ma` is an enabled, active row in
+`config/sources.yaml` of type `stagiaires_sitemap`, with a `SourceConfig`, an
+entry in the collector factory, and `production_source_id: stagiaires_ma` in the
+Morocco PFE source map, where it is `ACTIVE` with
+`collection_strategy: EXISTING_COLLECTOR`. Production discovery is the site's own
+official sitemap chain described below, and a run is bounded by
+`detail_page_limit`, which is 25.
 
-Phase 7C.4A is a **public-access and structure feasibility audit**, and nothing
-more. It answers "could this be collected, and would an offer page give us the
-fields we need?" so that the decision to build a collector — Phase 7C.4B — can
-be made on evidence instead of on optimism.
+The two phases did different jobs, and the distinction is worth keeping. Phase
+7C.4A was a **public-access and structure feasibility audit**, and nothing more:
+it answered "could this be collected, and would an offer page give us the fields
+we need?" so that the decision to build a collector could be made on evidence
+instead of on optimism. Phase 7C.4B then built that collector and validated it
+against the live site, and the source map says `ACTIVE` because of that
+validation rather than because the code exists. None of this says anything about
+Stage.ma, which is a separate source on its own evidence.
 
 ### The discovery chain
 
@@ -197,10 +202,11 @@ JSON-LD type and key *names*, and per-signal presence with a short excerpt for
 verification. Job descriptions are reported by length only. **No Stagiaires.ma
 page body is stored in this repository.**
 
-### Next
+### What came of it
 
-Phase **7C.4B** — an actual collector — is the next step, and only after the
-Architect has validated 7C.4A. Until then Stagiaires.ma collects nothing.
+Phase **7C.4B** built the bounded production collector this audit made the case
+for, and a real local validation run — not the mere existence of the code — is
+what moved the source map entry to `ACTIVE`. Stagiaires.ma collects.
 
 ## Stage.ma — Informatique specialty only (Phase 7C.5B)
 

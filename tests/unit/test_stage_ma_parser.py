@@ -336,6 +336,177 @@ def test_a_missing_location_stays_none() -> None:
     assert parse_listing(listing(card(9355)))[0].listing_location is None
 
 
+# ===================== REAL LISTING SHAPE (review fix) ======================
+
+
+def real_card(
+    number: int,
+    *,
+    title: str,
+    slug: str,
+    organisation: str | None,
+    organisation_id: int = 500,
+    organisation_as_anchor: bool = True,
+    location: str | None = None,
+) -> str:
+    """A card shaped the way the live Informatique listing really renders one.
+
+    The detail is the whole point: Stage.ma links each offer **twice** from its
+    own card, once from the title and once from a "+ Voir Offre de Stage" call
+    to action, both at the same `/offres-stage/<id>-<slug>`. Counting anchors
+    made that card look like two offers, so the boundary collapsed onto the
+    anchor itself and the employer anchor sitting next to it was never inside
+    the card. Every organization came back `None` against the real page while
+    every synthetic single-anchor fixture passed.
+
+    The nesting is deliberately deeper than the fixtures above, because a card
+    boundary read from the document's structure has to survive real markup, and
+    the class names here are decoration - nothing in the parser reads them.
+    """
+    inner = [f'<h3 class="offer-title"><a href="/offres-stage/{number}-{slug}">{title}</a></h3>']
+    if organisation is not None:
+        if organisation_as_anchor:
+            inner.append(
+                f'<a class="org" href="/organismes/{organisation_id}-slug">{organisation}</a>'
+            )
+        else:
+            inner.append(f'<span class="org">{organisation}</span>')
+    if location is not None:
+        inner.append(f'<span itemprop="addressLocality">{location}</span>')
+    inner.append(
+        f'<a class="cta" href="/offres-stage/{number}-{slug}">+ Voir Offre de Stage</a>'
+    )
+    return (
+        '<div class="offer-item"><div class="offer-inner"><div class="offer-body">'
+        + "".join(inner)
+        + "</div></div></div>"
+    )
+
+
+CARD_A = real_card(
+    9355,
+    title="Stagiaire Full Stack Developer",
+    slug="stage-a",
+    organisation="ACME",
+    organisation_id=500,
+)
+CARD_B = real_card(
+    9344,
+    title="Stage B",
+    slug="stage-b",
+    organisation="BETA",
+    organisation_id=600,
+)
+
+
+def test_the_real_listing_shape_yields_one_entry_per_offer() -> None:
+    """Two cards, four offer anchors, two offers."""
+    entries = parse_listing(listing(CARD_A, CARD_B))
+
+    assert len(entries) == 2
+    assert [entry.source_external_id for entry in entries] == ["9355", "9344"]
+
+
+def test_the_real_listing_shape_keeps_each_card_its_own_employer() -> None:
+    entries = parse_listing(listing(CARD_A, CARD_B))
+
+    assert entries[0].listing_organization == "ACME"
+    assert entries[1].listing_organization == "BETA"
+
+
+def test_the_repeated_call_to_action_never_replaces_the_title() -> None:
+    """The first meaningful anchor text is the title; "+ Voir Offre de Stage"
+    is navigation furniture and says nothing about the offer."""
+    entries = parse_listing(listing(CARD_A, CARD_B))
+
+    assert entries[0].listing_title == "Stagiaire Full Stack Developer"
+    assert entries[1].listing_title == "Stage B"
+    for entry in entries:
+        assert "Voir Offre" not in (entry.listing_title or "")
+
+
+def test_the_duplicate_link_inside_a_card_does_not_duplicate_the_entry() -> None:
+    urls = [entry.canonical_url for entry in parse_listing(listing(CARD_A, CARD_B))]
+
+    assert urls == [f"{OFFER}/9355-stage-a", f"{OFFER}/9344-stage-b"]
+    assert len(set(urls)) == len(urls)
+
+
+def test_the_real_listing_shape_still_preserves_document_order() -> None:
+    """A is 9355 and B is 9344, so a numeric sort would swap them. Nothing here
+    sorts: the higher id stays first because the page put it first."""
+    forward = parse_listing(listing(CARD_A, CARD_B))
+    reversed_page = parse_listing(listing(CARD_B, CARD_A))
+
+    assert [entry.source_external_id for entry in forward] == ["9355", "9344"]
+    assert [entry.source_external_id for entry in reversed_page] == ["9344", "9355"]
+
+
+def test_no_employer_leaks_between_two_real_shaped_cards() -> None:
+    """Card A carries no employer at all; B's must not fill the gap."""
+    html = listing(
+        real_card(9355, title="Stage A", slug="stage-a", organisation=None),
+        CARD_B,
+    )
+    entries = parse_listing(html)
+
+    assert entries[0].listing_organization is None
+    assert entries[1].listing_organization == "BETA"
+
+
+def test_no_location_leaks_between_two_real_shaped_cards() -> None:
+    html = listing(
+        real_card(9355, title="Stage A", slug="stage-a", organisation="ACME"),
+        real_card(
+            9344, title="Stage B", slug="stage-b", organisation="BETA", location="Rabat"
+        ),
+    )
+    entries = parse_listing(html)
+
+    assert entries[0].listing_location is None
+    assert entries[1].listing_location == "Rabat"
+
+
+@pytest.mark.parametrize("as_anchor", [True, False])
+def test_a_real_shaped_anonymous_card_invents_no_employer(as_anchor: bool) -> None:
+    """The site publishes anonymous offers on purpose. Now that the card
+    boundary is right, "Anonyme" is actually *seen* - and must still be
+    rejected, whether the template links it or merely prints it."""
+    html = listing(
+        real_card(
+            9355,
+            title="Stage anonyme",
+            slug="stage-a",
+            organisation="Anonyme",
+            organisation_as_anchor=as_anchor,
+        ),
+        CARD_B,
+    )
+    entries = parse_listing(html)
+
+    assert len(entries) == 2
+    assert entries[0].listing_title == "Stage anonyme"
+    assert entries[0].listing_organization is None
+    assert entries[1].listing_organization == "BETA"
+
+
+def test_a_card_holding_two_distinct_offers_attributes_its_employer_to_neither() -> None:
+    """The boundary is one distinct offer identity, not one anchor. A wrapper
+    around two different offers is not a card, so the employer inside it
+    belongs to no offer rather than to both."""
+    html = listing(
+        '<div class="offer-item">'
+        '<a class="org" href="/organismes/500-shared">Ambigu SARL</a>'
+        '<a href="/offres-stage/9355-stage-a">Stage A</a>'
+        '<a href="/offres-stage/9344-stage-b">Stage B</a>'
+        "</div>"
+    )
+    entries = parse_listing(html)
+
+    assert len(entries) == 2
+    assert [entry.listing_organization for entry in entries] == [None, None]
+
+
 # =============================== EMPTY STATE ================================
 
 
@@ -437,6 +608,93 @@ def test_unpublished_wins_over_a_publication_label() -> None:
 
 def test_an_unknown_state_is_not_expired() -> None:
     assert publication_state(detail(state_text="")) == STATE_UNKNOWN
+
+
+# ==================== REAL UNPUBLISHED PAGE (review fix) ====================
+
+
+#: The sentence the live Stage.ma detail page really renders on a hidden offer,
+#: typographic apostrophes and all.
+REAL_UNPUBLISHED_NOTICE = (
+    "Cette offre de stage n\u2019est pas publi\u00e9e. "
+    "Seul le recruteur et l\u2019administrateur peuvent la visualiser."
+)
+
+
+def unpublished_detail(notice: str = REAL_UNPUBLISHED_NOTICE) -> str:
+    """The real combination a hidden Stage.ma offer shows, in one page.
+
+    Both halves are on purpose. The notice is the only truthful signal; further
+    down, the same page prints "Publiee le 01/01/1970" - a database column that
+    was never set, rendered as an ordinary publication label. Read the label
+    alone and a hidden offer becomes a live one dated 1970, which is how this
+    fixture earned its place: the parser scored exactly that before the fix.
+
+    Everything else about the page is deliberately valid - a complete
+    `JobPosting`, a real title, a named employer - so that nothing but the
+    notice can be what keeps the offer out.
+    """
+    posting = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Stagiaire Full Stack Developer",
+        "hiringOrganization": {"@type": "Organization", "name": "ACME SARL"},
+        "jobLocation": {
+            "@type": "Place",
+            "address": {"@type": "PostalAddress", "addressLocality": "Casablanca"},
+        },
+        "description": "Description synthetique inventee pour ce test.",
+        "datePosted": "01/01/1970",
+    }
+    return (
+        "<html><head><title>Offre</title>"
+        f'<script type="application/ld+json">{json.dumps(posting)}</script>'
+        "</head><body>"
+        "<h1>Stagiaire Full Stack Developer</h1>"
+        f'<div class="alert">{notice}</div>'
+        "<p>Publi\u00e9e le 01/01/1970</p>"
+        "<p>Ville : Casablanca</p>"
+        "</body></html>"
+    )
+
+
+def test_the_real_unpublished_notice_beats_the_epoch_publication_label() -> None:
+    """The page carries both; only one of them is true."""
+    assert publication_state(unpublished_detail()) == STATE_UNPUBLISHED
+
+
+@pytest.mark.parametrize(
+    "notice",
+    [
+        REAL_UNPUBLISHED_NOTICE,
+        "Cette offre de stage n'est pas publi\u00e9e. "
+        "Seul le recruteur et l'administrateur peuvent la visualiser.",
+        "Cette offre de stage n'est pas publiee. "
+        "Seul le recruteur et l'administrateur peuvent la visualiser.",
+        "Cette offre de stage n\u2018est pas publi\u00e9e.",
+        "Cette offre de stage n\u00b4est pas publi\u00e9e.",
+        "CETTE OFFRE DE STAGE N\u2019EST PAS PUBLI\u00c9E.",
+    ],
+)
+def test_the_notice_is_read_through_its_typographic_variants(notice: str) -> None:
+    """One page may spell the apostrophe four ways and drop the accents; the
+    offer is hidden in every one of them."""
+    assert publication_state(unpublished_detail(notice)) == STATE_UNPUBLISHED
+
+
+def test_the_epoch_label_on_that_page_never_becomes_a_publication_date() -> None:
+    """Independently of the state: `01/01/1970` is not a date this parser keeps."""
+    assert posting_published_at({"datePosted": "01/01/1970"}) is None
+    assert posting_published_at(job_posting(unpublished_detail())) is None
+
+
+def test_the_rest_of_the_hidden_page_is_otherwise_perfectly_valid() -> None:
+    """So the test above can only be passing because of the notice."""
+    posting = job_posting(unpublished_detail())
+
+    assert posting_title(posting) == "Stagiaire Full Stack Developer"
+    assert posting_organization(posting) == "ACME SARL"
+    assert posting_location(posting) == "Casablanca"
 
 
 # =================================== DATE ===================================

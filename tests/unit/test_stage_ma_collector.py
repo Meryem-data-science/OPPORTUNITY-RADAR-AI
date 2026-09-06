@@ -625,6 +625,132 @@ def test_a_whole_batch_of_expired_offers_is_zero_candidates_not_a_failure() -> N
     assert set(collector.skipped.values()) == {SKIP_EXPIRED}
 
 
+# ===================== REAL PAGE SHAPES (review fix) ========================
+
+
+#: The sentence the live Stage.ma detail page really renders on a hidden offer.
+REAL_UNPUBLISHED_NOTICE = (
+    "Cette offre de stage n\u2019est pas publi\u00e9e. "
+    "Seul le recruteur et l\u2019administrateur peuvent la visualiser."
+)
+
+
+def unpublished_detail() -> str:
+    """A hidden offer exactly as the site publishes one: the notice, and lower
+    down "Publiee le 01/01/1970" - a never-set column printed as a publication
+    label. Everything else on the page is valid, so only the notice can keep
+    the offer out, and only reading the label instead could let it in.
+    """
+    posting = {
+        "@context": "https://schema.org",
+        "@type": "JobPosting",
+        "title": "Stagiaire Full Stack Developer",
+        "hiringOrganization": {"@type": "Organization", "name": "ACME SARL"},
+        "jobLocation": {
+            "@type": "Place",
+            "address": {"@type": "PostalAddress", "addressLocality": "Casablanca"},
+        },
+        "description": "Description synthetique inventee.",
+        "datePosted": "01/01/1970",
+    }
+    return (
+        "<html><head><title>Offre</title>"
+        f'<script type="application/ld+json">{json.dumps(posting)}</script>'
+        "</head><body>"
+        "<h1>Stagiaire Full Stack Developer</h1>"
+        f'<div class="alert">{REAL_UNPUBLISHED_NOTICE}</div>'
+        "<p>Publi\u00e9e le 01/01/1970</p>"
+        "</body></html>"
+    )
+
+
+def real_card(number: int, *, title: str, organisation: str | None,
+              organisation_id: int = 500) -> str:
+    """A card shaped like the live listing: the same offer linked twice, from
+    the title and from the "+ Voir Offre de Stage" call to action."""
+    inner = [f'<h3><a href="/offres-stage/{number}-slug-{number}">{title}</a></h3>']
+    if organisation is not None:
+        inner.append(
+            f'<a class="org" href="/organismes/{organisation_id}-slug">{organisation}</a>'
+        )
+    inner.append(
+        f'<a class="cta" href="/offres-stage/{number}-slug-{number}">+ Voir Offre de Stage</a>'
+    )
+    return f'<div class="offer-item"><div class="offer-body">{"".join(inner)}</div></div>'
+
+
+def test_the_real_unpublished_page_is_skipped_and_yields_no_candidate() -> None:
+    """The whole reason the notice matters: without it this page is complete,
+    admissible, and would be stored as a live offer dated 1970."""
+    table = routes(count=3)
+    table[f"{OFFER}/9301-slug-9301"] = (200, unpublished_detail(), "text/html")
+    collector, candidates = collect(_FakeClient(table))
+
+    assert collector.skipped[f"{OFFER}/9301-slug-9301"] == SKIP_UNPUBLISHED
+    assert len(candidates) == 2
+    assert all(
+        candidate.source_url != f"{OFFER}/9301-slug-9301" for candidate in candidates
+    )
+
+
+def test_a_run_of_only_hidden_offers_produces_no_opportunity_candidate() -> None:
+    """Nothing partial reaches persistence: no candidate at all, not a candidate
+    with a 1970 date."""
+    table = routes(count=1)
+    table[f"{OFFER}/9300-slug-9300"] = (200, unpublished_detail(), "text/html")
+    collector, candidates = collect(_FakeClient(table))
+
+    assert candidates == []
+    assert not any(isinstance(item, OpportunityCandidate) for item in candidates)
+    assert collector.skipped == {f"{OFFER}/9300-slug-9300": SKIP_UNPUBLISHED}
+
+
+def test_the_real_listing_shape_collects_both_offers_with_their_own_employers() -> None:
+    """Against the live card shape every organization used to come back empty,
+    because the doubled offer link made one card look like two offers."""
+    table = routes(count=2)
+    table[LISTING_URL] = (
+        200,
+        listing(
+            real_card(9300, title="Stage A", organisation="ACME", organisation_id=500),
+            real_card(9301, title="Stage B", organisation="BETA", organisation_id=600),
+        ),
+        "text/html",
+    )
+    for number in (9300, 9301):
+        table[f"{OFFER}/{number}-slug-{number}"] = (
+            200, detail(organisation=None, state_text="Publi\u00e9e le 23/03/2026"), "text/html",
+        )
+
+    collector, candidates = collect(_FakeClient(table))
+
+    assert [candidate.organization for candidate in candidates] == ["ACME", "BETA"]
+    assert [candidate.canonical_title for candidate in candidates] == [
+        "Stage PFE IA",
+        "Stage PFE IA",
+    ]
+    assert collector.run_metrics()["pages_checked"] == 4  # robots, listing, two details
+
+
+def test_the_doubled_offer_link_does_not_double_the_fetches() -> None:
+    """Four offer anchors, two offers: the collector must GET two detail pages."""
+    table = routes(count=2)
+    table[LISTING_URL] = (
+        200,
+        listing(
+            real_card(9300, title="Stage A", organisation="ACME"),
+            real_card(9301, title="Stage B", organisation="BETA", organisation_id=600),
+        ),
+        "text/html",
+    )
+    client = _FakeClient(table)
+    _, candidates = collect(client)
+
+    detail_requests = [url for url in client.requested if url.startswith(f"{OFFER}/")]
+    assert detail_requests == [f"{OFFER}/9300-slug-9300", f"{OFFER}/9301-slug-9301"]
+    assert len(candidates) == 2
+
+
 # ================================ ORGANIZATION ==============================
 
 
