@@ -433,35 +433,65 @@ _UNAVAILABLE_MARKERS = (
 )
 
 
-def detect_access_barrier(status_code: int, final_url: str, body: str) -> str | None:
-    """Name the barrier a response represents, or ``None`` if it looks public.
+#: What kind of problem a response represents. Three kinds, not one, because
+#: they mean different things about the source and must not share an outcome:
+#:
+#: * `BARRIER` — we were **refused**. A wall, and the audit stops at it.
+#: * `UNREADABLE` — we could not read something: a timeout, a 5xx, a document
+#:   that is not what it claims to be. Nothing was refused; the audit simply
+#:   does not know, so it is incomplete rather than permitted.
+#: * `UNAVAILABLE` — the page is gone (404/410). That is a fact about the
+#:   *source's lifecycle*, not about our access, and what it means depends
+#:   entirely on which page: a deleted offer is an ordinary observation, while a
+#:   robots-declared sitemap that 404s is a required document we could not read.
+#:   The caller decides, which is why this classifier refuses to.
+ISSUE_BARRIER = "BARRIER"
+ISSUE_UNREADABLE = "UNREADABLE"
+ISSUE_UNAVAILABLE = "UNAVAILABLE"
 
-    A barrier is reported, never worked around. The audit stops at the wall.
+
+@dataclass(frozen=True)
+class ResponseIssue:
+    """A named problem with one response, and the kind of problem it is."""
+
+    kind: str
+    code: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {"kind": self.kind, "code": self.code}
+
+
+def classify_response(
+    status_code: int, final_url: str, body: str
+) -> ResponseIssue | None:
+    """Name what is wrong with a response, or ``None`` if it looks public.
+
+    Nothing here is worked around. Note what is deliberately **not** a barrier:
+    a 5xx is a server that failed, not a refusal; a 404 is a page that is gone;
+    and a thin or JavaScript-only body is a site that did not send the data in
+    its HTML, which is the *discovery* finding this whole audit exists to
+    report. Calling any of those a refusal would turn "this source needs a
+    browser" into a failed run, and 7C.5A must be able to complete and say
+    exactly that.
     """
     if status_code == 403:
-        return "HTTP_403_FORBIDDEN"
+        return ResponseIssue(ISSUE_BARRIER, "HTTP_403_FORBIDDEN")
     if status_code == 429:
-        return "HTTP_429_RATE_LIMITED"
+        return ResponseIssue(ISSUE_BARRIER, "HTTP_429_RATE_LIMITED")
     if status_code in {401, 407}:
-        return "AUTHENTICATION_REQUIRED"
-    if status_code >= 500:
-        return f"HTTP_{status_code}_SERVER_ERROR"
+        return ResponseIssue(ISSUE_BARRIER, "AUTHENTICATION_REQUIRED")
     sample = (body or "")[:20000].lower()
     if any(marker in sample for marker in _CHALLENGE_MARKERS):
-        return "BOT_CHALLENGE_OR_CAPTCHA"
+        return ResponseIssue(ISSUE_BARRIER, "BOT_CHALLENGE_OR_CAPTCHA")
     path = urlsplit(final_url or "").path.lower()
     if any(segment in path for segment in _LOGIN_PATH_SEGMENTS):
-        return "REDIRECTED_TO_LOGIN"
+        return ResponseIssue(ISSUE_BARRIER, "REDIRECTED_TO_LOGIN")
+    if status_code >= 500:
+        return ResponseIssue(ISSUE_UNREADABLE, f"HTTP_{status_code}_SERVER_ERROR")
     if status_code in {404, 410}:
-        return "PAGE_UNAVAILABLE"
+        return ResponseIssue(ISSUE_UNAVAILABLE, "PAGE_UNAVAILABLE")
     if status_code != 200:
-        return f"HTTP_{status_code}"
-    # A thin or JavaScript-only body is deliberately NOT a barrier here. The
-    # site is not refusing us — it is simply not sending the data in the HTML,
-    # which is a *discovery* finding this audit exists to report. Calling it a
-    # barrier would turn "this source needs a browser" into a failed run, and
-    # 7C.5A must be able to complete and say exactly that. `looks_browser_rendered`
-    # carries the observation instead.
+        return ResponseIssue(ISSUE_UNREADABLE, f"HTTP_{status_code}")
     return None
 
 
@@ -563,7 +593,11 @@ class _LinkCollector(HTMLParser):
         self.meta: dict[str, str] = {}
         self.canonical: str | None = None
         self.title: str | None = None
-        self.times: list[str] = []
+        #: (datetime value, the visible text just before it, itemprop) per
+        #: `<time>`. The context is the point: a bare `<time>` says *a* date,
+        #: never *which* date, and this audit only accepts one it can tie to a
+        #: publication label.
+        self.times: list[tuple[str, str, str]] = []
         #: (element text, aria-label/title, href or None) per anchor/button.
         self.controls: list[tuple[str, str, str | None]] = []
         self.text_parts: list[str] = []
@@ -600,7 +634,14 @@ class _LinkCollector(HTMLParser):
                 self.meta.setdefault(key.strip().lower(), content)
         elif name == "time":
             if (stamp := attributes.get("datetime", "").strip()):
-                self.times.append(stamp)
+                preceding = "".join(self.text_parts)[-160:]
+                self.times.append(
+                    (
+                        stamp,
+                        normalize_text(preceding),
+                        attributes.get("itemprop", "").strip().lower(),
+                    )
+                )
         elif name == "title":
             self._capture_title = True
             self._title_parts = []
@@ -875,6 +916,23 @@ STATE_UNPUBLISHED = "UNPUBLISHED"
 STATE_EXPIRED = "EXPIRED"
 STATE_UNKNOWN = "UNKNOWN"
 
+#: The words a site uses to say that a date is *the publication date*. They are
+#: what separates a date we may propose as a candidate from one we may not: a
+#: page can carry a deadline, a start date and a modification date, and a reader
+#: that took the first of them would attach an arbitrary one to the offer.
+PUBLICATION_LABELS = (
+    "publiée le",
+    "publiee le",
+    "publié le",
+    "publie le",
+    "date de publication",
+    "published on",
+    "date de parution",
+)
+
+#: `itemprop`/schema names that identify a `<time>` as the posting date itself.
+_PUBLICATION_ITEMPROPS = frozenset({"dateposted", "datepublished", "datecreated"})
+
 #: Case-insensitive text markers, French first because the site is Moroccan and
 #: francophone. Each maps to the state its wording actually supports.
 _STATE_MARKERS: tuple[tuple[str, str], ...] = (
@@ -890,13 +948,7 @@ _STATE_MARKERS: tuple[tuple[str, str], ...] = (
     ("non publiee", STATE_UNPUBLISHED),
     ("unpublished", STATE_UNPUBLISHED),
     ("en attente de validation", STATE_UNPUBLISHED),
-    ("publiée le", STATE_PUBLISHED),
-    ("publiee le", STATE_PUBLISHED),
-    ("publié le", STATE_PUBLISHED),
-    ("publie le", STATE_PUBLISHED),
-    ("published on", STATE_PUBLISHED),
-    ("date de publication", STATE_PUBLISHED),
-)
+) + tuple((label, STATE_PUBLISHED) for label in PUBLICATION_LABELS)
 
 #: The longest excerpt the report will carry for a state signal. Enough to show
 #: which words decided it; far too little to be a copy of the page.
@@ -1030,24 +1082,50 @@ def classify_date_candidate(value: object) -> DateCandidate:
 
 
 def publication_date_candidate(html: str) -> DateCandidate:
-    """Find the date the page presents as a publication date, and judge it.
+    """Find a date the page presents **as its publication date**, and judge it.
 
-    Reads, in order of how explicitly the page labels it: JSON-LD `datePosted`,
-    a `<time datetime>` value, then text following a publication label such as
-    "publiée le". A page that labels no date yields `UNKNOWN` — the numeric URL
-    ID is never consulted, and neither is anything about when we fetched it.
+    A date is only a candidate when the page says it is the publication date.
+    Three carriers qualify, in descending order of explicitness:
+
+    1. schema.org `JobPosting.datePosted`;
+    2. a `<time datetime>` whose own `itemprop` names it as the posting date, or
+       whose immediately preceding text carries a publication label;
+    3. text following an explicit label — "Publiée le", "Date de publication".
+
+    Two and three are the same evidence in two forms, and the machine-readable
+    one is preferred where a page offers both.
+
+    A **bare `<time>` does not qualify**, and this is the correction that
+    matters. An offer page routinely carries several dates — an application
+    deadline, an internship start date, a last-modified stamp — and taking the
+    first one on the page would attach an arbitrary date to the offer while
+    looking entirely principled. When no carrier ties a date to publication the
+    answer is `UNKNOWN`, and nothing fills it in: not a deadline, not a start
+    date, not a sitemap timestamp, not the crawl time, and nothing derived from
+    the numeric URL id.
     """
     posting = job_posting_node(html)
     if posting and (posted := normalize_text(posting.get("datePosted"))):
         return classify_date_candidate(posted)
+
     collector = _LinkCollector()
     collector.feed(html or "")
-    if collector.times:
-        return classify_date_candidate(collector.times[0])
+
+    # A `<time>` the page ties to publication is read before the label's own
+    # rendered text: "Publiée le <time datetime="2026-03-15">15 mars</time>"
+    # states the date twice, and the machine-readable half is the one that
+    # parses. Reading "15 mars" instead would flag a perfectly good date as
+    # malformed.
+    for stamp, preceding, itemprop in collector.times:
+        context = preceding.lower()
+        if itemprop in _PUBLICATION_ITEMPROPS or any(
+            label in context for label in PUBLICATION_LABELS
+        ):
+            return classify_date_candidate(stamp)
+
     text = collector.visible_text
     lowered = text.lower()
-    for label in ("publiée le", "publiee le", "publié le", "publie le",
-                  "date de publication", "published on"):
+    for label in PUBLICATION_LABELS:
         if label in lowered:
             index = lowered.index(label) + len(label)
             return classify_date_candidate(text[index : index + 40])

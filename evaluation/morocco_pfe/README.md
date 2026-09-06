@@ -594,12 +594,40 @@ per-field presence — never a page body, and descriptions by length only.
 
 The distinction this slice turns on. An audit that ran perfectly and found no
 usable discovery path is `COMPLETED` / exit 0 with a feasibility of
-`INSUFFICIENT_DISCOVERY`. What fails a run is being *refused* (`BARRIER`, exit 2)
-or being unable to read something required (`INCOMPLETE`, exit 1) — never the
-answer being disappointing. A negative feasibility result is a real result, and
-the vocabulary has words for it: `PUBLIC_HTML_CANDIDATE`, `SITEMAP_CANDIDATE`,
-`MULTI_SURFACE_CANDIDATE`, `INSUFFICIENT_DISCOVERY`, `STRUCTURE_INSUFFICIENT`,
-`ACCESS_BLOCKED`, `UNKNOWN`.
+`INSUFFICIENT_DISCOVERY` — never the answer being disappointing. A negative
+feasibility result is a real result, and the vocabulary has words for it:
+`PUBLIC_HTML_CANDIDATE`, `SITEMAP_CANDIDATE`, `MULTI_SURFACE_CANDIDATE`,
+`INSUFFICIENT_DISCOVERY`, `STRUCTURE_INSUFFICIENT`, `ACCESS_BLOCKED`, `UNKNOWN`.
+
+What fails a run, by one fixed precedence:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `BARRIER` | 2 | We were **refused** — 401/403/407/429, a CAPTCHA or bot challenge, a login wall, a prohibited off-domain redirect. |
+| `ROBOTS_DISALLOWED` | 3 | robots forbids a **required** target: a fixed discovery surface, a sitemap the official chain requires, or a selected live detail page. It is recorded and never fetched. |
+| `INCOMPLETE` | 1 | Something required could not be **read** — a timeout, a 5xx, a malformed document, or a sitemap budget that would have forced a partial read. |
+| `COMPLETED` | 0 | Everything required was honestly checked. |
+
+Three cases are deliberately kept apart rather than collapsed. A **5xx** is a
+server that failed, not a refusal, so it is `INCOMPLETE`. A **404/410** is a page
+that is gone: on a discovery surface or an offer page it is recorded as
+`PAGE_UNAVAILABLE` — a fact about the source's lifecycle, not our access, and the
+audit can still complete — but on a robots-declared sitemap it is a required
+document we could not read, so it is `INCOMPLETE`. A **benchmark canary** is
+optional fallback evidence: if robots forbids one it is recorded and skipped, and
+it never decides an otherwise complete run.
+
+### The sitemap budget is a refusal, not a truncation
+
+`MAX_SITEMAPS = 3` is a **global** document budget across the robots-declared
+roots *and* any children a sitemap index names. Traversal starts only at
+`Sitemap:` URLs robots declares and follows only children an official index we
+already read told us about — no filename is ever guessed. When robots declares
+more roots than the budget, or an index names more children than the budget has
+left, the audit **stops and reports itself incomplete** rather than reading the
+first few. Reading three of nine sitemaps and calling the result a sitemap audit
+is how a partial read comes to look complete, and no sitemap-based feasibility
+claim may rest on one.
 
 ### Benchmark canaries are not discovery
 
@@ -619,6 +647,14 @@ set renders as epoch zero far more often than any site admits, and storing it
 would put a 1970 timestamp on a 2026 internship. Nothing is fabricated to replace
 one — not the crawl time, not a sitemap timestamp, and nothing derived from the
 numeric URL id, which is never read as a date or as a position in time.
+
+A date is a candidate only when the page says it is *the publication date*:
+schema.org `JobPosting.datePosted`, an explicit label ("Publiée le", "Date de
+publication"), or a `<time datetime>` whose `itemprop` or immediately preceding
+text ties it to publication. A **bare `<time>` does not qualify** — an offer page
+routinely carries an application deadline, a start date and a last-modified
+stamp, and taking whichever came first would attach an arbitrary date to the
+offer while looking entirely principled.
 
 Publication state (`PUBLISHED` / `UNPUBLISHED` / `EXPIRED` / `UNKNOWN`) is taken
 only from the page's own words, never inferred from an HTTP status; expiry

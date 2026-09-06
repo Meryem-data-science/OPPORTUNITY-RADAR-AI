@@ -991,9 +991,12 @@ def test_an_unavailable_offer_page_is_a_lifecycle_finding_not_a_barrier() -> Non
     assert report["outcome"] == cli.OUTCOME_COMPLETED
     unavailable = [
         page for page in report["detail_sample"]["pages"]
-        if page.get("barrier") == "PAGE_UNAVAILABLE"
+        if page.get("page_state") == "PAGE_UNAVAILABLE"
     ]
     assert len(unavailable) == 1
+    # Recorded as a page state, never as an access barrier.
+    assert unavailable[0].get("barrier") is None
+    assert report["barriers"] == []
 
 
 @pytest.mark.parametrize(
@@ -1309,3 +1312,524 @@ def test_stagiaires_activation_is_untouched_by_this_slice() -> None:
 
     assert entry.integration_status == "ACTIVE"
     assert entry.production_source_id == "stagiaires_ma"
+
+
+# ====================================================================
+# Architect review — completion semantics
+# ====================================================================
+
+
+def sitemap_urlset(offer_ids: list[int]) -> str:
+    body = "".join(
+        f"<url><loc>{OFFER}/{number}-stage-synthetique-{number}</loc></url>"
+        for number in offer_ids
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{body}</urlset>"
+    )
+
+
+def sitemap_index(children: list[str]) -> str:
+    body = "".join(f"<sitemap><loc>{url}</loc></sitemap>" for url in children)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{body}</sitemapindex>"
+    )
+
+
+def robots_declaring(*sitemaps: str) -> str:
+    return ROBOTS_BODY + "\n" + "".join(f"Sitemap: {url}\n" for url in sitemaps)
+
+
+# ------------------------- 1. the sitemap bound refuses ---------------------
+
+
+def test_exactly_the_document_budget_may_be_audited() -> None:
+    urls = [f"{HOST}/sitemap-{n}.xml" for n in range(cli.MAX_SITEMAPS)]
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(*urls), "text/plain")
+    for index, url in enumerate(urls):
+        table[url] = (200, sitemap_urlset([7000 + index]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert report["sitemap"]["documents_read"] == cli.MAX_SITEMAPS
+    assert report["sitemap"]["complete"] is True
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+
+
+def test_more_root_declarations_than_the_budget_fails_closed() -> None:
+    """The finding: `same_host[:MAX_SITEMAPS]` made a partial read look whole."""
+    urls = [f"{HOST}/sitemap-{n}.xml" for n in range(cli.MAX_SITEMAPS + 1)]
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(*urls), "text/plain")
+    for url in urls:
+        table[url] = (200, sitemap_urlset([7001]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert "SITEMAP_DECLARATION_COUNT_EXCEEDS_BOUND" in report["incomplete_reasons"]
+    # Nothing truncated: not one of the declared documents was fetched.
+    assert not any(url in client.requested for url in urls)
+    assert report["sitemap"]["documents_read"] == 0
+    assert report["sitemap"]["complete"] is False
+    assert report["sitemap"]["offer_detail_urls_total"] == 0
+
+
+def test_the_document_budget_is_not_raised() -> None:
+    assert cli.MAX_SITEMAPS == 3
+
+
+# ---------------------- 2. bounded sitemap-index traversal ------------------
+
+
+def test_a_declared_index_leads_to_its_child_urlset() -> None:
+    child = f"{HOST}/sitemap-offres-1.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child]), "application/xml")
+    table[child] = (200, sitemap_urlset([7100, 7101]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert child in client.requested
+    assert report["sitemap"]["documents_read"] == 2
+    assert report["sitemap"]["offer_detail_urls_total"] == 2
+    assert report["sitemap"]["complete"] is True
+
+
+def test_child_offer_urls_count_only_when_the_child_was_actually_read() -> None:
+    """An index naming a child is not the same as having read the child."""
+    child = f"{HOST}/sitemap-offres-1.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child]), "application/xml")
+    client = _FakeClient(table, failing_url=child)
+
+    report = audit(client)
+
+    assert report["sitemap"]["offer_detail_urls_total"] == 0
+    assert report["sitemap"]["complete"] is False
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+
+
+def test_root_plus_nested_reads_never_exceed_the_global_budget() -> None:
+    children = [f"{HOST}/sitemap-offres-{n}.xml" for n in range(2)]
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index(children), "application/xml")
+    for index, url in enumerate(children):
+        table[url] = (200, sitemap_urlset([7200 + index]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    sitemap_gets = [item for item in client.requested if "sitemap" in item]
+    assert len(sitemap_gets) <= cli.MAX_SITEMAPS
+    assert report["sitemap"]["documents_read"] == 3
+
+
+def test_a_nested_sitemap_named_twice_is_read_once() -> None:
+    child = f"{HOST}/sitemap-offres-1.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child, child, f"{child}/"]), "application/xml")
+    table[child] = (200, sitemap_urlset([7300]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert client.requested.count(child) == 1
+    assert report["sitemap"]["complete"] is True
+
+
+def test_an_off_domain_nested_sitemap_is_never_fetched() -> None:
+    elsewhere = "https://cdn.example.com/sitemap-offres.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([elsewhere]), "application/xml")
+    client = _FakeClient(table)
+
+    audit(client)
+
+    assert not any("cdn.example.com" in item for item in client.requested)
+
+
+def test_a_robots_disallowed_nested_sitemap_is_never_fetched() -> None:
+    child = f"{HOST}/admin/sitemap-offres.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child]), "application/xml")
+    table[child] = (200, sitemap_urlset([7400]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert child not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert f"sitemap:{child}" in report["robots_disallowed_targets"]
+
+
+def test_more_children_than_the_remaining_budget_is_incomplete_not_partial() -> None:
+    """Reading the first few children and reporting their URLs would present a
+    fraction of the site's sitemap coverage as all of it."""
+    children = [f"{HOST}/sitemap-offres-{n}.xml" for n in range(4)]
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index(children), "application/xml")
+    for index, url in enumerate(children):
+        table[url] = (200, sitemap_urlset([7500 + index]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert any(
+        item.startswith("SITEMAP_INDEX_CHILDREN_EXCEED_BOUND")
+        for item in report["incomplete_reasons"]
+    )
+    assert not any(url in client.requested for url in children)
+    assert report["sitemap"]["complete"] is False
+    assert report["sitemap"]["coverage_note"].startswith("PARTIAL")
+
+
+def test_a_partial_sitemap_read_never_claims_complete_coverage() -> None:
+    child = f"{HOST}/sitemap-offres-1.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child]), "application/xml")
+    table[child] = (200, "<html>pas du XML</html>", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["sitemap"]["complete"] is False
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+
+
+# --------------------- 3. HTTP / page-state classification ------------------
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_a_missing_discovery_surface_is_a_page_state_not_a_barrier(status: int) -> None:
+    table = routes()
+    table[SURFACE_SPECIALTY] = (status, "page introuvable", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    surface = next(
+        item for item in report["surfaces"] if item["url"] == SURFACE_SPECIALTY
+    )
+    assert surface["page_state"] == "PAGE_UNAVAILABLE"
+    assert surface.get("barrier") is None
+    assert report["barriers"] == []
+    # The remaining surfaces still carried the audit to completion.
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_a_server_error_on_a_surface_is_incomplete_not_a_barrier(status: int) -> None:
+    table = routes()
+    table[SURFACE_LISTING] = (status, "", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert report["barriers"] == []
+
+
+def test_a_transport_failure_on_a_surface_is_incomplete() -> None:
+    report = audit(_FakeClient(routes(), failing_url=SURFACE_LISTING))
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+
+
+@pytest.mark.parametrize("status", [401, 403, 407, 429])
+def test_an_explicit_refusal_on_a_surface_is_a_barrier(status: int) -> None:
+    table = routes()
+    table[SURFACE_LISTING] = (status, "", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_a_declared_sitemap_that_is_gone_is_incomplete(status: int) -> None:
+    """A required document we could not read, unlike an expired offer page."""
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (status, "page introuvable", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert any("SITEMAP_UNREADABLE" in item for item in report["incomplete_reasons"])
+    assert report["barriers"] == []
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_a_missing_detail_page_is_a_lifecycle_observation(status: int) -> None:
+    table = routes_with_detail(detail_html())
+    table[f"{OFFER}/100-stage-synthetique-100"] = (status, "page introuvable", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["barriers"] == []
+    gone = [
+        page for page in report["detail_sample"]["pages"]
+        if page.get("page_state") == "PAGE_UNAVAILABLE"
+    ]
+    assert len(gone) == 1
+
+
+# ----------------------- 4. ROBOTS_DISALLOWED is an outcome -----------------
+
+
+def test_a_robots_disallowed_surface_produces_the_robots_outcome() -> None:
+    """The finding: the outcome and exit code existed but were never reached."""
+    table = routes()
+    table[ROBOTS_URL] = (
+        200, "User-agent: *\nDisallow: /specialites/\nAllow: /\n", "text/plain",
+    )
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert SURFACE_SPECIALTY not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert f"surface:{SURFACE_SPECIALTY}" in report["robots_disallowed_targets"]
+
+
+def test_a_robots_disallowed_required_sitemap_produces_the_robots_outcome() -> None:
+    forbidden = f"{HOST}/admin/sitemap.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(forbidden), "text/plain")
+    table[forbidden] = (200, sitemap_urlset([7600]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert forbidden not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+
+
+def test_a_robots_disallowed_live_detail_page_produces_the_robots_outcome() -> None:
+    table = routes()
+    table[ROBOTS_URL] = (
+        200,
+        "User-agent: *\nDisallow: /offres-stage/100-stage-synthetique-100\nAllow: /\n",
+        "text/plain",
+    )
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert f"{OFFER}/100-stage-synthetique-100" not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert any(
+        item.startswith("detail:") for item in report["robots_disallowed_targets"]
+    )
+
+
+def test_a_barrier_outranks_a_robots_disallowed_target() -> None:
+    """Fixed precedence: BARRIER > ROBOTS_DISALLOWED > INCOMPLETE > COMPLETED."""
+    table = routes()
+    table[ROBOTS_URL] = (
+        200, "User-agent: *\nDisallow: /specialites/\nAllow: /\n", "text/plain",
+    )
+    table[SURFACE_LISTING] = (403, "", "text/html")
+
+    report = audit(_FakeClient(table))
+
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    # Still recorded, just outranked.
+    assert report["robots_disallowed_targets"]
+
+
+def test_robots_disallowed_outranks_an_incomplete_reason() -> None:
+    table = routes()
+    table[ROBOTS_URL] = (
+        200, "User-agent: *\nDisallow: /specialites/\nAllow: /\n", "text/plain",
+    )
+    client = _FakeClient(table, failing_url=SURFACE_HOME)
+
+    report = audit(client)
+
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert report["incomplete_reasons"]
+
+
+def test_a_disallowed_benchmark_canary_alone_does_not_fail_the_run() -> None:
+    """A canary is optional fallback evidence, never a required target."""
+    table = routes()
+    for surface in SURFACE_URLS:
+        table[surface] = (200, JS_ONLY_HTML, "text/html")
+    table[ROBOTS_URL] = (
+        200, "User-agent: *\nDisallow: /offres-stage/\nAllow: /\n", "text/plain",
+    )
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    for url in BENCHMARK_CANARY_URLS:
+        assert url not in client.requested
+    # No live detail was selected, so nothing required was forbidden.
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["robots_disallowed_targets"] == []
+    canaries = [
+        page for page in report["detail_sample"]["pages"]
+        if page["discovery"] == DISCOVERY_CANARY
+    ]
+    assert canaries and all(page["barrier"] == "ROBOTS_DISALLOWED" for page in canaries)
+
+
+def test_every_outcome_and_exit_code_pair_stays_consistent() -> None:
+    pairs = {
+        cli.OUTCOME_COMPLETED: cli.EXIT_OK,
+        cli.OUTCOME_ROBOTS_DISALLOWED: cli.EXIT_ROBOTS_DISALLOWED,
+        cli.OUTCOME_INCOMPLETE: cli.EXIT_FAILURE,
+        cli.OUTCOME_BARRIER: cli.EXIT_BARRIER,
+    }
+    scenarios = [routes()]
+    disallowed = routes()
+    disallowed[ROBOTS_URL] = (
+        200, "User-agent: *\nDisallow: /specialites/\nAllow: /\n", "text/plain",
+    )
+    scenarios.append(disallowed)
+    refused = routes()
+    refused[SURFACE_LISTING] = (403, "", "text/html")
+    scenarios.append(refused)
+    broken = routes()
+    broken[SURFACE_LISTING] = (500, "", "text/html")
+    scenarios.append(broken)
+
+    for table in scenarios:
+        report = audit(_FakeClient(table))
+        assert pairs[report["outcome"]] == report["exit_code"], report["outcome"]
+
+
+# ------------------- 5. publication dates need publication evidence ---------
+
+
+def test_a_job_posting_date_posted_is_a_valid_candidate() -> None:
+    candidate = publication_date_candidate(detail_html(date_posted="2026-03-15"))
+
+    assert candidate.status == DATE_VALID_CANDIDATE
+    assert candidate.normalized == "2026-03-15"
+
+
+def test_an_explicitly_labelled_date_is_a_valid_candidate() -> None:
+    candidate = publication_date_candidate(
+        "<html><body><p>Publiée le 15/03/2026</p></body></html>"
+    )
+
+    assert candidate.status == DATE_VALID_CANDIDATE
+    assert candidate.normalized == "2026-03-15"
+
+
+def test_a_bare_time_element_is_not_a_publication_date() -> None:
+    """The finding: the first `<time>` on the page was taken as publication.
+
+    An offer page routinely carries several dates, and taking whichever came
+    first would attach an arbitrary one to the offer while looking principled.
+    """
+    candidate = publication_date_candidate(
+        '<html><body><time datetime="2026-03-15">15 mars</time></body></html>'
+    )
+
+    assert candidate.status == DATE_UNKNOWN
+    assert candidate.normalized is None
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Date limite de candidature",
+        "Début du stage",
+        "Dernière mise à jour",
+        "Date de l'événement",
+    ],
+)
+def test_a_time_element_for_another_kind_of_date_is_never_publication(label: str) -> None:
+    candidate = publication_date_candidate(
+        f'<html><body><p>{label} :</p>'
+        '<time datetime="2026-04-30">30 avril</time></body></html>'
+    )
+
+    assert candidate.status == DATE_UNKNOWN
+
+
+def test_a_time_element_the_page_ties_to_publication_is_accepted() -> None:
+    labelled = publication_date_candidate(
+        '<html><body><p>Publiée le</p>'
+        '<time datetime="2026-03-15">15 mars</time></body></html>'
+    )
+    by_itemprop = publication_date_candidate(
+        '<html><body><time itemprop="datePosted" datetime="2026-03-15">x</time></body></html>'
+    )
+
+    assert labelled.status == DATE_VALID_CANDIDATE
+    assert labelled.normalized == "2026-03-15"
+    assert by_itemprop.status == DATE_VALID_CANDIDATE
+
+
+def test_a_deadline_time_never_wins_over_an_absent_publication_date() -> None:
+    """Both dates present, only one labelled: the unlabelled one is ignored."""
+    candidate = publication_date_candidate(
+        '<html><body>'
+        '<p>Date limite :</p><time datetime="2026-04-30">30 avril</time>'
+        '<p>Publiée le</p><time datetime="2026-03-15">15 mars</time>'
+        "</body></html>"
+    )
+
+    assert candidate.normalized == "2026-03-15"
+
+
+@pytest.mark.parametrize("value", ["01/01/1970", "1970-01-01"])
+def test_a_labelled_epoch_date_remains_a_sentinel(value: str) -> None:
+    candidate = publication_date_candidate(
+        f"<html><body><p>Publiée le {value}</p></body></html>"
+    )
+
+    assert candidate.status == DATE_SENTINEL_OR_INVALID
+    assert candidate.as_dict()["is_published_at"] is False
+
+
+def test_a_malformed_explicit_publication_date_stays_invalid() -> None:
+    candidate = publication_date_candidate(
+        "<html><body><p>Date de publication : 32/13/2026</p></body></html>"
+    )
+
+    assert candidate.status == DATE_SENTINEL_OR_INVALID
+    assert candidate.normalized is None
+
+
+def test_no_date_is_ever_fabricated_when_the_page_states_none() -> None:
+    candidate = publication_date_candidate(
+        detail_html(date_posted=None, state_text="Une offre sans date")
+    )
+
+    assert candidate.status == DATE_UNKNOWN
+    assert candidate.raw is None
+    assert candidate.normalized is None

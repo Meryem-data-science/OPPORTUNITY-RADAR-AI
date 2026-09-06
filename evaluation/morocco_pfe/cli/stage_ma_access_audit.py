@@ -92,11 +92,14 @@ from evaluation.morocco_pfe.stage_ma_access import (
     StageMaAccessError,
     application_evidence,
     canonical_url,
+    ISSUE_BARRIER,
+    ISSUE_UNAVAILABLE,
+    ISSUE_UNREADABLE,
+    classify_response,
     classify_robots_response,
     collect_surface_links,
     derive_feasibility,
     detail_field_evidence,
-    detect_access_barrier,
     detect_publication_state,
     is_stage_ma_host,
     looks_browser_rendered,
@@ -137,21 +140,34 @@ OUTCOME_ROBOTS_DISALLOWED = "ROBOTS_DISALLOWED"
 
 
 def _finalize(
-    report: dict[str, Any], *, barriers: list[str], incomplete_reasons: list[str]
+    report: dict[str, Any],
+    *,
+    barriers: list[str],
+    incomplete_reasons: list[str],
+    robots_disallowed: list[str] | None = None,
 ) -> dict[str, Any]:
     """Set the one execution outcome/exit pair, by a single fixed precedence.
+
+    `BARRIER > ROBOTS_DISALLOWED > INCOMPLETE > COMPLETED`. Being refused
+    outranks being forbidden, because a wall tells us the site is turning us
+    away; being forbidden outranks not knowing, because robots is a rule we
+    chose to obey and the run genuinely did not audit what it set out to.
 
     Execution status is **not** the feasibility verdict, and this is where the
     two are kept apart: an audit that ran cleanly and found nothing usable ends
     `COMPLETED` / exit 0 with a feasibility of `INSUFFICIENT_DISCOVERY`. What
-    fails a run is being refused or being unable to read something required —
-    never the answer being disappointing.
+    fails a run is being refused, being forbidden, or being unable to read
+    something required — never the answer being disappointing.
     """
     report["barriers"] = sorted(set(barriers))
+    report["robots_disallowed_targets"] = sorted(set(robots_disallowed or []))
     report["incomplete_reasons"] = sorted(set(incomplete_reasons))
     if report["barriers"]:
         report["outcome"] = OUTCOME_BARRIER
         report["exit_code"] = EXIT_BARRIER
+    elif report["robots_disallowed_targets"]:
+        report["outcome"] = OUTCOME_ROBOTS_DISALLOWED
+        report["exit_code"] = EXIT_ROBOTS_DISALLOWED
     elif report["incomplete_reasons"]:
         report["outcome"] = OUTCOME_INCOMPLETE
         report["exit_code"] = EXIT_FAILURE
@@ -264,8 +280,10 @@ def _fetch(
         row["redirect_chain"] = list(chain)
     if response is None:
         row["error"] = error
+        row["issue"] = {"kind": ISSUE_UNREADABLE, "code": error or "UNREADABLE"}
         if barrier:
             row["barrier"] = barrier
+            row["issue"] = {"kind": ISSUE_BARRIER, "code": barrier}
         return row, None
     body = response.text
     row["status_code"] = response.status_code
@@ -277,9 +295,24 @@ def _fetch(
         row["redirect_target"] = chain[-1]
         row["redirect_target_host"] = urlsplit(chain[-1]).hostname
         return row, None
-    row["barrier"] = barrier or detect_access_barrier(
-        response.status_code, row["final_url"], body
-    )
+    if barrier:
+        row["barrier"] = barrier
+        row["issue"] = {"kind": ISSUE_BARRIER, "code": barrier}
+        return row, body
+    issue = classify_response(response.status_code, row["final_url"], body)
+    if issue is not None:
+        # The *kind* travels with the row so the caller can judge by context: a
+        # 404 means something different on a discovery surface, on a declared
+        # sitemap, and on an offer page, and only the caller knows which it has.
+        row["issue"] = issue.as_dict()
+        if issue.kind == ISSUE_BARRIER:
+            row["barrier"] = issue.code
+        else:
+            row["unavailable" if issue.kind == ISSUE_UNAVAILABLE else "error"] = (
+                issue.code
+            )
+        if issue.kind != ISSUE_UNAVAILABLE:
+            return row, None
     return row, body
 
 
@@ -379,10 +412,14 @@ def run(
     }
     barriers: list[str] = []
     incomplete: list[str] = []
+    robots_disallowed: list[str] = []
     try:
         # --- robots.txt, fetched once, and its status policy ---------------
         robots_row, robots_body = _fetch(active, ROBOTS_URL, timeout)
-        if robots_body is None:
+        if robots_row.get("status_code") is None:
+            # We never reached the file at all — a timeout or a transport
+            # failure. That is not a refusal and not permission: we simply do
+            # not know what robots says, so the audit is incomplete.
             report["robots"] = {"available": False, **robots_row}
             report["feasibility"] = "UNKNOWN"
             report["terms_review"] = _audit_terms(
@@ -390,18 +427,21 @@ def run(
             )
             return _finalize(
                 report,
-                barriers=[str(robots_row["barrier"])] if robots_row.get("barrier") else [],
-                incomplete_reasons=[f"ROBOTS_UNREACHABLE:{robots_row.get('error')}"]
-                if not robots_row.get("barrier")
-                else [],
+                barriers=[],
+                incomplete_reasons=[f"ROBOTS_UNREACHABLE:{robots_row.get('error')}"],
             )
 
+        # Classified from the status even when the body was withheld: a response
+        # that refused us has a wall page for a body, and there is nothing in it
+        # worth reading.
         disposition = classify_robots_response(
-            int(robots_row["status_code"]), str(robots_row["final_url"]), robots_body
+            int(robots_row["status_code"]),
+            str(robots_row.get("final_url") or ROBOTS_URL),
+            robots_body or "",
         )
         enforced = disposition.disposition == ROBOTS_OBEY
-        groups = parse_robots_txt(robots_body) if enforced else ()
-        declarations = sitemap_declarations(robots_body) if enforced else ()
+        groups = parse_robots_txt(robots_body or "") if enforced else ()
+        declarations = sitemap_declarations(robots_body or "") if enforced else ()
         report["robots"] = {
             **robots_row,
             "available": enforced,
@@ -444,23 +484,29 @@ def run(
             verdict = robots_verdict(groups, surface_url)
             entry["robots_verdict"] = verdict.as_dict()
             if enforced and not verdict.allowed:
-                # Recorded, not fetched: a disallowed surface is a finding about
-                # what the site permits, not a wall to work around.
+                # A required audit target the site forbids: recorded, never
+                # fetched, and surfaced at the top level rather than skipped.
                 entry["barrier"] = "ROBOTS_DISALLOWED"
+                robots_disallowed.append(f"surface:{surface_url}")
                 surfaces.append(entry)
                 continue
             time.sleep(max(delay, 0.0))
             row, body = _fetch(active, surface_url, timeout, allows=allows)
             entry.update(row)
-            if body is None:
-                if row.get("barrier"):
-                    barriers.append(str(row["barrier"]))
-                else:
-                    incomplete.append(f"SURFACE_UNREADABLE:{surface_url}")
+            kind = (row.get("issue") or {}).get("kind")
+            if kind == ISSUE_BARRIER:
+                barriers.append(str(row.get("barrier")))
                 surfaces.append(entry)
                 continue
-            if row.get("barrier"):
-                barriers.append(str(row["barrier"]))
+            if kind == ISSUE_UNAVAILABLE:
+                # A discovery surface that is gone is a fact about the site's
+                # structure, not about our access, and the audit can still
+                # complete on the surfaces that remain.
+                entry["page_state"] = "PAGE_UNAVAILABLE"
+                surfaces.append(entry)
+                continue
+            if body is None or kind == ISSUE_UNREADABLE:
+                incomplete.append(f"SURFACE_UNREADABLE:{surface_url}")
                 surfaces.append(entry)
                 continue
             links = collect_surface_links(body, row.get("final_url") or surface_url)
@@ -485,6 +531,7 @@ def run(
             enforced=enforced,
             barriers=barriers,
             incomplete=incomplete,
+            robots_disallowed=robots_disallowed,
         )
         sitemap_offers = report["sitemap"]["offer_detail_urls_total"]
         discovered.extend(report["sitemap"]["offer_url_pool"])
@@ -509,17 +556,30 @@ def run(
             entry: dict[str, Any] = {"url": url, "discovery": discovery}
             if enforced and not robots_verdict(groups, url).allowed:
                 entry["barrier"] = "ROBOTS_DISALLOWED"
+                if discovery == DISCOVERY_LIVE:
+                    # A live-discovered page is part of the bounded detail audit
+                    # this run set out to do; a canary is optional fallback
+                    # evidence and never decides the run's outcome on its own.
+                    robots_disallowed.append(f"detail:{url}")
                 sampled.append(entry)
                 continue
             time.sleep(max(delay, 0.0))
             row, body = _fetch(active, url, timeout, allows=allows)
             entry.update(row)
-            if body is None or row.get("barrier"):
-                if row.get("barrier"):
-                    # An unavailable offer page is a lifecycle finding, not a
-                    # refusal, and must not fail the audit.
-                    if row["barrier"] != "PAGE_UNAVAILABLE":
-                        barriers.append(str(row["barrier"]))
+            kind = (row.get("issue") or {}).get("kind")
+            if kind == ISSUE_BARRIER:
+                barriers.append(str(row.get("barrier")))
+                sampled.append(entry)
+                continue
+            if kind == ISSUE_UNAVAILABLE:
+                # An offer that has been taken down is a lifecycle observation
+                # about the source, not a refusal, and never fails the audit.
+                entry["page_state"] = "PAGE_UNAVAILABLE"
+                sampled.append(entry)
+                continue
+            if body is None or kind == ISSUE_UNREADABLE:
+                if discovery == DISCOVERY_LIVE:
+                    incomplete.append(f"DETAIL_UNREADABLE:{url}")
                 sampled.append(entry)
                 continue
             entry.update(_describe_detail(body, url, discovery))
@@ -568,7 +628,12 @@ def run(
             "Evidence for the Architect, not a Phase 7C.5B decision. A completed "
             "audit may legitimately report that this source is not usable."
         )
-        return _finalize(report, barriers=barriers, incomplete_reasons=incomplete)
+        return _finalize(
+            report,
+            barriers=barriers,
+            incomplete_reasons=incomplete,
+            robots_disallowed=robots_disallowed,
+        )
     finally:
         if owns_client:
             active.close()
@@ -584,62 +649,146 @@ def _audit_sitemaps(
     enforced: bool,
     barriers: list[str],
     incomplete: list[str],
+    robots_disallowed: list[str],
 ) -> dict[str, Any]:
-    """Read only the sitemaps robots itself declares, and say so when it declares none.
+    """Walk the official sitemap chain within one global document budget.
 
-    No filename is guessed. Treating a lucky 200 on a name we invented as an
-    official discovery contract is precisely the fabrication this layer exists to
-    prevent, so "robots declared no sitemap" is recorded as the finding it is.
+    Two rules make this honest rather than merely bounded.
+
+    **No filename is guessed.** Traversal starts only at `Sitemap:` URLs robots
+    itself declares, and continues only into children an official index we
+    already read told us about. Treating a lucky 200 on a name we invented as a
+    discovery contract is the fabrication this layer exists to prevent, so
+    "robots declared no sitemap" is recorded as the finding it is.
+
+    **The budget is a refusal, not a truncation.** `MAX_SITEMAPS` is a global
+    budget across roots *and* nested documents. When robots declares more roots
+    than that, or when an index reveals more children than the remaining budget
+    can honestly inspect, the audit stops and reports itself incomplete rather
+    than reading the first few and presenting their offer URLs as the site's.
+    Reading three of nine sitemaps and calling the result a sitemap audit is how
+    a partial read comes to look complete.
     """
     same_host = [item for item in declarations if is_stage_ma_host(item)]
+    seen: set[str] = set()
+    roots: list[str] = []
+    for item in same_host:
+        try:
+            resolved = canonical_url(item)
+        except StageMaAccessError:
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(resolved)
+
     report: dict[str, Any] = {
         "declared_by_robots": list(declarations),
         "same_host_declarations": same_host,
+        "same_host_root_documents": len(roots),
         "off_domain_declarations_ignored": len(declarations) - len(same_host),
         "guessed_any_url": False,
+        "document_budget": MAX_SITEMAPS,
+        "documents_read": 0,
         "documents": [],
+        "complete": True,
         "offer_detail_urls_total": 0,
         "offer_url_pool": [],
     }
-    if not same_host:
+    if not roots:
         report["note"] = (
             "robots.txt declares no same-host sitemap. No filename was guessed, "
             "so this audit has no official sitemap to read for this source."
         )
         return report
+
+    if len(roots) > MAX_SITEMAPS:
+        # Refused before a single document is fetched: any subset we read would
+        # be a partial view of the site's sitemap coverage, and no
+        # sitemap-based feasibility claim may rest on it.
+        report["complete"] = False
+        report["note"] = (
+            f"robots.txt declares {len(roots)} same-host sitemap documents, above "
+            f"the audit's global budget of {MAX_SITEMAPS}. No sitemap was fetched: "
+            "a truncated subset would misrepresent the site's sitemap coverage."
+        )
+        incomplete.append("SITEMAP_DECLARATION_COUNT_EXCEEDS_BOUND")
+        return report
+
     pool: list[str] = []
-    for sitemap_url in same_host[:MAX_SITEMAPS]:
+    queue: list[str] = list(roots)
+    budget = MAX_SITEMAPS
+    while queue and budget > 0:
+        sitemap_url = queue.pop(0)
         entry: dict[str, Any] = {"url": sitemap_url}
         if enforced and not allows(sitemap_url):
+            # A document the official chain requires and robots forbids: recorded
+            # and never fetched, and the run says so at the top level.
             entry["barrier"] = "ROBOTS_DISALLOWED"
+            robots_disallowed.append(f"sitemap:{sitemap_url}")
+            report["complete"] = False
             report["documents"].append(entry)
             continue
         time.sleep(max(delay, 0.0))
         row, body = _fetch(client, sitemap_url, timeout, allows=allows)
         entry.update(row)
-        if body is None or row.get("barrier"):
-            if row.get("barrier"):
-                barriers.append(str(row["barrier"]))
+        budget -= 1
+        report["documents_read"] += 1
+        kind = (row.get("issue") or {}).get("kind")
+        if body is None or kind is not None:
+            report["complete"] = False
+            if kind == ISSUE_BARRIER:
+                barriers.append(str(row.get("barrier")))
             else:
+                # Includes 404/410: a declared sitemap that is gone is still a
+                # required document we could not read, which is different from
+                # an offer page that has simply expired.
                 incomplete.append(f"SITEMAP_UNREADABLE:{sitemap_url}")
             report["documents"].append(entry)
             continue
         try:
             parsed = parse_sitemap_document(body, sitemap_url)
         except StageMaAccessError as error:
-            # A declared sitemap we cannot parse leaves the audit incomplete: it
-            # is a required document the site pointed us at, and reporting zero
-            # URLs from it would look like an observation.
             entry["error"] = f"SITEMAP_UNPARSABLE: {error}"
             incomplete.append(f"SITEMAP_UNPARSABLE:{sitemap_url}")
+            report["complete"] = False
             report["documents"].append(entry)
             continue
         entry.update(parsed.as_dict())
         report["documents"].append(entry)
         pool.extend(parsed.offer_urls)
-    report["skipped_beyond_bound"] = max(len(same_host) - MAX_SITEMAPS, 0)
+
+        children = [url for url in parsed.nested_sitemaps if url not in seen]
+        if children:
+            entry["nested_children_declared"] = len(children)
+            if len(children) > budget:
+                # The index points at more of the site than we may read. Stop
+                # here: inspecting the first few and reporting their URLs would
+                # present a fraction of the site's sitemap coverage as all of it.
+                report["complete"] = False
+                report["note"] = (
+                    f"a sitemap index at {sitemap_url} declares {len(children)} "
+                    f"same-host child documents, more than the {budget} remaining "
+                    "in the audit's global budget; traversal stopped rather than "
+                    "inspecting a subset."
+                )
+                incomplete.append(
+                    f"SITEMAP_INDEX_CHILDREN_EXCEED_BOUND:{sitemap_url}"
+                )
+                break
+            seen.update(children)
+            queue.extend(children)
+
+    report["unread_queued_documents"] = len(queue)
+    if queue:
+        report["complete"] = False
     report["offer_detail_urls_total"] = len(set(pool))
     report["offer_url_pool"] = sorted(set(pool))
+    if not report["complete"]:
+        report["coverage_note"] = (
+            "PARTIAL: this audit did not read every sitemap document the "
+            "official chain declares, so these URLs are a lower bound and no "
+            "sitemap-based feasibility claim rests on them."
+        )
     return report
 
 
