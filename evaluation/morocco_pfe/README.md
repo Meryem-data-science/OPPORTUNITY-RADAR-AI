@@ -604,8 +604,8 @@ What fails a run, by one fixed precedence:
 | Outcome | Exit | Meaning |
 |---|---|---|
 | `BARRIER` | 2 | We were **refused** — 401/403/407/429, a CAPTCHA or bot challenge, a login wall, a prohibited off-domain redirect. |
-| `ROBOTS_DISALLOWED` | 3 | robots forbids a **required** target: a fixed discovery surface, a sitemap the official chain requires, or a selected live detail page. It is recorded and never fetched. |
-| `INCOMPLETE` | 1 | Something required could not be **read** — a timeout, a 5xx, a malformed document, or a sitemap budget that would have forced a partial read. |
+| `ROBOTS_DISALLOWED` | 3 | robots forbids a **required** target: a fixed discovery surface, a sitemap the official chain requires, or a selected live detail page — including one reached only via a redirect. It is recorded and never fetched. |
+| `INCOMPLETE` | 1 | Something required could not be **read** — a timeout, a 5xx, a malformed document, a redirect loop that never settled, or a sitemap budget that would have forced a partial read. |
 | `COMPLETED` | 0 | Everything required was honestly checked. |
 
 Three cases are deliberately kept apart rather than collapsed. A **5xx** is a
@@ -628,6 +628,20 @@ left, the audit **stops and reports itself incomplete** rather than reading the
 first few. Reading three of nine sitemaps and calling the result a sitemap audit
 is how a partial read comes to look complete, and no sitemap-based feasibility
 claim may rest on one.
+
+Partial evidence is also **quarantined**, not merely labelled. When the chain is
+incomplete, the offer URLs the documents we *did* read yielded stay in the report
+as structural evidence — and contribute nothing: they do not enter discovery, do
+not become detail-sampling targets, and do not support a sitemap-based
+feasibility verdict. Observing a URL is not covering a source, and letting the
+observation through one layer up would rebuild exactly the
+partial-looks-complete failure the budget exists to prevent.
+
+Sitemap URLs are also normalized for **fetching** rather than for identity, so
+`?part=1` and `?part=2` stay two documents. Stripping the query would request a
+URL the site never declared, fetch one file twice and silently lose the other.
+Offer URLs keep the identity normalization, which does drop the query — the two
+answer different questions.
 
 ### Benchmark canaries are not discovery
 

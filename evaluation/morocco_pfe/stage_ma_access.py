@@ -449,6 +449,12 @@ ISSUE_BARRIER = "BARRIER"
 ISSUE_UNREADABLE = "UNREADABLE"
 ISSUE_UNAVAILABLE = "UNAVAILABLE"
 
+#: A fourth kind, for the one case that is neither a wall nor a failure: robots
+#: told us not to. Being forbidden by a rule we chose to obey is not the site
+#: refusing us and not an inability to read — it deserves its own outcome, and
+#: collapsing it into either of the others loses which of the three happened.
+ISSUE_ROBOTS_DISALLOWED = "ROBOTS_DISALLOWED"
+
 
 @dataclass(frozen=True)
 class ResponseIssue:
@@ -521,6 +527,41 @@ def canonical_url(url: str) -> str:
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/") or "/"
     return urlunsplit((parts.scheme.lower(), host, path, "", ""))
+
+
+def fetch_url(url: str) -> str:
+    """Normalize a URL for **fetching**, preserving its query exactly.
+
+    `canonical_url` answers "which offer is this?" and drops the query, because
+    a tracking parameter does not make a different internship. That is the wrong
+    question for a document we are about to request:
+
+        /sitemap.xml?part=1
+        /sitemap.xml?part=2
+
+    are two different official documents, and collapsing them to `/sitemap.xml`
+    would fetch one file twice, silently lose the other, and — worse — request a
+    URL the site never declared. Anything the audit puts on the wire goes
+    through here: scheme and host lowercased, default port and fragment dropped,
+    a trailing slash trimmed, and the **query left byte-for-byte as declared**.
+
+    It is also what robots is checked against, so `Disallow: /*?part=2` is
+    evaluated against the URL we would really request.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise StageMaAccessError("URL must be a non-empty string")
+    parts = urlsplit(url.strip())
+    if parts.scheme.lower() not in {"http", "https"}:
+        raise StageMaAccessError(f"not an http(s) URL: {url!r}")
+    host = (parts.hostname or "").lower()
+    if not host:
+        raise StageMaAccessError(f"URL has no host: {url!r}")
+    if parts.port and parts.port not in {80, 443}:
+        host = f"{host}:{parts.port}"
+    path = parts.path or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.lower(), host, path, parts.query, ""))
 
 
 def is_stage_ma_host(url: str) -> bool:
@@ -883,8 +924,16 @@ def parse_sitemap_document(xml_text: str, base_url: str) -> SitemapParse:
         )
         if not raw:
             continue
+        absolute = urljoin(base_url, raw)
         try:
-            resolved = canonical_url(urljoin(base_url, raw))
+            # Two normalizations, deliberately: a nested sitemap is something we
+            # will *request*, so it keeps its query; an offer URL is an
+            # *identity*, so it does not.
+            resolved = (
+                fetch_url(absolute)
+                if _local_name(node.tag) == "sitemap"
+                else canonical_url(absolute)
+            )
         except StageMaAccessError:
             continue
         if not is_stage_ma_host(resolved):

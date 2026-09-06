@@ -92,7 +92,9 @@ from evaluation.morocco_pfe.stage_ma_access import (
     StageMaAccessError,
     application_evidence,
     canonical_url,
+    fetch_url,
     ISSUE_BARRIER,
+    ISSUE_ROBOTS_DISALLOWED,
     ISSUE_UNAVAILABLE,
     ISSUE_UNREADABLE,
     classify_response,
@@ -279,11 +281,12 @@ def _fetch(
     if chain:
         row["redirect_chain"] = list(chain)
     if response is None:
-        row["error"] = error
-        row["issue"] = {"kind": ISSUE_UNREADABLE, "code": error or "UNREADABLE"}
-        if barrier:
-            row["barrier"] = barrier
-            row["issue"] = {"kind": ISSUE_BARRIER, "code": barrier}
+        # A redirect chain we could not resolve is a technical inability to
+        # reach a required page, not a refusal: nobody turned us away, the
+        # redirects simply never settled.
+        code = barrier or error or "UNREADABLE"
+        row["error"] = code
+        row["issue"] = {"kind": ISSUE_UNREADABLE, "code": code}
         return row, None
     body = response.text
     row["status_code"] = response.status_code
@@ -291,7 +294,20 @@ def _fetch(
     row["content_type"] = response.headers.get("content-type")
     row["body_bytes"] = len(response.content)
     if barrier in _REFUSED_REDIRECTS:
+        # Both refusals are policy decisions, not failures to read — and they
+        # are *different* policies, so they carry different kinds. An off-domain
+        # Location is a prohibited redirect (a barrier); a same-host one robots
+        # forbids is a robots refusal. Leaving the kind off made a caller read
+        # either as merely unreadable.
         row["barrier"] = barrier
+        row["issue"] = {
+            "kind": (
+                ISSUE_ROBOTS_DISALLOWED
+                if barrier == ROBOTS_DISALLOWED_REDIRECT
+                else ISSUE_BARRIER
+            ),
+            "code": barrier,
+        }
         row["redirect_target"] = chain[-1]
         row["redirect_target_host"] = urlsplit(chain[-1]).hostname
         return row, None
@@ -498,6 +514,10 @@ def run(
                 barriers.append(str(row.get("barrier")))
                 surfaces.append(entry)
                 continue
+            if kind == ISSUE_ROBOTS_DISALLOWED:
+                robots_disallowed.append(f"surface-redirect:{surface_url}")
+                surfaces.append(entry)
+                continue
             if kind == ISSUE_UNAVAILABLE:
                 # A discovery surface that is gone is a fact about the site's
                 # structure, not about our access, and the audit can still
@@ -533,8 +553,29 @@ def run(
             incomplete=incomplete,
             robots_disallowed=robots_disallowed,
         )
-        sitemap_offers = report["sitemap"]["offer_detail_urls_total"]
-        discovered.extend(report["sitemap"]["offer_url_pool"])
+        # Observed evidence is not trusted evidence. An incomplete sitemap chain
+        # can still have yielded real offer URLs from the documents we did read,
+        # and they stay in the report as structural evidence — but they are a
+        # lower bound from coverage we know is partial, so they may not feed
+        # discovery, may not become detail targets, and may not support a
+        # sitemap-based feasibility verdict. Letting them through would rebuild,
+        # one layer up, exactly the partial-looks-complete failure the bound
+        # exists to prevent.
+        sitemap_report = report["sitemap"]
+        sitemap_trusted = bool(sitemap_report.get("complete"))
+        trusted_pool = list(sitemap_report["offer_url_pool"]) if sitemap_trusted else []
+        sitemap_offers = len(trusted_pool)
+        sitemap_report["trusted_for_discovery"] = sitemap_trusted
+        sitemap_report["offer_urls_observed"] = sitemap_report["offer_detail_urls_total"]
+        sitemap_report["offer_urls_contributed_to_discovery"] = len(trusted_pool)
+        if not sitemap_trusted:
+            sitemap_report["evidence_note"] = (
+                "OBSERVED BUT NOT TRUSTED: these offer URLs came from an "
+                "incomplete sitemap read. They are retained as structural "
+                "evidence and are deliberately excluded from discovery, from "
+                "detail sampling and from the feasibility verdict."
+            )
+        discovered.extend(trusted_pool)
 
         # --- the bounded detail sample --------------------------------------
         live_targets = select_detail_targets(tuple(discovered), detail_limit)
@@ -569,6 +610,11 @@ def run(
             kind = (row.get("issue") or {}).get("kind")
             if kind == ISSUE_BARRIER:
                 barriers.append(str(row.get("barrier")))
+                sampled.append(entry)
+                continue
+            if kind == ISSUE_ROBOTS_DISALLOWED:
+                if discovery == DISCOVERY_LIVE:
+                    robots_disallowed.append(f"detail-redirect:{url}")
                 sampled.append(entry)
                 continue
             if kind == ISSUE_UNAVAILABLE:
@@ -674,7 +720,9 @@ def _audit_sitemaps(
     roots: list[str] = []
     for item in same_host:
         try:
-            resolved = canonical_url(item)
+            # Fetch normalization, not identity: `?part=1` and `?part=2` are two
+            # official documents and must stay two.
+            resolved = fetch_url(item)
         except StageMaAccessError:
             continue
         if resolved not in seen:
@@ -738,6 +786,8 @@ def _audit_sitemaps(
             report["complete"] = False
             if kind == ISSUE_BARRIER:
                 barriers.append(str(row.get("barrier")))
+            elif kind == ISSUE_ROBOTS_DISALLOWED:
+                robots_disallowed.append(f"sitemap-redirect:{sitemap_url}")
             else:
                 # Includes 404/410: a declared sitemap that is gone is still a
                 # required document we could not read, which is different from

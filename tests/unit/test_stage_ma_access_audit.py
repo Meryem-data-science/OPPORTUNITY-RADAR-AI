@@ -65,6 +65,7 @@ from evaluation.morocco_pfe.stage_ma_access import (
     detail_field_evidence,
     detect_publication_state,
     extract_candidate_id,
+    fetch_url,
     is_offer_detail_url,
     is_specialty_url,
     is_stage_ma_host,
@@ -1833,3 +1834,347 @@ def test_no_date_is_ever_fabricated_when_the_page_states_none() -> None:
     assert candidate.status == DATE_UNKNOWN
     assert candidate.raw is None
     assert candidate.normalized is None
+
+
+# ====================================================================
+# Architect review — remaining evidence gaps
+# ====================================================================
+
+# ---------- 1. partial sitemap evidence never reaches discovery -------------
+
+
+def partially_read_sitemap_routes(*, surfaces_expose_offers: bool) -> dict:
+    """Two declared roots: the first parses with offers, the second is gone.
+
+    The chain is therefore incomplete *and* has genuinely observed offer URLs —
+    the case where letting observation pass for coverage would do real damage.
+    """
+    first, second = f"{HOST}/sitemap-1.xml", f"{HOST}/sitemap-2.xml"
+    table = routes()
+    if not surfaces_expose_offers:
+        for surface in SURFACE_URLS:
+            table[surface] = (200, JS_ONLY_HTML, "text/html")
+        for url in BENCHMARK_CANARY_URLS:
+            table[url] = (200, detail_html(), "text/html")
+    else:
+        table[SURFACE_HOME] = (200, JS_ONLY_HTML, "text/html")
+        table[SURFACE_SPECIALTY] = (200, JS_ONLY_HTML, "text/html")
+    table[ROBOTS_URL] = (200, robots_declaring(first, second), "text/plain")
+    table[first] = (200, sitemap_urlset([7101, 7102]), "application/xml")
+    table[second] = (404, "page introuvable", "text/html")
+    for number in (7101, 7102):
+        table[f"{OFFER}/{number}-stage-synthetique-{number}"] = (
+            200, detail_html(), "text/html",
+        )
+    return table
+
+
+def test_partial_sitemap_urls_are_retained_but_not_trusted() -> None:
+    """Observed is not trusted. The report keeps both facts, distinctly."""
+    report = audit(_FakeClient(partially_read_sitemap_routes(surfaces_expose_offers=False)))
+    sitemap = report["sitemap"]
+
+    assert sitemap["complete"] is False
+    assert sitemap["trusted_for_discovery"] is False
+    # The evidence survives...
+    assert sitemap["offer_urls_observed"] == 2
+    assert len(sitemap["offer_url_pool"]) == 2
+    # ...and is kept out of everything that would treat it as coverage.
+    assert sitemap["offer_urls_contributed_to_discovery"] == 0
+    assert sitemap["evidence_note"].startswith("OBSERVED BUT NOT TRUSTED")
+    assert report["discovery"]["sitemap_offer_urls"] == 0
+
+
+def test_an_incomplete_sitemap_can_never_yield_sitemap_candidate() -> None:
+    report = audit(_FakeClient(partially_read_sitemap_routes(surfaces_expose_offers=False)))
+
+    assert report["feasibility"] != FEASIBILITY_SITEMAP
+    assert report["feasibility"] == FEASIBILITY_INSUFFICIENT_DISCOVERY
+
+
+def test_an_incomplete_sitemap_with_one_html_surface_is_not_multi_surface() -> None:
+    """One real surface is one surface, whatever a partial sitemap also saw."""
+    report = audit(_FakeClient(partially_read_sitemap_routes(surfaces_expose_offers=True)))
+
+    assert report["feasibility"] == FEASIBILITY_PUBLIC_HTML
+    assert report["feasibility"] != FEASIBILITY_MULTI_SURFACE
+    assert report["sitemap"]["offer_urls_observed"] == 2
+    assert report["discovery"]["sitemap_offer_urls"] == 0
+
+
+def test_no_detail_page_is_fetched_from_untrusted_sitemap_coverage() -> None:
+    client = _FakeClient(partially_read_sitemap_routes(surfaces_expose_offers=False))
+
+    audit(client)
+
+    for number in (7101, 7102):
+        assert f"{OFFER}/{number}-stage-synthetique-{number}" not in client.requested
+
+
+def test_a_complete_sitemap_still_contributes_its_urls() -> None:
+    """The isolation must not disable the healthy path."""
+    table = routes()
+    for surface in SURFACE_URLS:
+        table[surface] = (200, JS_ONLY_HTML, "text/html")
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_urlset([7201, 7202]), "application/xml")
+    for number in (7201, 7202):
+        table[f"{OFFER}/{number}-stage-synthetique-{number}"] = (
+            200, detail_html(), "text/html",
+        )
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert report["sitemap"]["trusted_for_discovery"] is True
+    assert report["sitemap"]["offer_urls_contributed_to_discovery"] == 2
+    assert report["discovery"]["sitemap_offer_urls"] == 2
+    assert report["feasibility"] == FEASIBILITY_SITEMAP
+    assert f"{OFFER}/7201-stage-synthetique-7201" in client.requested
+
+
+# --------------------- 2. redirect policy outcomes --------------------------
+
+
+def test_an_off_domain_surface_redirect_is_a_barrier() -> None:
+    elsewhere = "https://tracker.example.com/landing"
+    client = _FakeClient(routes(), redirects={SURFACE_LISTING: elsewhere})
+
+    report = audit(client)
+
+    assert elsewhere not in client.requested
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    assert cli.OFF_DOMAIN_REDIRECT in report["barriers"]
+
+
+def test_a_robots_disallowed_surface_redirect_is_a_robots_outcome() -> None:
+    """A rule we chose to obey is not the site refusing us."""
+    secret = f"{HOST}/admin/secret"
+    client = _FakeClient(routes(), redirects={SURFACE_LISTING: secret})
+
+    report = audit(client)
+
+    assert secret not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert f"surface-redirect:{SURFACE_LISTING}" in report["robots_disallowed_targets"]
+
+
+def test_a_surface_redirect_loop_is_incomplete_not_a_barrier() -> None:
+    """Nobody turned us away; the redirects never settled."""
+    a, b = f"{HOST}/loop-a", f"{HOST}/loop-b"
+    client = _FakeClient(routes(), redirects={SURFACE_LISTING: a, a: b, b: a})
+
+    report = audit(client)
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert report["barriers"] == []
+
+
+def test_an_off_domain_sitemap_redirect_is_a_barrier() -> None:
+    elsewhere = "https://cdn.example.com/sitemap.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    client = _FakeClient(table, redirects={SITEMAP: elsewhere})
+
+    report = audit(client)
+
+    assert elsewhere not in client.requested
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_a_robots_disallowed_sitemap_redirect_is_a_robots_outcome() -> None:
+    forbidden = f"{HOST}/admin/sitemap.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    client = _FakeClient(table, redirects={SITEMAP: forbidden})
+
+    report = audit(client)
+
+    assert forbidden not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert f"sitemap-redirect:{SITEMAP}" in report["robots_disallowed_targets"]
+
+
+def test_a_sitemap_redirect_loop_is_incomplete() -> None:
+    a, b = f"{HOST}/loop-a.xml", f"{HOST}/loop-b.xml"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    client = _FakeClient(table, redirects={SITEMAP: a, a: b, b: a})
+
+    report = audit(client)
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["barriers"] == []
+
+
+def test_an_off_domain_detail_redirect_is_a_barrier() -> None:
+    elsewhere = "https://ats.example.com/apply/1"
+    client = _FakeClient(
+        routes(), redirects={f"{OFFER}/100-stage-synthetique-100": elsewhere}
+    )
+
+    report = audit(client)
+
+    assert elsewhere not in client.requested
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_a_robots_disallowed_live_detail_redirect_is_a_robots_outcome() -> None:
+    secret = f"{HOST}/admin/offre"
+    client = _FakeClient(
+        routes(), redirects={f"{OFFER}/100-stage-synthetique-100": secret}
+    )
+
+    report = audit(client)
+
+    assert secret not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert report["exit_code"] == cli.EXIT_ROBOTS_DISALLOWED
+    assert any(
+        item.startswith("detail-redirect:")
+        for item in report["robots_disallowed_targets"]
+    )
+
+
+def test_a_detail_redirect_loop_is_not_a_barrier() -> None:
+    a, b = f"{HOST}/loop-a", f"{HOST}/loop-b"
+    client = _FakeClient(
+        routes(), redirects={f"{OFFER}/100-stage-synthetique-100": a, a: b, b: a}
+    )
+
+    report = audit(client)
+
+    assert report["barriers"] == []
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+
+
+def test_a_canary_redirect_refusal_does_not_decide_an_otherwise_clean_run() -> None:
+    """A canary is optional fallback evidence and never drives the outcome."""
+    table = routes()
+    for surface in SURFACE_URLS:
+        table[surface] = (200, JS_ONLY_HTML, "text/html")
+    secret = f"{HOST}/admin/offre"
+    client = _FakeClient(table, redirects={BENCHMARK_CANARY_URLS[0]: secret})
+
+    report = audit(client)
+
+    assert secret not in client.requested
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["robots_disallowed_targets"] == []
+
+
+# ------------------- 3. sitemap fetch URLs preserve the query ---------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (f"{HOST}/sitemap.xml?part=1", f"{HOST}/sitemap.xml?part=1"),
+        (f"{HOST}/sitemap.xml?part=1#frag", f"{HOST}/sitemap.xml?part=1"),
+        ("HTTPS://WWW.Stage.MA/sitemap.xml?part=2", f"{HOST}/sitemap.xml?part=2"),
+        (f"{HOST}/sitemap.xml/", f"{HOST}/sitemap.xml"),
+        (f"{HOST}/sitemap.xml", f"{HOST}/sitemap.xml"),
+    ],
+)
+def test_a_fetchable_url_keeps_its_query_and_drops_its_fragment(
+    raw: str, expected: str
+) -> None:
+    assert fetch_url(raw) == expected
+
+
+def test_offer_identity_still_drops_the_query() -> None:
+    """The two normalizations answer different questions and must stay apart."""
+    assert canonical_url(f"{OFFER}/9279-a?utm_source=x") == f"{OFFER}/9279-a"
+    assert fetch_url(f"{HOST}/sitemap.xml?part=1") != f"{HOST}/sitemap.xml"
+
+
+@pytest.mark.parametrize("raw", ["   ", "ftp://www.stage.ma/sitemap.xml", "not a url"])
+def test_a_fetchable_url_must_be_a_real_http_url(raw: str) -> None:
+    with pytest.raises(StageMaAccessError):
+        fetch_url(raw)
+
+
+def test_a_declared_sitemap_with_a_query_is_fetched_exactly() -> None:
+    """The finding: the query was stripped, requesting a URL never declared."""
+    declared = f"{HOST}/sitemap.xml?part=1"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(declared), "text/plain")
+    table[declared] = (200, sitemap_urlset([7301]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert declared in client.requested
+    assert f"{HOST}/sitemap.xml" not in client.requested
+    assert report["sitemap"]["offer_urls_observed"] == 1
+
+
+def test_two_query_variants_are_two_distinct_documents() -> None:
+    first, second = f"{HOST}/sitemap.xml?part=1", f"{HOST}/sitemap.xml?part=2"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(first, second), "text/plain")
+    table[first] = (200, sitemap_urlset([7401]), "application/xml")
+    table[second] = (200, sitemap_urlset([7402]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert first in client.requested
+    assert second in client.requested
+    assert report["sitemap"]["documents_read"] == 2
+    assert report["sitemap"]["offer_urls_observed"] == 2
+
+
+def test_a_nested_sitemap_keeps_its_query_when_fetched() -> None:
+    child = f"{HOST}/sitemap-offres.xml?page=2"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([child]), "application/xml")
+    table[child] = (200, sitemap_urlset([7501]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert child in client.requested
+    assert f"{HOST}/sitemap-offres.xml" not in client.requested
+    assert report["sitemap"]["offer_urls_observed"] == 1
+
+
+def test_a_robots_rule_on_a_sitemap_query_is_honoured() -> None:
+    """robots is matched against the URL we would really request."""
+    declared = f"{HOST}/sitemap.xml?part=2"
+    table = routes()
+    table[ROBOTS_URL] = (
+        200,
+        "User-agent: *\nDisallow: /*?part=2\nAllow: /\n" f"\nSitemap: {declared}\n",
+        "text/plain",
+    )
+    table[declared] = (200, sitemap_urlset([7601]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert declared not in client.requested
+    assert report["outcome"] == cli.OUTCOME_ROBOTS_DISALLOWED
+    assert f"sitemap:{declared}" in report["robots_disallowed_targets"]
+
+
+def test_query_variants_of_one_sitemap_are_not_deduplicated_together() -> None:
+    first, second = f"{HOST}/sitemap.xml?part=1", f"{HOST}/sitemap.xml?part=2"
+    table = routes()
+    table[ROBOTS_URL] = (200, robots_declaring(SITEMAP), "text/plain")
+    table[SITEMAP] = (200, sitemap_index([first, second]), "application/xml")
+    table[first] = (200, sitemap_urlset([7701]), "application/xml")
+    table[second] = (200, sitemap_urlset([7702]), "application/xml")
+    client = _FakeClient(table)
+
+    report = audit(client)
+
+    assert report["sitemap"]["documents_read"] == 3
+    assert report["sitemap"]["offer_urls_observed"] == 2
