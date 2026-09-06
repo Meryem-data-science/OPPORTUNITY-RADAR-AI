@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 import pytest
 
 from evaluation.morocco_pfe.cli import stagiaires_access_audit as cli
@@ -45,6 +46,7 @@ from evaluation.morocco_pfe.stagiaires_access import (
     parse_offer_sitemap,
     parse_robots_txt,
     parse_sitemap_index,
+    robots_target,
     robots_verdict,
     select_detail_sample,
     sitemap_declarations,
@@ -706,6 +708,12 @@ def test_an_off_domain_terms_url_is_not_fetched() -> None:
 
 
 def test_an_unparsable_offer_sitemap_is_a_finding_not_a_zero() -> None:
+    """Evidence from the readable sibling survives — and the run does not pass.
+
+    Both halves matter. Discarding the 8 offers we did read would throw away
+    good evidence; calling the run COMPLETED would present those 8 as the site's
+    offer count when a second file we could not read holds more.
+    """
     routes = _routes()
     routes[f"{HOST}/offre-sitemap2.xml"] = (
         200,
@@ -717,6 +725,8 @@ def test_an_unparsable_offer_sitemap_is_a_finding_not_a_zero() -> None:
     files = report["sitemap_index"]["offer_sitemaps_read"]
     assert any("URLSET_UNPARSABLE" in str(item.get("error")) for item in files)
     assert report["offers"]["accepted_offer_urls"] == 8
+    assert report["outcome"] != cli.OUTCOME_COMPLETED
+    assert report["exit_code"] != cli.EXIT_OK
 
 
 def test_the_report_carries_no_page_body() -> None:
@@ -1395,3 +1405,474 @@ def test_a_terms_url_robots_disallows_is_not_fetched() -> None:
     assert forbidden not in client.requested
     assert report["terms"]["barrier"] == "ROBOTS_DISALLOWED"
     assert report["terms"]["manual_review_required"] is True
+
+
+# ====================================================================
+# Architect review: the audit must fail closed
+# ====================================================================
+
+#: The complete request history of a healthy run, in order. Tests below assert
+#: against the *whole* list rather than "X not in requested", so a regression
+#: that keeps knocking on other doors after a wall shows up as an extra entry.
+HEALTHY_REQUESTS = [
+    ROBOTS_URL,
+    PFE_TARGET_URL,
+    f"{HOST}/sitemap_v9.xml",
+    f"{HOST}/offre-sitemap.xml",
+    f"{HOST}/offre-sitemap2.xml",
+    f"{OFFER}/6107-slug-7",
+    f"{OFFER}/6106-slug-6",
+    f"{OFFER}/6105-slug-5",
+]
+
+
+class _FailingClient(_FakeClient):
+    """A fake client that raises a transport error for one nominated URL."""
+
+    def __init__(self, routes, failing_url: str, **kwargs) -> None:
+        super().__init__(routes, **kwargs)
+        self.failing_url = failing_url
+
+    def get(self, url: str, timeout: float | None = None, follow_redirects: bool = False):
+        if url == self.failing_url:
+            self.requested.append(url)
+            raise httpx.ConnectTimeout("synthetic transport failure")
+        return super().get(url, timeout, follow_redirects)
+
+
+# ------------ P1: stop at the PFE listing wall, before discovery ------------
+
+
+def test_a_listing_403_stops_the_audit_before_any_discovery_request() -> None:
+    """The finding: a refused listing did not stop the sitemap chain.
+
+    Recording the barrier and then requesting the index, both offer sitemaps and
+    three detail pages is not "stopping at the wall" — it is knocking on every
+    other door in the building.
+    """
+    routes = _routes()
+    routes[PFE_TARGET_URL] = (403, "", "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    # The complete history: robots, the listing, and nothing else.
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    assert report["discovery_attempted"] is False
+    assert "sitemap_index" not in report
+    assert "offers" not in report
+    assert "detail_audit" not in report
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, ""),
+        (429, ""),
+        (401, ""),
+        (200, "<html><body>Just a moment... checking your browser</body></html>"),
+    ],
+)
+def test_every_kind_of_listing_access_barrier_stops_discovery(
+    status: int, body: str
+) -> None:
+    routes = _routes()
+    routes[PFE_TARGET_URL] = (status, body, "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_a_refused_listing_redirect_stops_discovery_too() -> None:
+    """The redirect destination is unfetched *and* nothing is tried after it."""
+    elsewhere = "https://tracker.example.com/landing"
+    client = _FakeClient(_routes(), redirects={PFE_TARGET_URL: elsewhere})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert elsewhere not in client.requested
+    assert report["pfe_listing"]["barrier"] == cli.OFF_DOMAIN_REDIRECT
+    assert report["discovery_attempted"] is False
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_a_robots_disallowed_listing_redirect_stops_discovery_too() -> None:
+    secret = f"{HOST}/private/secret"
+    client = _FakeClient(_routes_with_private(), redirects={PFE_TARGET_URL: secret})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert report["pfe_listing"]["barrier"] == cli.ROBOTS_DISALLOWED_REDIRECT
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_an_unreachable_listing_is_an_incomplete_audit_not_a_completed_one() -> None:
+    """A transport failure is not an access refusal, and neither is success."""
+    client = _FailingClient(_routes(), failing_url=PFE_TARGET_URL)
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert report["discovery_attempted"] is False
+
+
+def test_a_healthy_listing_leaves_the_discovery_chain_exactly_as_it_was() -> None:
+    """Requirement 3: HTTP 200 behaviour is untouched by the stop rule."""
+    client = _FakeClient(_routes())
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == HEALTHY_REQUESTS
+    assert report["discovery_attempted"] is True
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+    assert report["detail_audit"]["sampled"] == 3
+
+
+# ---------- P1: an unreadable required offer sitemap is not COMPLETED -------
+
+
+def test_an_offer_sitemap_transport_failure_is_never_a_completed_audit() -> None:
+    """Partial totals must not be presented as the whole."""
+    client = _FailingClient(_routes(), failing_url=f"{HOST}/offre-sitemap2.xml")
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] != cli.OUTCOME_COMPLETED
+    assert report["exit_code"] != cli.EXIT_OK
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+    assert report["incomplete_reasons"] == [
+        f"OFFER_SITEMAP_UNREADABLE:{HOST}/offre-sitemap2.xml"
+    ]
+
+
+def test_an_unparsable_offer_sitemap_is_never_a_completed_audit() -> None:
+    routes = _routes()
+    routes[f"{HOST}/offre-sitemap2.xml"] = (
+        200,
+        "<html><body><h1>Erreur</h1><p>" + "pas un sitemap " * 40 + "</p></body></html>",
+        "text/html",
+    )
+
+    report = cli.run(client=_FakeClient(routes), delay=0.0)
+
+    assert report["outcome"] == cli.OUTCOME_INCOMPLETE
+    assert report["exit_code"] == cli.EXIT_FAILURE
+
+
+def test_a_refused_offer_sitemap_is_a_barrier_not_merely_incomplete() -> None:
+    """Being refused and being unable to read are different facts."""
+    routes = _routes()
+    routes[f"{HOST}/offre-sitemap2.xml"] = (403, "", "text/html")
+
+    report = cli.run(client=_FakeClient(routes), delay=0.0)
+
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    assert "HTTP_403_FORBIDDEN" in report["barriers"]
+
+
+def test_evidence_from_the_readable_sitemap_survives_the_failure() -> None:
+    """Requirement 3: a failed sibling must not discard what we did read."""
+    client = _FailingClient(_routes(), failing_url=f"{HOST}/offre-sitemap2.xml")
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["offers"]["accepted_offer_urls"] == 8
+    assert report["offers"]["unique_source_external_ids"] == 8
+    assert report["detail_audit"]["sampled"] == 3
+
+
+def test_the_report_says_plainly_that_partial_totals_are_partial() -> None:
+    """Requirement 4: a reader of the numbers must not mistake them for the whole."""
+    client = _FailingClient(_routes(), failing_url=f"{HOST}/offre-sitemap2.xml")
+
+    offers = cli.run(client=client, delay=0.0)["offers"]
+
+    assert offers["required_sitemaps_all_read"] is False
+    assert offers["totals_are_partial"] is True
+    assert offers["totals_note"].startswith("PARTIAL")
+    assert offers["offer_sitemaps_declared"] == 2
+    assert offers["offer_sitemaps_parsed"] == 1
+    assert offers["offer_sitemaps_unreadable"] == 1
+    assert offers["offer_sitemaps_refused"] == 0
+
+
+def test_all_sitemaps_readable_reports_complete_totals_and_exit_zero() -> None:
+    """Requirement 5: the healthy path is unchanged."""
+    offers = cli.run(client=_FakeClient(_routes()), delay=0.0)["offers"]
+
+    assert offers["required_sitemaps_all_read"] is True
+    assert offers["totals_are_partial"] is False
+    assert offers["totals_note"].startswith("COMPLETE")
+    assert offers["offer_sitemaps_declared"] == 2
+    assert offers["offer_sitemaps_parsed"] == 2
+
+
+# ------------- P2: a checked terms URL's barrier reaches the top ------------
+
+
+def test_a_supplied_terms_url_answering_403_fails_the_audit() -> None:
+    """The finding: a refused terms page left the audit reporting success."""
+    routes = _routes()
+    routes[f"{HOST}/conditions"] = (403, "", "text/html")
+
+    report = cli.run(
+        client=_FakeClient(routes), delay=0.0, terms_url=f"{HOST}/conditions"
+    )
+
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    assert "HTTP_403_FORBIDDEN" in report["barriers"]
+    assert report["terms"]["attempted"] is True
+    assert report["terms"]["manual_review_required"] is True
+
+
+def test_a_supplied_terms_url_hitting_a_refused_redirect_fails_the_audit() -> None:
+    elsewhere = "https://tracker.example.com/cgu"
+    terms = f"{HOST}/conditions"
+    client = _FakeClient(_routes(), redirects={terms: elsewhere})
+
+    report = cli.run(client=client, delay=0.0, terms_url=terms)
+
+    assert elsewhere not in client.requested
+    assert report["terms"]["barrier"] == cli.OFF_DOMAIN_REDIRECT
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+
+
+def test_no_terms_url_supplied_is_normal_and_never_fails_the_audit() -> None:
+    """Distinction A: not supplying one is the ordinary case, not a finding."""
+    report = cli.run(client=_FakeClient(_routes()), delay=0.0)
+
+    assert report["terms"]["barrier"] == "NOT_ATTEMPTED_NO_EVIDENCED_TERMS_URL"
+    assert report["terms"]["attempted"] is False
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("terms_url", "expected_barrier"),
+    [
+        ("https://example.com/conditions", "NOT_ATTEMPTED_OFF_DOMAIN"),
+        (f"{HOST}/private/conditions", "ROBOTS_DISALLOWED"),
+    ],
+)
+def test_a_terms_url_we_declined_to_request_does_not_fail_the_audit(
+    terms_url: str, expected_barrier: str
+) -> None:
+    """Distinctions B and C: declining to ask is us obeying a rule, not a refusal.
+
+    Both leave the URL unfetched, and neither is a fact about the site, so
+    neither may turn a good audit red.
+    """
+    routes = _routes_with_private()
+    routes[f"{HOST}/private/conditions"] = (200, "t" * 500, "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, terms_url=terms_url)
+
+    assert terms_url not in client.requested
+    assert report["terms"]["barrier"] == expected_barrier
+    assert report["terms"]["attempted"] is False
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+
+
+def test_a_healthy_terms_page_keeps_the_audit_successful() -> None:
+    """Distinction D, and E: 200 is fine, and review is still required."""
+    routes = _routes()
+    routes[f"{HOST}/conditions"] = (
+        200,
+        "<html><body><h1>Conditions</h1><p>" + "texte " * 100 + "</p></body></html>",
+        "text/html",
+    )
+
+    report = cli.run(
+        client=_FakeClient(routes), delay=0.0, terms_url=f"{HOST}/conditions"
+    )
+
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+    assert report["terms"]["available"] is True
+    assert report["terms"]["manual_review_required"] is True
+
+
+def test_a_terms_url_still_never_becomes_a_discovery_input() -> None:
+    """Distinction F, re-asserted now that terms can affect the outcome."""
+    routes = _routes()
+    terms = f"{HOST}/conditions"
+    routes[terms] = (200, SITEMAP_INDEX, "application/xml")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, terms_url=terms)
+
+    assert report["sitemap_index"]["selected"] == f"{HOST}/sitemap_v9.xml"
+    assert report["sitemap_index"]["selected_from"] == "robots.txt"
+    assert report["offers"]["accepted_offer_urls"] == 11
+    assert client.requested == HEALTHY_REQUESTS + [terms]
+
+
+# --------------- P2: robots matches on path AND query -----------------------
+
+ROBOTS_WITH_QUERY_RULE = (
+    "User-agent: *\n"
+    "Disallow: /*?download=true\n"
+    "Allow: /\n"
+    "\n"
+    "Sitemap: https://www.stagiaires.ma/sitemap_v9.xml\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.stagiaires.ma/foo", "/foo"),
+        ("https://www.stagiaires.ma/foo?a=1", "/foo?a=1"),
+        ("https://www.stagiaires.ma/?download=true", "/?download=true"),
+        ("https://www.stagiaires.ma?download=true", "/?download=true"),
+        ("https://www.stagiaires.ma", "/"),
+        ("https://www.stagiaires.ma/foo#frag", "/foo"),
+    ],
+)
+def test_the_robots_match_target_is_path_plus_query(url: str, expected: str) -> None:
+    assert robots_target(url) == expected
+
+
+def test_a_query_only_disallow_rule_is_actually_enforced() -> None:
+    """The finding: matching only the path ignored every query-based rule."""
+    groups = parse_robots_txt(ROBOTS_WITH_QUERY_RULE)
+
+    blocked = robots_target("https://www.stagiaires.ma/allowed?download=true")
+    assert robots_verdict(groups, blocked).allowed is False
+    assert robots_verdict(groups, robots_target(f"{HOST}/allowed")).allowed is True
+    assert robots_verdict(groups, robots_target(f"{HOST}/allowed?a=1")).allowed is True
+
+
+def test_a_redirect_into_a_query_disallowed_url_is_not_followed() -> None:
+    """Requirement 2: the rule holds on the URL a redirect hands us."""
+    blocked = f"{HOST}/allowed?download=true"
+    routes = _routes()
+    routes[ROBOTS_URL] = (200, ROBOTS_WITH_QUERY_RULE, "text/plain")
+    routes[blocked] = (200, "<html><body>" + "x" * 500 + "</body></html>", "text/html")
+    client = _FakeClient(routes, redirects={PFE_TARGET_URL: blocked})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert blocked not in client.requested
+    assert client.requested == [ROBOTS_URL, PFE_TARGET_URL]
+    assert report["pfe_listing"]["barrier"] == cli.ROBOTS_DISALLOWED_REDIRECT
+    assert report["pfe_listing"]["redirect_target"] == blocked
+
+
+def test_a_terms_url_with_a_disallowed_query_is_not_fetched() -> None:
+    """Requirement 3: the same helper governs the operator-supplied URL."""
+    blocked = f"{HOST}/conditions?download=true"
+    routes = _routes()
+    routes[ROBOTS_URL] = (200, ROBOTS_WITH_QUERY_RULE, "text/plain")
+    routes[blocked] = (200, "t" * 500, "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, terms_url=blocked)
+
+    assert blocked not in client.requested
+    assert report["terms"]["barrier"] == "ROBOTS_DISALLOWED"
+    assert report["terms"]["attempted"] is False
+
+
+def test_urls_with_a_permitted_query_are_unaffected() -> None:
+    """Requirement 4: adding query matching must not block ordinary URLs."""
+    routes = _routes()
+    routes[ROBOTS_URL] = (200, ROBOTS_WITH_QUERY_RULE, "text/plain")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert client.requested == HEALTHY_REQUESTS
+    assert report["outcome"] == cli.OUTCOME_COMPLETED
+    assert report["exit_code"] == cli.EXIT_OK
+
+
+# ------------------ failure semantics are internally consistent -------------
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "healthy",
+        "listing_403",
+        "listing_unreachable",
+        "sitemap_unreadable",
+        "sitemap_refused",
+        "terms_403",
+        "robots_refused",
+        "no_sitemap_declared",
+    ],
+)
+def test_outcome_and_exit_code_never_contradict_each_other(scenario: str) -> None:
+    """One precedence, applied everywhere: no COMPLETED/exit-1 or BARRIER/exit-0."""
+    routes = _routes()
+    kwargs: dict[str, object] = {}
+    client: _FakeClient
+    if scenario == "listing_403":
+        routes[PFE_TARGET_URL] = (403, "", "text/html")
+        client = _FakeClient(routes)
+    elif scenario == "listing_unreachable":
+        client = _FailingClient(routes, failing_url=PFE_TARGET_URL)
+    elif scenario == "sitemap_unreadable":
+        client = _FailingClient(routes, failing_url=f"{HOST}/offre-sitemap2.xml")
+    elif scenario == "sitemap_refused":
+        routes[f"{HOST}/offre-sitemap2.xml"] = (403, "", "text/html")
+        client = _FakeClient(routes)
+    elif scenario == "terms_403":
+        routes[f"{HOST}/conditions"] = (403, "", "text/html")
+        kwargs["terms_url"] = f"{HOST}/conditions"
+        client = _FakeClient(routes)
+    elif scenario == "robots_refused":
+        routes[ROBOTS_URL] = (403, "", "text/html")
+        client = _FakeClient(routes)
+    elif scenario == "no_sitemap_declared":
+        routes[ROBOTS_URL] = (200, "User-agent: *\nAllow: /\n", "text/plain")
+        client = _FakeClient(routes)
+    else:
+        client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, **kwargs)  # type: ignore[arg-type]
+    outcome, exit_code = report["outcome"], report["exit_code"]
+
+    assert (outcome == cli.OUTCOME_COMPLETED) == (exit_code == cli.EXIT_OK)
+    if outcome == cli.OUTCOME_BARRIER:
+        assert exit_code == cli.EXIT_BARRIER
+    if outcome == cli.OUTCOME_INCOMPLETE:
+        assert exit_code == cli.EXIT_FAILURE
+    if exit_code == cli.EXIT_OK:
+        assert not report.get("barriers")
+        assert not report.get("incomplete_reasons")
+
+
+def test_a_barrier_outranks_an_unreadable_sitemap() -> None:
+    """Fixed precedence: refusal is the more important fact, and wins."""
+    routes = _routes()
+    routes[f"{HOST}/offre-sitemap.xml"] = (403, "", "text/html")
+    client = _FailingClient(routes, failing_url=f"{HOST}/offre-sitemap2.xml")
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] == cli.OUTCOME_BARRIER
+    assert report["exit_code"] == cli.EXIT_BARRIER
+    assert report["barriers"] == ["HTTP_403_FORBIDDEN"]
+    # The incomplete reason is still recorded, just outranked.
+    assert report["incomplete_reasons"] == [
+        f"OFFER_SITEMAP_UNREADABLE:{HOST}/offre-sitemap2.xml"
+    ]

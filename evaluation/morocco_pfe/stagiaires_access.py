@@ -221,6 +221,27 @@ def sitemap_declarations(text: str) -> tuple[str, ...]:
     return tuple(declared)
 
 
+def robots_target(url: str) -> str:
+    """Return the string a robots rule is matched against for ``url``.
+
+    The Robots Exclusion Protocol matches the request path **and its query**,
+    not the path alone. Matching only `urlsplit(url).path` silently ignores
+    every rule that discriminates on a parameter — `Disallow: /*?download=true`
+    would not stop `/allowed?download=true`, and the audit would fetch a URL it
+    was explicitly told not to.
+
+        /foo            -> "/foo"
+        /foo?a=1        -> "/foo?a=1"
+        (empty)?a=1     -> "/?a=1"
+
+    One helper, used everywhere a full URL is judged against robots, so the two
+    cannot drift apart.
+    """
+    parts = urlsplit(url or "")
+    target = parts.path or "/"
+    return f"{target}?{parts.query}" if parts.query else target
+
+
 def _rule_regex(pattern: str) -> re.Pattern[str]:
     anchored = pattern.endswith("$")
     body = pattern[:-1] if anchored else pattern
@@ -1548,6 +1569,7 @@ __all__ = [
     "parse_robots_txt",
     "product_token",
     "parse_sitemap_index",
+    "robots_target",
     "robots_verdict",
     "select_detail_sample",
     "signal_support",

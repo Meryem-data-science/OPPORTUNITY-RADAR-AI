@@ -67,8 +67,17 @@ What it does, and refuses to do:
   a JS bundle, authenticates, or sends a cookie. The user agent names this
   audit truthfully.
 
-Exit codes: `0` audit completed, `1` transport/usage failure, `2` an access
-barrier was encountered, `3` robots.txt disallows a required path.
+The audit **fails closed**. It stops as soon as a wall is reached — a refused
+`robots.txt`, a refused PFE listing — rather than carrying on down the rest of
+the chain, and it reports `COMPLETED` only when everything it was required to
+read was actually read. One offer sitemap it could not fetch or parse makes the
+offer totals a lower bound, and the report says so rather than presenting a
+subset as the whole.
+
+Exit codes, by a single precedence: `0` audit completed, `1` usage failure or an
+INCOMPLETE audit (something required could not be read — a timeout, a document
+that is not the XML it claims to be), `2` an access barrier was encountered,
+`3` robots.txt disallows a required path.
 
 Reading this report does not establish that automated collection of this site
 is permitted, and it activates nothing. Stagiaires.ma has no collector, no
@@ -110,6 +119,7 @@ from evaluation.morocco_pfe.stagiaires_access import (
     parse_offer_sitemap,
     parse_robots_txt,
     parse_sitemap_index,
+    robots_target,
     robots_verdict,
     select_detail_sample,
     signal_support,
@@ -131,6 +141,47 @@ EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_BARRIER = 2
 EXIT_ROBOTS_DISALLOWED = 3
+
+#: The outcome an audit reports when it read everything it set out to read.
+OUTCOME_COMPLETED = "COMPLETED"
+
+#: The outcome when something the audit *needed* could not be read, without an
+#: access refusal being involved — a timeout, a truncated document, a body that
+#: is not the XML it claims to be. Distinct from BARRIER because "we were
+#: refused" and "we could not read it" are different facts about a source, and
+#: distinct from COMPLETED because reporting totals drawn from part of the data
+#: as if they were the whole is the failure this outcome exists to prevent.
+OUTCOME_INCOMPLETE = "INCOMPLETE"
+
+OUTCOME_BARRIER = "BARRIER"
+
+
+def _finalize(
+    report: dict[str, Any],
+    *,
+    barriers: list[str],
+    incomplete_reasons: list[str],
+) -> dict[str, Any]:
+    """Set the one final outcome/exit pair, by a single fixed precedence.
+
+    Access refusal outranks unreadability, and unreadability outranks success,
+    so the audit always fails closed: no combination of findings can produce
+    `COMPLETED` with an exit code that says otherwise, or a failure outcome with
+    exit 0. Every path through `run` ends here or at an earlier explicit return,
+    and both kinds are covered by a test that reads the pair together.
+    """
+    report["barriers"] = sorted(set(barriers))
+    report["incomplete_reasons"] = sorted(set(incomplete_reasons))
+    if report["barriers"]:
+        report["outcome"] = OUTCOME_BARRIER
+        report["exit_code"] = EXIT_BARRIER
+    elif report["incomplete_reasons"]:
+        report["outcome"] = OUTCOME_INCOMPLETE
+        report["exit_code"] = EXIT_FAILURE
+    else:
+        report["outcome"] = OUTCOME_COMPLETED
+        report["exit_code"] = EXIT_OK
+    return report
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -310,9 +361,15 @@ def _fetch_document(
 def _robots_allows(
     groups: tuple[Any, ...], enforced: bool, url: str
 ) -> bool:
+    """Whether robots permits ``url``, matched on path **and query**.
+
+    `robots_target` is the single place that decides what a rule is matched
+    against, so a rule like `Disallow: /*?download=true` is honoured here, at
+    every redirect hop, and for `--terms-url` alike.
+    """
     if not enforced:
         return True
-    return robots_verdict(groups, urlsplit(url).path or "/").allowed
+    return robots_verdict(groups, robots_target(url)).allowed
 
 
 def _audit_terms(
@@ -334,7 +391,13 @@ def _audit_terms(
         "status_code": None,
         "final_url": None,
         "available": False,
+        # `attempted` is what separates "we chose not to request this" from
+        # "we requested it and were refused". Only the second is a finding
+        # about the site, and only the second may affect the audit's outcome:
+        # not supplying a terms URL is the normal case and must never fail a run.
+        "attempted": False,
         "barrier": None,
+        "error": None,
         "manual_review_required": True,
         "note": TERMS_REVIEW_NOTE,
     }
@@ -345,8 +408,12 @@ def _audit_terms(
         report["barrier"] = "NOT_ATTEMPTED_OFF_DOMAIN"
         return report
     if not _robots_allows(groups, enforced, terms_url):
+        # Declined before any request, exactly as before: robots said no, so we
+        # never asked. That is the audit obeying a rule, not the site refusing
+        # us, so it does not fail the run.
         report["barrier"] = "ROBOTS_DISALLOWED"
         return report
+    report["attempted"] = True
     row, _ = _fetch_document(
         client,
         terms_url,
@@ -355,8 +422,17 @@ def _audit_terms(
     )
     report["status_code"] = row.get("status_code")
     report["final_url"] = row.get("final_url")
-    report["barrier"] = row.get("barrier") or row.get("error")
-    report["available"] = row.get("status_code") == 200 and not report["barrier"]
+    # Kept apart: an access refusal is a finding about the site; a timeout on an
+    # optional metadata check is not, and must not turn a good audit red.
+    report["barrier"] = row.get("barrier")
+    report["error"] = row.get("error")
+    if row.get("redirect_target"):
+        report["redirect_target"] = row["redirect_target"]
+    report["available"] = (
+        row.get("status_code") == 200
+        and not report["barrier"]
+        and not report["error"]
+    )
     return report
 
 
@@ -436,7 +512,7 @@ def run(
         # Fetched once, never parsed for an offer list. Its structure is
         # recorded precisely so the report can state *why* the sitemap is the
         # discovery mechanism rather than this page.
-        target_verdict = robots_verdict(groups, urlsplit(PFE_TARGET_URL).path)
+        target_verdict = robots_verdict(groups, robots_target(PFE_TARGET_URL))
         target_report: dict[str, Any] = {
             "url": PFE_TARGET_URL,
             "robots_verdict": target_verdict.as_dict(),
@@ -464,6 +540,36 @@ def run(
                 summary.job_posting_count > 0
             )
         report["pfe_listing"] = target_report
+
+        # The audit stops at the wall, and the wall is here. If the public PFE
+        # page refused us — 403, 429, a challenge, a login redirect, a redirect
+        # we may not follow — then continuing on to request the sitemap index,
+        # every offer sitemap and three detail pages would be exactly the
+        # "keep knocking on other doors" behaviour the GET-only contract rules
+        # out. A listing we could not reach at all stops the run for the same
+        # reason: an audit that could not read the page it set out to read has
+        # not completed, whatever else it manages to collect afterwards.
+        if listing_row.get("barrier") or listing_row.get("error"):
+            report["terms"] = _audit_terms(
+                active, None, timeout, groups=(), enforced=False
+            )
+            report["terms"]["barrier"] = "NOT_ATTEMPTED_PFE_LISTING_UNREACHABLE"
+            report["discovery_attempted"] = False
+            report["discovery_not_attempted_reason"] = (
+                "the public PFE listing was not reachable, so the audit stopped "
+                "before requesting the sitemap index, the offer sitemaps or any "
+                "detail page"
+            )
+            return _finalize(
+                report,
+                barriers=[str(listing_row["barrier"])]
+                if listing_row.get("barrier")
+                else [],
+                incomplete_reasons=[]
+                if listing_row.get("barrier")
+                else [f"PFE_LISTING_UNREACHABLE:{listing_row['error']}"],
+            )
+        report["discovery_attempted"] = True
 
         # --- the official sitemap index, as robots declares it ---------------
         # The sitemap index is whatever robots.txt declares, and there is no
@@ -541,9 +647,26 @@ def run(
             offer_files.append(file_report)
             parses.append(parse)
         sitemap_report["offer_sitemaps_read"] = offer_files
-        sitemap_report["offer_sitemaps_skipped"] = max(
-            len(index.offer_sitemaps) - MAX_OFFER_SITEMAPS, 0
-        )
+        skipped = max(len(index.offer_sitemaps) - MAX_OFFER_SITEMAPS, 0)
+        sitemap_report["offer_sitemaps_skipped"] = skipped
+
+        # Every offer sitemap the index declares within the bounded scope is
+        # *required*: the totals below are the union of them, so one file we
+        # could not read makes those totals a subset of the truth. Reporting a
+        # subset as a completed audit is how "1000 offers" quietly becomes the
+        # answer when the site published 1710 — so an unreadable required file
+        # fails the run. The evidence from its readable siblings is kept, and
+        # labelled partial rather than discarded.
+        refused = [item for item in offer_files if item.get("barrier")]
+        unreadable = [
+            item
+            for item in offer_files
+            if item.get("error") and not item.get("barrier")
+        ]
+        sitemap_barriers = [str(item["barrier"]) for item in refused]
+        sitemap_incomplete = [
+            f"OFFER_SITEMAP_UNREADABLE:{item['url']}" for item in unreadable
+        ]
 
         audit = combine_offer_sitemaps(parses)
         report["offers"] = audit.as_dict()
@@ -551,6 +674,27 @@ def run(
             "The numeric ID in /stage-emploi-maroc/<id> is a CANDIDATE "
             "source_external_id observed in this audit. Stability over time is "
             "not established by a single audit and is not claimed here."
+        )
+        report["offers"]["offer_sitemaps_declared"] = len(index.offer_sitemaps)
+        report["offers"]["offer_sitemaps_parsed"] = len(parses)
+        report["offers"]["offer_sitemaps_refused"] = len(refused)
+        report["offers"]["offer_sitemaps_unreadable"] = len(unreadable)
+        # Drives the outcome: were all the files this run was required to read
+        # actually read? Files beyond the bounded scope are out of scope, not
+        # failures, which is why they are counted separately below.
+        report["offers"]["required_sitemaps_all_read"] = not (refused or unreadable)
+        # Wider question for a reader of the numbers: do these totals cover
+        # everything the index declared?
+        report["offers"]["totals_are_partial"] = bool(refused or unreadable or skipped)
+        report["offers"]["totals_note"] = (
+            "COMPLETE: these totals cover every offer sitemap the index declared "
+            "within the audit's bounded scope"
+            if not (refused or unreadable or skipped)
+            else (
+                "PARTIAL: at least one declared offer sitemap was not read, so "
+                "these totals are a lower bound and must not be quoted as the "
+                "site's full offer count"
+            )
         )
 
         # --- at most three real offer pages ---------------------------------
@@ -604,22 +748,26 @@ def run(
             active, terms_url, timeout, groups=groups, enforced=enforced
         )
 
-        barriers = sorted(
-            {
-                str(item)
-                for item in [
-                    target_report.get("barrier"),
-                    sitemap_report.get("barrier"),
-                    *[file.get("barrier") for file in offer_files],
-                    *[item.barrier for item in observations],
-                ]
-                if item
-            }
+        terms_report = report["terms"]
+        barriers = [
+            str(item)
+            for item in [
+                target_report.get("barrier"),
+                sitemap_report.get("barrier"),
+                *sitemap_barriers,
+                *[item.barrier for item in observations],
+                # A terms page we actually requested and were refused is a
+                # finding about the site and counts. A terms URL we declined to
+                # request — none supplied, off-domain, robots said no — is not,
+                # and must never fail a run: `attempted` is what tells them
+                # apart.
+                terms_report.get("barrier") if terms_report.get("attempted") else None,
+            ]
+            if item
+        ]
+        return _finalize(
+            report, barriers=barriers, incomplete_reasons=sitemap_incomplete
         )
-        report["barriers"] = barriers
-        report["outcome"] = "BARRIER" if barriers else "COMPLETED"
-        report["exit_code"] = EXIT_BARRIER if barriers else EXIT_OK
-        return report
     finally:
         if owns_client:
             active.close()
