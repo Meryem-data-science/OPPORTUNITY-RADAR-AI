@@ -10,9 +10,15 @@ read, and does an offer page carry the fields a PFE opportunity needs?
     python -m evaluation.morocco_pfe.cli.stagiaires_access_audit \
         --terms-url https://www.stagiaires.ma/<a real public terms path>
 
-There is deliberately no flag that names a sitemap, a listing or an offer URL.
-The chain below is the only way this command chooses what to fetch, so no
-invocation of it can make it GET an arbitrary address.
+No flag names a **discovery** URL. There is no sitemap, listing or offer
+override: the chain below is the only way this command finds what to audit, so
+no invocation can redirect discovery at an arbitrary address.
+
+`--terms-url` is the single exception and is not a discovery input. It names one
+public terms/legal page to check for reachability; it must be on a Stagiaires.ma
+host, it is fetched at most once, its text is never read, it never contributes a
+URL to the sitemap or offer chain, and `manual_review_required` stays true
+whatever it returns.
 
 It follows the site's **own published discovery chain**, and nothing else:
 
@@ -42,10 +48,12 @@ What it does, and refuses to do:
 * it discovers the sitemap from robots' `Sitemap:` declaration rather than from
   a URL written here or passed to it. If robots declares none, the audit stops
   and says so instead of guessing one;
-* it **never follows a redirect off the Stagiaires.ma hosts.** Redirects are
-  resolved by the audit itself, bounded, and only while they stay on the same
-  host; an off-domain `Location` is reported as a finding and its target is
-  never requested;
+* it **never follows a redirect off the Stagiaires.ma hosts, and never into a
+  path robots disallows.** Redirects are resolved by the audit itself, bounded,
+  and every hop is re-checked against both rules before the next GET: obeying
+  robots on the URL we asked for but not on the one we are handed would let a
+  site redirect an allowed path to a disallowed one. A refused `Location` is
+  reported as a finding and its target is never requested;
 * it **writes nothing**: no SQLite, no benchmark row, no raw HTML on disk, no
   `config/sources.yaml` change. It prints one JSON object to stdout;
 * it prints **structure, not content**: statuses, counts, JSON-LD type and key
@@ -74,6 +82,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable
 from typing import Any, Sequence
 from urllib.parse import urljoin, urlsplit
 
@@ -165,6 +174,16 @@ MAX_REDIRECTS = 3
 #: to another host. It is reported, never followed.
 OFF_DOMAIN_REDIRECT = "OFF_DOMAIN_REDIRECT_NOT_FOLLOWED"
 
+#: The barrier reported when a same-host redirect points at a path robots.txt
+#: disallows. Obeying robots on the URL we *asked for* and not on the one we
+#: are handed is not obeying robots: a site could redirect `/allowed` to
+#: `/private/secret` and the audit would fetch a path it was told not to.
+ROBOTS_DISALLOWED_REDIRECT = "ROBOTS_DISALLOWED_REDIRECT"
+
+#: Redirects the audit records but refuses to follow. Both leave the target
+#: unfetched and return no body.
+_REFUSED_REDIRECTS = frozenset({OFF_DOMAIN_REDIRECT, ROBOTS_DISALLOWED_REDIRECT})
+
 
 def _get(
     client: httpx.Client, url: str, timeout: float
@@ -200,15 +219,26 @@ def _redirect_target(response: httpx.Response, current_url: str) -> str | None:
 
 
 def _follow_same_host(
-    client: httpx.Client, url: str, timeout: float
+    client: httpx.Client,
+    url: str,
+    timeout: float,
+    *,
+    allows: Callable[[str], bool] | None = None,
 ) -> tuple[httpx.Response | None, str | None, list[str], str | None]:
-    """GET ``url``, resolving only redirects that stay on a Stagiaires.ma host.
+    """GET ``url``, resolving only redirects the audit is permitted to follow.
 
     Returns the final response, a transport error, the redirect chain, and a
-    barrier. The one rule that matters: an off-domain `Location` is **recorded
-    and refused**. The audit never issues a GET to a host outside
-    `STAGIAIRES_HOSTS`, and a site cannot obtain one by redirecting — the
-    off-domain URL is reported as a finding and left unfetched.
+    barrier. Two rules gate **every** hop, and they are checked on the URL the
+    site hands us rather than only on the one we asked for:
+
+    * an off-domain `Location` is recorded and refused. The audit never issues a
+      GET to a host outside `STAGIAIRES_HOSTS`, and a site cannot obtain one by
+      redirecting;
+    * a same-host `Location` that ``allows`` rejects is recorded and refused.
+      Checking robots on the requested URL alone is not obeying robots: a site
+      could answer `/allowed` with `302 Location: /private/secret` and the audit
+      would fetch a path robots explicitly disallows. ``allows`` is `None` only
+      for robots.txt itself, where there are no rules to consult yet.
 
     Bounded at `MAX_REDIRECTS` hops so this stays a redirect resolver and not a
     crawler that follows wherever it is sent.
@@ -223,25 +253,35 @@ def _follow_same_host(
         if target is None:
             return response, None, chain, None
         chain.append(target)
+        # Both checks happen before the next GET is issued, never after.
         if not is_stagiaires_host(target):
             # Recorded, not followed. Reporting a URL is not fetching it.
             return response, None, chain, OFF_DOMAIN_REDIRECT
+        if allows is not None and not allows(target):
+            return response, None, chain, ROBOTS_DISALLOWED_REDIRECT
         current = target
     return None, None, chain, "TOO_MANY_REDIRECTS"
 
 
 def _fetch_document(
-    client: httpx.Client, url: str, timeout: float
+    client: httpx.Client,
+    url: str,
+    timeout: float,
+    *,
+    allows: Callable[[str], bool] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """GET one URL once and describe the response without keeping its body.
 
     Returns the report row and the body. The body is handed back to the caller
     to be *analysed*, never stored: no code path writes it to disk, puts it in
     the report, or logs it. A body is returned only for a response the audit
-    actually resolved — a refused off-domain redirect yields none.
+    actually resolved — a refused redirect, off-domain or robots-disallowed,
+    yields none.
     """
     row: dict[str, Any] = {"url": url}
-    response, error, chain, barrier = _follow_same_host(client, url, timeout)
+    response, error, chain, barrier = _follow_same_host(
+        client, url, timeout, allows=allows
+    )
     if chain:
         row["redirect_chain"] = list(chain)
     if response is None:
@@ -254,7 +294,7 @@ def _fetch_document(
     row["final_url"] = str(response.url)
     row["content_type"] = response.headers.get("content-type")
     row["body_bytes"] = len(response.content)
-    if barrier == OFF_DOMAIN_REDIRECT:
+    if barrier in _REFUSED_REDIRECTS:
         # The response in hand is the redirect itself, not a page. Its body is
         # not analysed and the destination is not requested.
         row["barrier"] = barrier
@@ -307,7 +347,12 @@ def _audit_terms(
     if not _robots_allows(groups, enforced, terms_url):
         report["barrier"] = "ROBOTS_DISALLOWED"
         return report
-    row, _ = _fetch_document(client, terms_url, timeout)
+    row, _ = _fetch_document(
+        client,
+        terms_url,
+        timeout,
+        allows=lambda candidate: _robots_allows(groups, enforced, candidate),
+    )
     report["status_code"] = row.get("status_code")
     report["final_url"] = row.get("final_url")
     report["barrier"] = row.get("barrier") or row.get("error")
@@ -382,6 +427,11 @@ def run(
             report["exit_code"] = EXIT_BARRIER
             return report
 
+        # Every fetch from here on is gated on robots — including the URL a
+        # redirect hands us, not merely the one we asked for.
+        def allows(candidate: str) -> bool:
+            return _robots_allows(groups, enforced, candidate)
+
         # --- the public PFE listing: reachability evidence only -------------
         # Fetched once, never parsed for an offer list. Its structure is
         # recorded precisely so the report can state *why* the sitemap is the
@@ -403,7 +453,9 @@ def run(
             report["outcome"] = "ROBOTS_DISALLOWED"
             report["exit_code"] = EXIT_ROBOTS_DISALLOWED
             return report
-        listing_row, listing_body = _fetch_document(active, PFE_TARGET_URL, timeout)
+        listing_row, listing_body = _fetch_document(
+            active, PFE_TARGET_URL, timeout, allows=allows
+        )
         target_report.update(listing_row)
         if listing_body is not None and not listing_row.get("barrier"):
             summary = summarize_jsonld(listing_body)
@@ -443,7 +495,7 @@ def run(
             return report
 
         time.sleep(max(delay, 0.0))
-        index_row, index_body = _fetch_document(active, chosen, timeout)
+        index_row, index_body = _fetch_document(active, chosen, timeout, allows=allows)
         sitemap_report.update(index_row)
         if index_body is None or index_row.get("barrier"):
             report["outcome"] = (
@@ -472,7 +524,7 @@ def run(
                 offer_files.append(file_report)
                 continue
             time.sleep(max(delay, 0.0))
-            row, body = _fetch_document(active, offer_url, timeout)
+            row, body = _fetch_document(active, offer_url, timeout, allows=allows)
             file_report.update(row)
             if body is None or row.get("barrier"):
                 offer_files.append(file_report)
@@ -515,7 +567,9 @@ def run(
                 observations.append(observation)
                 continue
             time.sleep(max(delay, 0.0))
-            row, body = _fetch_document(active, entry.canonical_url, timeout)
+            row, body = _fetch_document(
+                active, entry.canonical_url, timeout, allows=allows
+            )
             observation.status_code = row.get("status_code")
             observation.final_url = row.get("final_url")
             observation.content_type = row.get("content_type")

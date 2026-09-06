@@ -833,7 +833,8 @@ def combine_offer_sitemaps(parses: list[OfferSitemapParse]) -> SitemapAudit:
 #: never has to read the code to know what they are looking at.
 DETAIL_SAMPLE_STRATEGY = (
     "highest numeric source_external_id first, ties broken by canonical_url "
-    "ascending; deterministic and independent of sitemap file order"
+    "ascending; chosen for deterministic, reproducible ordering only — a "
+    "higher ID is NOT evidence of a more recent publication"
 )
 
 
@@ -842,11 +843,14 @@ def select_detail_sample(
 ) -> tuple[SitemapOfferEntry, ...]:
     """Choose the offer pages the audit will actually fetch.
 
-    Highest numeric ID first, because the newest offers are the ones whose
-    structure a future collector would meet, and because "highest" is a total
-    order the site publishes rather than a taste. Ties — the same ID under two
-    URLs, which is itself a reported problem — fall back to the canonical URL so
-    the choice cannot depend on dictionary or file ordering.
+    Highest numeric ID first, for one reason only: it is a **total order over
+    data the site publishes**, so the same sitemap always yields the same three
+    pages and a reviewer can reproduce the sample exactly. It is not a claim
+    that a higher ID is a newer offer — that the IDs are even assigned in
+    publication order is unestablished, and the ID is a candidate identifier,
+    not a date. Ties — the same ID under two URLs, which is itself a reported
+    problem — fall back to the canonical URL so the choice cannot depend on
+    dictionary or file ordering.
 
     The limit is validated here rather than by the caller, so there is exactly
     one place where the hard bound of three pages can be enforced, and no path

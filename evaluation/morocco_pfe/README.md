@@ -429,10 +429,13 @@ At most **three** offer pages, sequential, with a delay. The bound lives in
 through the audit that reaches the network without passing it.
 
 Selection is deterministic and documented: **highest numeric
-`source_external_id` first, ties broken by canonical URL ascending**. Newest
-offers are the ones a future collector would actually meet, and "highest" is a
-total order the site publishes rather than a matter of taste; the tie-break
-means the choice cannot depend on dictionary or sitemap-file order.
+`source_external_id` first, ties broken by canonical URL ascending**. The only
+reason for that order is **reproducibility**: it is a total order over data the
+site publishes, so the same sitemap always yields the same three pages and a
+reviewer can re-run the sample exactly. It is explicitly **not** a claim that a
+higher ID is a newer offer — whether IDs are even assigned in publication order
+is unestablished, and the ID is a candidate identifier, not a date. The
+tie-break means the choice cannot depend on dictionary or sitemap-file order.
 
 For each sampled page the audit reports, per signal — title, organization,
 location, contract type, internship type, work mode, description, publication
@@ -472,19 +475,33 @@ redirect — and reports it. No browser automation, no browser impersonation, no
 proxy, no CAPTCHA handling, no authentication, no user cookies, no private API
 taken from a JS bundle.
 
-**It never follows a redirect off the Stagiaires.ma hosts.** Redirects are
-resolved by the audit itself rather than by the HTTP client, because a client
-told to follow them would take a same-host URL's `302 Location:
-https://elsewhere/…` and issue a GET to a host the audit never chose to talk
-to — the same-host rule would then hold only until a site decided otherwise.
-Resolution is bounded to a few hops and only ever stays on the same host; an
-off-domain `Location` is recorded as a finding and its target is left
-unfetched.
+**It never follows a redirect off the Stagiaires.ma hosts, and never into a path
+robots disallows.** Redirects are resolved by the audit itself rather than by
+the HTTP client, because a client told to follow them would take a same-host
+URL's `302 Location: https://elsewhere/…` and issue a GET to a host the audit
+never chose to talk to — the same-host rule would then hold only until a site
+decided otherwise.
 
-There is also **no flag that names a URL**. An earlier `--sitemap-url` override
-was removed: it let an operator point the audit at an arbitrary address, which
-turns "the official discovery chain" into "whatever was typed". The sitemap is
-whatever `robots.txt` declares, or the audit stops.
+Resolution is bounded to a few hops, and **every hop is re-checked against both
+rules before the next request is issued**. Checking robots on the URL we asked
+for and not on the one we are handed is not obeying robots: a site could answer
+an allowed `/…` with `302 Location: /private/secret` and the audit would fetch
+a path it was explicitly told not to. A `Location` that is off-domain
+(`OFF_DOMAIN_REDIRECT_NOT_FOLLOWED`) or robots-disallowed
+(`ROBOTS_DISALLOWED_REDIRECT`) is recorded as a finding, with its target, and
+left unfetched.
+
+There is also **no flag that names a discovery URL**. An earlier `--sitemap-url`
+override was removed: it let an operator point the audit at an arbitrary
+address, which turns "the official discovery chain" into "whatever was typed".
+Discovery URLs come only from robots → sitemap index → offer sitemaps; if
+`robots.txt` declares no same-host sitemap, the audit stops.
+
+`--terms-url` remains, and is the sole operator-supplied URL. It is deliberately
+not part of that chain: it must be same-host, it is fetched at most once for
+terms/legal **reachability metadata only**, its text is never read, it never
+becomes a discovery source or contributes an offer, and
+`manual_review_required` stays true regardless of what it returns.
 
 The terms check is deliberately incomplete: **no terms URL is hardcoded**,
 because none has been evidenced. Inventing a plausible-looking

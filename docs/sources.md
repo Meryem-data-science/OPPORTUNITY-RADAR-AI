@@ -165,14 +165,22 @@ GET-only, sequential, one page at a time with a delay, identifying itself as
 status policy — a robots we were *refused* stops the audit, because an unknown
 rule is never read as a permissive one. Detail sampling is hard bounded at
 **three** pages, chosen deterministically (highest numeric ID first, ties broken
-by canonical URL).
+by canonical URL) — an ordering picked so the sample is reproducible, not
+because a higher ID is known to mean a newer offer. It is not.
 
-It **never issues a GET to a host outside `www.stagiaires.ma` / `stagiaires.ma`**.
-Redirects are resolved by the audit itself, bounded and same-host only; an
-off-domain `Location` is reported and its target left unfetched. There is no
-option that names a URL to fetch — the sitemap comes from robots' own
-declaration or the audit stops — so no invocation can turn it into a
-general-purpose fetcher.
+It **never issues a GET to a host outside `www.stagiaires.ma` / `stagiaires.ma`**,
+and never to a path `robots.txt` disallows. Redirects are resolved by the audit
+itself and bounded, and every hop is re-checked against both rules before the
+next request — obeying robots on the URL we asked for but not on the one we are
+handed would let a site redirect an allowed path to a disallowed one. A
+`Location` the audit may not follow is reported and its target left unfetched.
+
+No option names a **discovery** URL: the sitemap comes from robots' own
+declaration or the audit stops, so no invocation can redirect discovery
+elsewhere. The one operator-supplied URL is `--terms-url`, which must be
+same-host, is fetched at most once for terms/legal reachability metadata only,
+never becomes a discovery source, and always leaves
+`manual_review_required` true.
 
 An application link is reported only on explicit evidence of an application
 action: a control whose accessible text says `postuler`, `candidater` or

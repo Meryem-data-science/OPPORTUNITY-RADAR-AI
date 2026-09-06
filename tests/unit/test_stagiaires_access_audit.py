@@ -23,6 +23,7 @@ import pytest
 from evaluation.morocco_pfe.cli import stagiaires_access_audit as cli
 from evaluation.morocco_pfe.stagiaires_access import (
     AUDIT_USER_AGENT,
+    DETAIL_SAMPLE_STRATEGY,
     DETAIL_SIGNALS,
     MAX_DETAIL_LIMIT,
     PFE_TARGET_URL,
@@ -1192,3 +1193,205 @@ def test_a_javascript_only_control_reports_intent_without_a_url() -> None:
 
     assert signal.found is True
     assert signal.href is None
+
+
+# ============ Architect review: robots must gate redirect targets ===========
+
+#: A robots.txt that allows the site but forbids one subtree, plus the sitemap
+#: declaration the audit needs to get past robots at all.
+ROBOTS_WITH_PRIVATE = (
+    "User-agent: *\n"
+    "Disallow: /private/\n"
+    "Allow: /\n"
+    "\n"
+    "Sitemap: https://www.stagiaires.ma/sitemap_v9.xml\n"
+)
+
+
+def _routes_with_private() -> dict[str, tuple[int, str, str]]:
+    routes = _routes()
+    routes[ROBOTS_URL] = (200, ROBOTS_WITH_PRIVATE, "text/plain")
+    routes[f"{HOST}/private/secret"] = (
+        200,
+        "<html><body>" + "x" * 500 + "</body></html>",
+        "text/html",
+    )
+    return routes
+
+
+def test_a_same_host_redirect_into_a_disallowed_path_is_not_followed() -> None:
+    """The finding: robots was checked on the URL we asked for, not the one we got.
+
+    An allowed path answering `302 Location: /private/secret` would previously
+    have been followed, and the audit would have fetched a path robots
+    explicitly disallows. Obeying robots only on the request we chose is not
+    obeying robots.
+    """
+    secret = f"{HOST}/private/secret"
+    client = _FakeClient(_routes_with_private(), redirects={PFE_TARGET_URL: secret})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert secret not in client.requested
+    assert report["pfe_listing"]["barrier"] == cli.ROBOTS_DISALLOWED_REDIRECT
+    assert report["pfe_listing"]["redirect_target"] == secret
+    assert cli.ROBOTS_DISALLOWED_REDIRECT in report["barriers"]
+
+
+def test_the_refused_redirect_target_is_never_requested_anywhere_in_the_run() -> None:
+    """Asserted over every GET, not just the one that triggered the redirect."""
+    secret = f"{HOST}/private/secret"
+    routes = _routes_with_private()
+    client = _FakeClient(
+        routes,
+        redirects={
+            PFE_TARGET_URL: secret,
+            f"{OFFER}/6107-slug-7": f"{HOST}/private/offer-7",
+        },
+    )
+
+    cli.run(client=client, delay=0.0)
+
+    for requested in client.requested:
+        assert "/private/" not in requested, requested
+        assert is_stagiaires_host(requested), requested
+
+
+def test_every_hop_of_a_chain_is_checked_not_only_the_first() -> None:
+    """A redirect chain cannot launder its way into a disallowed path."""
+    hop = f"{HOST}/etape-intermediaire"
+    secret = f"{HOST}/private/secret"
+    routes = _routes_with_private()
+    routes[hop] = (200, "<html><body>" + "x" * 500 + "</body></html>", "text/html")
+    client = _FakeClient(routes, redirects={PFE_TARGET_URL: hop, hop: secret})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert hop in client.requested
+    assert secret not in client.requested
+    assert report["pfe_listing"]["barrier"] == cli.ROBOTS_DISALLOWED_REDIRECT
+    assert report["pfe_listing"]["redirect_chain"] == [hop, secret]
+
+
+def test_an_allowed_same_host_redirect_is_still_followed() -> None:
+    """The retained behaviour: a permitted move is resolved, not refused."""
+    moved = f"{HOST}/stage-emploi-type-stage/pfe-2026"
+    routes = _routes_with_private()
+    routes[moved] = (200, "<html><body>" + "x" * 500 + "</body></html>", "text/html")
+    client = _FakeClient(routes, redirects={PFE_TARGET_URL: moved})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert moved in client.requested
+    assert report["pfe_listing"]["barrier"] is None
+    assert report["pfe_listing"]["status_code"] == 200
+
+
+def test_an_off_domain_redirect_is_still_refused_under_the_robots_gate() -> None:
+    """Adding the robots check must not have displaced the host check."""
+    elsewhere = "https://tracker.example.com/landing"
+    client = _FakeClient(_routes_with_private(), redirects={PFE_TARGET_URL: elsewhere})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert elsewhere not in client.requested
+    assert report["pfe_listing"]["barrier"] == cli.OFF_DOMAIN_REDIRECT
+    assert report["pfe_listing"]["redirect_target_host"] == "tracker.example.com"
+
+
+def test_an_ordinary_run_is_unaffected_by_the_redirect_robots_gate() -> None:
+    client = _FakeClient(_routes())
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert report["outcome"] == "COMPLETED"
+    assert len(client.requested) == 8
+    assert report["detail_audit"]["sampled"] == 3
+    assert report["pfe_listing"]["barrier"] is None
+
+
+def test_robots_itself_is_fetched_before_any_rules_exist_to_gate_it() -> None:
+    """robots.txt has no rules to check against yet; a same-host move still works."""
+    moved = f"{HOST}/robots-v2.txt"
+    routes = _routes_with_private()
+    routes[moved] = (200, ROBOTS_WITH_PRIVATE, "text/plain")
+    client = _FakeClient(routes, redirects={ROBOTS_URL: moved})
+
+    report = cli.run(client=client, delay=0.0)
+
+    assert moved in client.requested
+    assert report["robots"]["available"] is True
+
+
+# --------- Architect review: no unsupported recency claim in the sample -----
+
+
+def test_the_sample_strategy_is_described_as_reproducible_not_as_newest() -> None:
+    """A higher ID is not evidence of a later publication, and must not read so."""
+    strategy = DETAIL_SAMPLE_STRATEGY.lower()
+
+    assert "deterministic" in strategy or "reproducible" in strategy
+    assert "newest" not in strategy
+    assert "recent" not in strategy or "not evidence of a more recent" in strategy
+
+    report = cli.run(client=_FakeClient(_routes()), delay=0.0)
+    assert report["detail_sample_strategy"] == DETAIL_SAMPLE_STRATEGY
+    assert "newest" not in report["detail_audit"]["strategy"].lower()
+
+
+def test_no_module_docstring_claims_id_order_proves_recency() -> None:
+    from evaluation.morocco_pfe import stagiaires_access
+
+    for text in (
+        stagiaires_access.__doc__ or "",
+        stagiaires_access.select_detail_sample.__doc__ or "",
+        cli.__doc__ or "",
+    ):
+        assert "newest" not in text.lower()
+
+
+# --------- Architect review: --terms-url is the one supplied URL ------------
+
+
+def test_terms_url_is_the_only_operator_supplied_url_and_is_same_host_only() -> None:
+    """It exists, it is not a discovery input, and it cannot leave the host."""
+    options = set(cli.build_parser()._option_string_actions)
+    assert "--terms-url" in options
+    assert "--sitemap-url" not in options
+
+    client = _FakeClient(_routes())
+    report = cli.run(
+        client=client, delay=0.0, terms_url="https://example.com/conditions"
+    )
+
+    assert report["terms"]["barrier"] == "NOT_ATTEMPTED_OFF_DOMAIN"
+    assert not any("example.com" in item for item in client.requested)
+
+
+def test_a_terms_url_never_becomes_a_discovery_source() -> None:
+    """Whatever it returns, it contributes no sitemap and no offer."""
+    routes = _routes()
+    terms = f"{HOST}/conditions"
+    # Even if the terms URL served a sitemap index, it must not be read as one.
+    routes[terms] = (200, SITEMAP_INDEX, "application/xml")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, terms_url=terms)
+
+    assert report["sitemap_index"]["selected"] == f"{HOST}/sitemap_v9.xml"
+    assert report["sitemap_index"]["selected_from"] == "robots.txt"
+    assert report["offers"]["accepted_offer_urls"] == 11
+    assert report["terms"]["manual_review_required"] is True
+
+
+def test_a_terms_url_robots_disallows_is_not_fetched() -> None:
+    routes = _routes_with_private()
+    forbidden = f"{HOST}/private/conditions"
+    routes[forbidden] = (200, "<html><body>" + "t" * 500 + "</body></html>", "text/html")
+    client = _FakeClient(routes)
+
+    report = cli.run(client=client, delay=0.0, terms_url=forbidden)
+
+    assert forbidden not in client.requested
+    assert report["terms"]["barrier"] == "ROBOTS_DISALLOWED"
+    assert report["terms"]["manual_review_required"] is True
