@@ -753,3 +753,83 @@ def test_future_strategies_remain_valid_for_undecided_sources() -> None:
     source_map = parse_source_map(document)
     rekrute = {item.id: item for item in source_map.sources}["rekrute"]
     assert rekrute.collection_strategy == "FUTURE_COLLECTOR"
+
+
+# ------------------------------------------- 7C.4A — Stagiaires.ma audit -----
+
+
+def test_stagiaires_remains_an_unactivated_p1_candidate_after_the_audit() -> None:
+    """7C.4A evidences a source. It does not promote one.
+
+    The audit answered "is this collectable?" and the answer changed nothing
+    operational: Stagiaires.ma is still the next candidate, still has no
+    production identity, and is still not a canary. If a later slice activates
+    it, that slice — not this one — has to say so here.
+    """
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["stagiaires_ma"]
+
+    assert entry.priority == "P1"
+    assert entry.coverage_role == "PRIMARY"
+    assert entry.collection_strategy == "FUTURE_COLLECTOR"
+    assert entry.integration_status == "CANDIDATE"
+    assert entry.country == BENCHMARK_COUNTRY_CODE
+    assert entry.production_source_id is None
+    assert entry.live_canary is False
+
+
+def test_the_audited_stagiaires_homepage_is_recorded_as_evidenced() -> None:
+    """EVIDENCED because a real request was made, not because the domain is known."""
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["stagiaires_ma"]
+
+    assert entry.homepage_url == "https://www.stagiaires.ma"
+    assert entry.homepage_url_status == "EVIDENCED"
+
+
+def test_the_stagiaires_note_records_evidence_without_a_legal_or_date_claim() -> None:
+    """The two claims the note must never make, and the two it must.
+
+    A public HTTP 200 is reachability, not permission; and a sitemap `<lastmod>`
+    is not a publication date. Both are easy to lose in a later edit, and both
+    would be wrong in a way nobody would notice until the data was already
+    corrupted or the project had asserted something it cannot support.
+    """
+    note = " ".join(
+        {
+            item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+        }["stagiaires_ma"].notes.split()
+    )
+
+    assert "NO legal claim" in note
+    assert "reachability, not permission" in note
+    assert "NOT a publication date" in note
+    assert "CANDIDATE source_external_id" in note
+    assert "no bypass" in note.lower()
+    assert "No collector" in note
+
+
+def test_the_audit_did_not_add_stagiaires_to_the_production_catalogue() -> None:
+    """The production-isolation invariant, asserted from the source-map side."""
+    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+
+    assert {source.id for source in configured} == {
+        "scale_ai_greenhouse",
+        "artefact_greenhouse",
+        "linkedin_job_alert_email",
+    }
+    assert not any("stagiaires" in source.id.lower() for source in configured)
+    assert {source.type for source in configured} == {
+        "greenhouse",
+        "gmail_linkedin_alert",
+    }
+
+
+def test_linkedin_is_still_the_only_active_entry_after_7c4a() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    assert [entry.id for entry in source_map.active_sources] == [
+        "linkedin_job_alert_email"
+    ]

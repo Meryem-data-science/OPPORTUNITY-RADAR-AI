@@ -21,10 +21,12 @@
 # * almost no homepage URL below has been fetched. `homepage_url_status` says
 #   whether the URL is evidence (EVIDENCED — either handed to us, or confirmed
 #   by a real request in a later phase), a domain written from public knowledge
-#   and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN). ReKrute is
-#   the one entry whose URL was actually requested: Phase 7C.3 reached its
-#   public robots.txt and terms pages, which is why it reads EVIDENCED. No
-#   other entry's status should be read as a claim that anyone visited it;
+#   and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN). Two entries
+#   have URLs that were actually requested: ReKrute, whose public robots.txt and
+#   terms pages Phase 7C.3 reached, and Stagiaires.ma, whose robots.txt, public
+#   PFE listing and official sitemap chain a bounded GET-only Phase 7C.4A audit
+#   reached. Both read EVIDENCED for that reason and for no other. No other
+#   entry's status should be read as a claim that anyone visited it;
 # * LinkedIn is collected from Gmail job-alert mail and from nothing else. There
 #   is no LinkedIn scraping in this project and the strategy registry has no
 #   member that would describe one.
@@ -109,7 +111,7 @@ sources:
   - id: stagiaires_ma
     name: Stagiaires.ma
     homepage_url: https://www.stagiaires.ma
-    homepage_url_status: WELL_KNOWN_UNVERIFIED
+    homepage_url_status: EVIDENCED
     source_class: INTERNSHIP_BOARD
     priority: P1
     coverage_role: PRIMARY
@@ -120,8 +122,32 @@ sources:
     live_canary: false
     notes: >-
       Internship-specific board, so its listings are close to the product's
-      narrowed scope (planned 7C.4). No collector exists and no access method is
-      verified.
+      narrowed scope. Phase 7C.4A audited its public access and structure and
+      it remains a CANDIDATE: nothing collects it. A bounded, GET-only,
+      robots-obeying audit reached both https://www.stagiaires.ma/robots.txt and
+      the public PFE page /stage-emploi-type-stage/stage-de-fin-d-etudes, which
+      is why homepage_url_status now reads EVIDENCED rather than
+      WELL_KNOWN_UNVERIFIED; it records those responses and nothing more.
+      robots.txt declares an official sitemap index, which declares public offer
+      sitemaps of the offre-sitemap*.xml family, which list offer detail URLs
+      shaped /stage-emploi-maroc/<numeric-id>-<slug>. That numeric ID is a
+      CANDIDATE source_external_id: it was observed, and one audit cannot
+      establish that it is stable over time, so no such claim is made. The PFE
+      listing itself is a client-rendered application and is deliberately NOT
+      the discovery mechanism — the site's own sitemap chain is, and reading it
+      needs no browser. Sitemap <lastmod> is page-modification metadata and is
+      NOT a publication date; nothing in this project maps it to published_at.
+      No bypass of anything was attempted or implemented: no browser
+      automation, no browser impersonation, no proxy, no CAPTCHA handling, no
+      authentication, no user cookies, no private API found in a JS bundle. This
+      entry makes NO legal claim in either direction; a public HTTP 200 is
+      reachability, not permission, and the site's terms remain a separate
+      question for a human. No collector, no production parser, no
+      config/sources.yaml row, no SourceConfig type, no factory registration, no
+      RadarAgent run, no database row, no migration and no scheduler exist for
+      it. The reusable audit is
+      evaluation/morocco_pfe/cli/stagiaires_access_audit.py. The planned next
+      step is Phase 7C.4B, only after the Architect has validated 7C.4A.
 
   - id: stage_ma
     name: Stage.ma

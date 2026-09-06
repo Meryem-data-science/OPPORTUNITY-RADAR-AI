@@ -1,4 +1,4 @@
-# Morocco PFE evaluation — 7C.1 source map and gold benchmark, 7C.2A Gmail intake audit
+# Morocco PFE evaluation — 7C.1 source map and gold benchmark, 7C.2A Gmail intake audit, 7C.4A Stagiaires.ma structure audit
 
 This directory is the foundation for one question, and it does not yet answer
 it:
@@ -359,6 +359,143 @@ its date. The unit tests use invented messages to prove the aggregation rules;
 a synthetic fixture is never evidence of what the mailbox contains, and no test
 here is a validation of live coverage.
 
+## 7C.4A — the Stagiaires.ma public access and structure audit
+
+Stagiaires.ma is the next collector **candidate**, and 7C.4A is the slice that
+asks whether collecting it is feasible at all — before anybody writes a line of
+collector. It is an audit and nothing else. When it finished, Stagiaires.ma had
+exactly as much production presence as before: none.
+
+    evaluation/morocco_pfe/stagiaires_access.py            # pure, opens no socket
+    evaluation/morocco_pfe/cli/stagiaires_access_audit.py  # the only file that fetches
+
+Run it:
+
+```bash
+python -m evaluation.morocco_pfe.cli.stagiaires_access_audit
+python -m evaluation.morocco_pfe.cli.stagiaires_access_audit --limit 1
+```
+
+### The discovery chain, which is the site's own
+
+```
+robots.txt
+  -> the Sitemap: line it declares      (an official sitemap index)
+    -> offre-sitemap*.xml               (the public offer sitemaps)
+      -> /stage-emploi-maroc/<numeric-id>-<slug>
+```
+
+Every link in that chain is *discovered*, not assumed. The sitemap index is
+read from robots' own `Sitemap:` declaration — if robots declares none, the
+audit stops and says so rather than guessing a URL. The offer sitemaps are read
+from the index, matched as a family (`offre-sitemap*.xml`) rather than as a
+hardcoded pair, so a third file is picked up the day it appears. Only same-host
+entries are accepted: "the index told us to" is not a reason to fetch another
+domain.
+
+**The PFE listing is deliberately not the discovery source.** It is a
+client-rendered application whose initial HTML does not carry the offer list as
+ordinary links, so parsing it would mean driving a browser — which this phase
+forbids and which the sitemap chain makes unnecessary. The audit fetches the
+listing exactly once, to record that it is publicly reachable and what it
+structurally contains, and never parses an offer list out of it.
+
+### `lastmod` is not a publication date
+
+The single most important invariant here. A sitemap `<lastmod>` says a *page*
+changed; it does not say an *offer* was posted. A re-render, a template edit or
+a counter bump all move it. So `SitemapOfferEntry` carries `sitemap_lastmod`
+and has **no `published_at` field at all** — there is nothing for a later phase
+to quietly map it to, and a test asserts the field set never grows one. Whether
+the site states a real publication date is a question about the *detail page*,
+which the detail audit answers separately and may well answer with "it does
+not".
+
+### The numeric ID is a candidate, not a contract
+
+`/stage-emploi-maroc/<id>` exposes an integer that looks like a stable per-offer
+identity, and the audit extracts it as a **candidate** `source_external_id`.
+One audit cannot establish stability over time, so nothing here claims it. The
+digits are kept as published (`007` stays `007`; normalizing it to `7` would
+invent an equality the site never stated), and where the data contradicts the
+assumption — one ID under two distinct canonical URLs — the audit **surfaces
+the collision** rather than deduplicating it away. That finding is what decides
+whether the ID may ever be a production key.
+
+### The bounded detail sample
+
+At most **three** offer pages, sequential, with a delay. The bound lives in
+`select_detail_sample`, which validates the limit itself, so there is no path
+through the audit that reaches the network without passing it.
+
+Selection is deterministic and documented: **highest numeric
+`source_external_id` first, ties broken by canonical URL ascending**. Newest
+offers are the ones a future collector would actually meet, and "highest" is a
+total order the site publishes rather than a matter of taste; the tie-break
+means the choice cannot depend on dictionary or sitemap-file order.
+
+For each sampled page the audit reports, per signal — title, organization,
+location, contract type, internship type, work mode, description, publication
+date, deadline, application URL — whether the public HTML carries it and
+**through which generic mechanism**: JSON-LD `JobPosting`, microdata,
+OpenGraph/`<meta>`, `<title>`/`<h1>`/`<time>`. Nothing site-specific is
+consulted. A signal reported as absent means the page does not publish it
+through any standard mechanism, which is a structural finding, not an
+instruction to go and invent a selector for it. Descriptions are reported by
+**length only** — third-party job text is counted, never copied into this
+repository — and JSON-LD is reported as type and key *names*, never values.
+
+### What it writes, and what it will not do
+
+It writes nothing: no SQLite, no benchmark row, no raw HTML on disk, no
+`config/sources.yaml` change. It prints one JSON object of structural findings
+to stdout. It is GET-only, sequential, identifies itself honestly as
+`OpportunityRadarAI-AccessAudit/1.0`, and obeys `robots.txt` under an explicit
+status policy: 200 is parsed and obeyed; 404/410 means the file is absent so no
+explicit rule applies (a statement about robots.txt alone, **not** permission of
+any kind); 401/403/407/429 means we were *refused* the file, and an unknown rule
+is never read as a permissive one, so the audit stops before requesting anything
+else. It stops at any wall — 403, 429, a CAPTCHA or bot challenge, a login
+redirect — and reports it. No browser automation, no browser impersonation, no
+proxy, no CAPTCHA handling, no authentication, no user cookies, no private API
+taken from a JS bundle.
+
+The terms check is deliberately incomplete: **no terms URL is hardcoded**,
+because none has been evidenced. Inventing a plausible-looking
+`/conditions-generales` would be exactly the fabrication this evaluation layer
+exists to prevent. An operator who can see the site passes the real URL with
+`--terms-url`; until then the report says the check was not attempted and why.
+When a URL *is* given, the audit records its status and reachability and reads
+nothing: `manual_review_required` is unconditionally true. A public HTTP 200 is
+reachability, not permission, and this project makes no legal claim in either
+direction.
+
+### What 7C.4A is not
+
+* **not production coverage** and **not an active collector.** There is no
+  `config/sources.yaml` row, no `SourceConfig` type, no collector, no factory
+  registration, no `RadarAgent` run, no database write, no migration, no
+  scheduler, no endpoint and no frontend change for Stagiaires.ma. A test walks
+  `services/`, `config/`, `migrations/` and `apps/` and fails if the word
+  appears in any of them;
+* **not proof of recall.** The sitemap is what the site chose to publish there.
+  How much of Stagiaires.ma's real content it covers is unmeasured;
+* **not proof that `lastmod` is a publication date.** See above;
+* **not a Data & AI filter.** No filtering of any kind is implemented here;
+* **not legal permission.** It records what public GETs returned, no more.
+
+### Tests, and why they are offline
+
+`tests/unit/test_stagiaires_access_audit.py` is entirely offline: every byte it
+parses is a tiny synthetic fixture written in the test file. A test that needs
+the real site fails when the site is slow, when a marketing team edits a
+template, or when CI has no egress — none of which says anything about this
+code. The fixtures imitate the *shapes* the audit must survive (a namespaced
+sitemap, a `<lastmod>`, an off-domain `<loc>`, a malformed ID, a JSON-LD
+`JobPosting`), never real Stagiaires.ma content. No observed count is asserted
+anywhere: live numbers change, and a test pinned to today's total would be a
+false failure tomorrow.
+
 ## Validation
 
 `validator.py` is offline and deterministic. It opens no socket — no
@@ -454,7 +591,16 @@ own eligibility rule — and, for a `GMAIL_ALERT` entry, of type
   migrations or any scheduler. Reconsider only if an official or public
   integration channel suitable for this purpose becomes available, or if the
   product scope changes.
-* **7C.4** — Stagiaires.ma collector.
+* **7C.4A** — Stagiaires.ma public access and sitemap/detail-structure
+  feasibility audit. Implemented, above: read-only, GET-only, robots-obeying,
+  bounded at three detail pages, writes nothing and activates nothing. The
+  source map records Stagiaires.ma as `P1` / `PRIMARY` / `FUTURE_COLLECTOR` /
+  `CANDIDATE` with a null `production_source_id`, and its `homepage_url_status`
+  is now `EVIDENCED` because a real bounded audit reached the host.
+* **7C.4B** — a Stagiaires.ma collector, **only after the Architect has
+  validated 7C.4A**. Not started, and deliberately not begun inside the audit:
+  a collector, a `SourceConfig` type, a factory registration and a
+  `config/sources.yaml` row are that slice's work and must be reviewed as such.
 * **7C.5** — Stage.ma collector.
 * **7C.x** — official ATS integration, where a reusable ATS is confirmed to
   exist.
