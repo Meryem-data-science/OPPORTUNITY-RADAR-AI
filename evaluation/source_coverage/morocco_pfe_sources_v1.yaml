@@ -172,9 +172,49 @@ sources:
     live_canary: false
     notes: >-
       The source of both seed rows of morocco_pfe_gold_v1, which is why its
-      domain is evidenced rather than assumed: real PFE/AI postings were
-      observed on it. Being a benchmark source does not make it a collected one
-      — no collector exists (planned 7C.5).
+      domain is evidenced rather than assumed. Being a benchmark source does not
+      make it a collected one: no collector exists, nothing collects it, and this
+      entry stays a CANDIDATE. Phase 7C.5A ran a bounded, GET-only,
+      robots-obeying public audit locally and it COMPLETED with exit 0 and a
+      feasibility of PUBLIC_HTML_CANDIDATE — evidence for considering a later
+      7C.5B, not approval of one. What that run actually observed:
+      https://www.stage.ma/robots.txt returned HTTP 200 as text/plain, its
+      single applicable group was obeyed, the audited targets were allowed, and
+      it declared NO Sitemap. No sitemap filename was guessed and no sitemap was
+      fetched, so there is no sitemap-based discovery evidence for this source
+      either way. Of the three fixed public surfaces, the homepage and the
+      generic /offres-stage listing returned HTTP 200 but exposed ZERO offer
+      detail URLs in ordinary server HTML, so /offres-stage is NOT established
+      as a usable discovery surface. /specialites/computer-science exposed 10
+      real /offres-stage/<numeric-id>-<slug> URLs directly in server-returned
+      HTML, needing no browser and no JavaScript execution — that one specialty
+      surface is the whole of the browser-free discovery evidence, and nothing
+      here claims the other specialties behave the same way or that this covers
+      Stage.ma as a whole. Discovery did not fall back on the historical
+      benchmark canaries. Three live-discovered detail pages were sampled and
+      all returned HTTP 200 and exposed schema.org JobPosting. All three carried
+      a title; only ONE of the three exposed a usable organization name through
+      the audit's structural evidence, and location was likewise absent on the
+      sampled pages — organization and location completeness are therefore NOT
+      proven, and any later architecture must decide conservatively what to do
+      when they are missing. All three sampled pages were EXPIRED at audit time,
+      which says nothing about whether the source currently carries active
+      offers. All three exposed JobPosting.datePosted as a valid candidate
+      normalized to 2026-03-23; this audit persisted nothing and asserted no
+      published_at, and no crawl time, sitemap timestamp or numeric URL id was
+      used as a substitute. No 1970 sentinel appeared in this three-page sample,
+      which does not retire the audit's sentinel protection. All three showed an
+      explicit "Postuler" application intent but no usable href was established
+      through the generic extraction, so no application_url is claimed and
+      nothing off-domain was fetched. The numeric ID in
+      /offres-stage/<id> remains only a CANDIDATE source_external_id and is
+      never read as recency or as a date. No browser automation, browser
+      impersonation, JavaScript execution, authentication, cookies, proxy,
+      CAPTCHA handling, private API or bypass of any kind was used. This entry
+      makes NO legal claim in either direction: a public HTTP 200 is
+      reachability, not permission, and the site's terms remain a question for a
+      human. Stage.ma remains non-production, and Phase 7C.5B is a separate
+      Architect decision.
 
   - id: talentsoft_hosted_career_sites
     name: TalentSoft-hosted employer career sites

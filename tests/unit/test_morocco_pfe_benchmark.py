@@ -918,3 +918,128 @@ def test_no_entry_claims_production_identity_without_being_active() -> None:
         else:
             assert entry.production_source_id is None, entry.id
             assert entry.integration_status != "ACTIVE", entry.id
+
+
+# ------------------------------------------- 7C.5A — Stage.ma audit evidence --
+
+
+def stage_ma_entry():
+    return {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["stage_ma"]
+
+
+def stage_ma_note() -> str:
+    return " ".join(stage_ma_entry().notes.split())
+
+
+def test_stage_ma_stays_non_production_after_its_audit() -> None:
+    """A completed audit is evidence about a source, not a promotion of one.
+
+    7C.5A reached the site, discovered real offer URLs and sampled real detail
+    pages. None of that makes Stage.ma collected: no collector exists, and the
+    entry's operational fields are exactly what they were before the run.
+    """
+    entry = stage_ma_entry()
+
+    assert entry.integration_status == "CANDIDATE"
+    assert entry.collection_strategy == "FUTURE_COLLECTOR"
+    assert entry.production_source_id is None
+    assert entry.live_canary is False
+    assert entry.priority == "P1"
+    assert entry.coverage_role == "PRIMARY"
+    assert entry.country == BENCHMARK_COUNTRY_CODE
+
+
+def test_the_stage_ma_note_records_the_completed_live_audit() -> None:
+    note = stage_ma_note()
+
+    assert "7C.5A" in note
+    assert "COMPLETED with exit 0" in note
+    assert "PUBLIC_HTML_CANDIDATE" in note
+
+
+def test_the_stage_ma_note_records_where_discovery_actually_worked() -> None:
+    """The specialty surface carried it; the generic listing did not.
+
+    Recording only "discovery worked" would let a later phase build on
+    /offres-stage, which returned 200 and exposed nothing.
+    """
+    note = stage_ma_note()
+
+    assert "/specialites/computer-science exposed 10 real" in note
+    assert "ZERO offer detail URLs in ordinary server HTML" in note
+    assert "/offres-stage is NOT established as a usable discovery surface" in note
+
+
+def test_the_stage_ma_note_records_that_no_sitemap_was_declared_or_guessed() -> None:
+    note = stage_ma_note()
+
+    assert "declared NO Sitemap" in note
+    assert "No sitemap filename was guessed" in note
+
+
+def test_the_stage_ma_note_does_not_overclaim_field_completeness() -> None:
+    """One of three pages carried an organization. The note has to say so.
+
+    "JobPosting is present" is true and would read as "the fields are there";
+    the gap between those two is what a later parser would fall into.
+    """
+    note = stage_ma_note()
+
+    assert "only ONE of the three exposed a usable organization" in note
+    assert "NOT proven" in note
+    assert "all Stage.ma detail pages" not in note
+    assert "straightforward" not in note
+
+
+def test_the_stage_ma_note_does_not_generalize_from_the_sample() -> None:
+    note = stage_ma_note()
+
+    # Expired pages in a three-page sample say nothing about the whole source.
+    assert "says nothing about whether the source currently carries active" in note
+    assert "nothing here claims the other specialties behave the same way" in note
+
+
+def test_the_stage_ma_note_keeps_the_date_and_identity_boundaries() -> None:
+    note = stage_ma_note()
+
+    assert "persisted nothing and asserted no published_at" in note
+    assert "CANDIDATE source_external_id" in note
+    assert "never read as recency" in note
+    assert "does not retire the audit's sentinel protection" in note
+
+
+def test_the_stage_ma_note_claims_no_application_url() -> None:
+    note = stage_ma_note()
+
+    assert "no usable href was established" in note
+    assert "no application_url is claimed" in note
+
+
+def test_the_stage_ma_note_keeps_the_legal_boundary() -> None:
+    """Reachability is not permission, and this note may never say otherwise."""
+    note = stage_ma_note()
+
+    assert "NO legal claim in either direction" in note
+    assert "reachability, not permission" in note
+    assert "remain a question for a human" in note
+
+
+def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
+    note = stage_ma_note()
+
+    assert "no collector exists" in note
+    assert "remains non-production" in note
+    assert "ACTIVE" not in note
+    assert "7C.5B is a separate Architect decision" in note
+
+
+def test_stage_ma_is_still_not_an_active_production_mapped_source() -> None:
+    source_map = load_source_map(DEFAULT_SOURCE_MAP_PATH)
+
+    assert "stage_ma" not in {entry.id for entry in source_map.active_sources}
+    assert {entry.id for entry in source_map.active_sources} == {
+        "linkedin_job_alert_email",
+        "stagiaires_ma",
+    }

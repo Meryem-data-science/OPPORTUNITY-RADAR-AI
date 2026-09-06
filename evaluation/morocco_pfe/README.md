@@ -539,6 +539,156 @@ sitemap, a `<lastmod>`, an off-domain `<loc>`, a malformed ID, a JSON-LD
 anywhere: live numbers change, and a test pinned to today's total would be a
 false failure tomorrow.
 
+## 7C.5A — the Stage.ma public access and discovery audit
+
+Stage.ma supplied both seed rows of the gold benchmark, which makes it a source
+we already have evidence *about* — and evidence about two postings in the past
+says nothing about whether the site can be collected today. 7C.5A asks the
+question a collector would have to answer first, and is allowed to answer it
+with "no".
+
+    evaluation/morocco_pfe/stage_ma_access.py             # pure, opens no socket
+    evaluation/morocco_pfe/cli/stage_ma_access_audit.py   # the only file that fetches
+
+Run it:
+
+```bash
+python -m evaluation.morocco_pfe.cli.stage_ma_access_audit --limit 3
+```
+
+### What it audits
+
+A fixed, bounded set of public surfaces — the homepage, `/offres-stage`, and the
+candidate specialty page `/specialites/computer-science` — asking of each whether
+ordinary server-returned HTML carries `/offres-stage/<numeric-id>-<slug>` links,
+whether specialty pages are materially more useful than the generic listing, and
+whether the offers appear only after a browser runs. A sitemap is read **only if
+`robots.txt` declares one**: no filename is guessed, because treating a lucky
+200 on a name we invented as an official discovery contract is exactly the
+fabrication this layer exists to prevent.
+
+There is deliberately **no flag that names a discovery URL**. `--terms-url` is
+the one operator-supplied URL: same-host only, fetched at most once for
+reachability metadata, never a discovery source, and `manual_review_required`
+stays true whatever it returns.
+
+### GET-only, and it writes nothing
+
+Sequential, one page at a time, with a delay and an explicit timeout, under an
+honest audit user agent. Detail sampling is hard bounded at **five** pages and
+defaults to three. It obeys `robots.txt` — matching on path *and* query — under
+the same fail-closed policy as 7C.4A: a refused robots stops the run, and an
+absent one means no rule applies, which is a statement about robots.txt alone and
+**not permission of any kind**. Redirects are resolved by the audit, bounded, and
+re-checked against both the same-host rule and robots at every hop.
+
+No browser, no browser impersonation, no JavaScript execution, no Selenium or
+Playwright, no authentication, no cookies, no proxy, no CAPTCHA handling, no
+POST, no application submission, no private API. An off-domain application URL
+may be **recorded as a string**; it is never fetched. Nothing is written: no
+SQLite, no benchmark row, no page body on disk. One JSON document goes to stdout,
+and it carries structure — statuses, counts, JSON-LD type and key *names*,
+per-field presence — never a page body, and descriptions by length only.
+
+### Execution status is not the feasibility verdict
+
+The distinction this slice turns on. An audit that ran perfectly and found no
+usable discovery path is `COMPLETED` / exit 0 with a feasibility of
+`INSUFFICIENT_DISCOVERY` — never the answer being disappointing. A negative
+feasibility result is a real result, and the vocabulary has words for it:
+`PUBLIC_HTML_CANDIDATE`, `SITEMAP_CANDIDATE`, `MULTI_SURFACE_CANDIDATE`,
+`INSUFFICIENT_DISCOVERY`, `STRUCTURE_INSUFFICIENT`, `ACCESS_BLOCKED`, `UNKNOWN`.
+
+What fails a run, by one fixed precedence:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `BARRIER` | 2 | We were **refused** — 401/403/407/429, a CAPTCHA or bot challenge, a login wall, a prohibited off-domain redirect. |
+| `ROBOTS_DISALLOWED` | 3 | robots forbids a **required** target: a fixed discovery surface, a sitemap the official chain requires, or a selected live detail page — including one reached only via a redirect. It is recorded and never fetched. |
+| `INCOMPLETE` | 1 | Something required could not be **read** — a timeout, a 5xx, a malformed document, a redirect loop that never settled, or a sitemap budget that would have forced a partial read. |
+| `COMPLETED` | 0 | Everything required was honestly checked. |
+
+Three cases are deliberately kept apart rather than collapsed. A **5xx** is a
+server that failed, not a refusal, so it is `INCOMPLETE`. A **404/410** is a page
+that is gone: on a discovery surface or an offer page it is recorded as
+`PAGE_UNAVAILABLE` — a fact about the source's lifecycle, not our access, and the
+audit can still complete — but on a robots-declared sitemap it is a required
+document we could not read, so it is `INCOMPLETE`. A **benchmark canary** is
+optional fallback evidence: if robots forbids one it is recorded and skipped, and
+it never decides an otherwise complete run.
+
+### The sitemap budget is a refusal, not a truncation
+
+`MAX_SITEMAPS = 3` is a **global** document budget across the robots-declared
+roots *and* any children a sitemap index names. Traversal starts only at
+`Sitemap:` URLs robots declares and follows only children an official index we
+already read told us about — no filename is ever guessed. When robots declares
+more roots than the budget, or an index names more children than the budget has
+left, the audit **stops and reports itself incomplete** rather than reading the
+first few. Reading three of nine sitemaps and calling the result a sitemap audit
+is how a partial read comes to look complete, and no sitemap-based feasibility
+claim may rest on one.
+
+Partial evidence is also **quarantined**, not merely labelled. When the chain is
+incomplete, the offer URLs the documents we *did* read yielded stay in the report
+as structural evidence — and contribute nothing: they do not enter discovery, do
+not become detail-sampling targets, and do not support a sitemap-based
+feasibility verdict. Observing a URL is not covering a source, and letting the
+observation through one layer up would rebuild exactly the
+partial-looks-complete failure the budget exists to prevent.
+
+Sitemap URLs are also normalized for **fetching** rather than for identity, so
+`?part=1` and `?part=2` stay two documents. Stripping the query would request a
+URL the site never declared, fetch one file twice and silently lose the other.
+Offer URLs keep the identity normalization, which does drop the query — the two
+answer different questions.
+
+### Benchmark canaries are not discovery
+
+When nothing is discovered live, the two committed gold-benchmark Stage.ma URLs
+may be fetched to learn whether a detail page still parses. They are labelled
+`BENCHMARK_CANARY` rather than `LIVE_DISCOVERED`, and **can never count as
+evidence that discovery works** — a test asserts that a canary alone still
+yields `INSUFFICIENT_DISCOVERY`. Fetching a URL we already had in a file proves
+nothing about finding new ones.
+
+### UNKNOWN stays UNKNOWN, and 1970 is not a date
+
+A date the site displays is a **candidate** for a later phase to consider, never
+a publication timestamp this audit asserts. `01/01/1970`, `1970-01-01` and their
+relatives are flagged `SENTINEL_OR_INVALID_DATE`: a date column that was never
+set renders as epoch zero far more often than any site admits, and storing it
+would put a 1970 timestamp on a 2026 internship. Nothing is fabricated to replace
+one — not the crawl time, not a sitemap timestamp, and nothing derived from the
+numeric URL id, which is never read as a date or as a position in time.
+
+A date is a candidate only when the page says it is *the publication date*:
+schema.org `JobPosting.datePosted`, an explicit label ("Publiée le", "Date de
+publication"), or a `<time datetime>` whose `itemprop` or immediately preceding
+text ties it to publication. A **bare `<time>` does not qualify** — an offer page
+routinely carries an application deadline, a start date and a last-modified
+stamp, and taking whichever came first would attach an arbitrary date to the
+offer while looking entirely principled.
+
+Publication state (`PUBLISHED` / `UNPUBLISHED` / `EXPIRED` / `UNKNOWN`) is taken
+only from the page's own words, never inferred from an HTTP status; expiry
+overrides a publication label on the same page, because a page reading "publiée
+le 3 mars — offre expirée" describes a closed offer.
+
+### What 7C.5A is not
+
+**It does not activate Stage.ma.** There is no collector, no `SourceConfig`
+type, no `config/sources.yaml` row, no factory registration, no `RadarAgent`
+change, no migration, no SQLite write and no scheduler for it, and the source
+map still records it as `FUTURE_COLLECTOR` / `CANDIDATE` with a null
+`production_source_id`. Production imports nothing from this module.
+
+It makes **no legal claim in either direction**: a public HTTP 200 is
+reachability, not permission, and the site's terms remain a question for a human.
+
+**Phase 7C.5B is a separate Architect decision.** This slice produces evidence
+for that decision and does not make it.
+
 ## Validation
 
 `validator.py` is offline and deterministic. It opens no socket — no
