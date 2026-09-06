@@ -21,7 +21,9 @@ def write_registry(tmp_path: Path, source: str) -> Path:
 
 def test_load_valid_source_registry() -> None:
     sources = load_source_registry(Path("config/sources.yaml"))
-    assert len(sources) == 3
+    # Four since Phase 7C.4B added the Stagiaires.ma sitemap collector; the
+    # three below are unchanged by it, which is what the rest of this asserts.
+    assert len(sources) == 4
     assert len({source.id for source in sources}) == len(sources)
 
     by_id = {source.id: source for source in sources}
@@ -47,6 +49,21 @@ def test_load_valid_source_registry() -> None:
     assert linkedin.status == "active"
     assert linkedin.gmail_query == "newer_than:7d from:jobalerts-noreply@linkedin.com"
     assert linkedin.gmail_message_limit == 50
+    # The three pre-existing sources gained no bound; only the sitemap collector
+    # needs one, because only it fetches a page per offer.
+    for source in (scale_ai, artefact, linkedin):
+        assert source.detail_page_limit is None
+
+    stagiaires = by_id["stagiaires_ma"]
+    assert stagiaires.type == "stagiaires_sitemap"
+    assert stagiaires.enabled is True
+    assert stagiaires.category == "jobs"
+    assert stagiaires.country == "MA"
+    assert stagiaires.frequency_minutes == 360
+    assert stagiaires.status == "active"
+    assert stagiaires.detail_page_limit == 25
+    assert stagiaires.organization is None
+    assert stagiaires.board_token is None
 
 
 def test_production_linkedin_query_is_the_job_alert_sender_over_seven_days() -> None:

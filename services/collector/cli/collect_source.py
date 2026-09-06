@@ -1,10 +1,16 @@
-"""Read-only command for dry-running one configured opportunity source."""
+"""Read-only command for dry-running one configured opportunity source.
+
+Generic by type: the collector comes from the registry via `collector_for`, so
+every configured source is dry-run through the collector it is actually
+registered to. `--dry-run` stays a required safeguard and nothing here persists —
+candidates are printed and discarded.
+"""
 
 import argparse
 import json
 import sys
 
-from services.collector.collectors.greenhouse import GreenhouseCollector
+from services.collector.collectors.factory import collector_for
 from services.collector.logging_config import get_logger
 from services.collector.sources import (
     DisabledSourceError,
@@ -47,7 +53,11 @@ def run(source_id: str, limit: int) -> list[dict[str, str | None]]:
         extra={"event": "source_collection_started", "source_id": source.id},
     )
     try:
-        candidates = GreenhouseCollector(source).collect()
+        # The factory, not a named collector: this command dry-runs whatever
+        # the source's type is registered to, so a new collector needs no change
+        # here. It was hardcoded to Greenhouse, which quietly meant every other
+        # configured source was dry-run through the wrong collector.
+        candidates = collector_for(source).collect()
     except (RuntimeError, ValueError) as error:
         logger.error(
             f"Source collection failed: {error}",

@@ -745,20 +745,33 @@ def test_the_report_carries_no_page_body() -> None:
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_no_production_source_type_or_collector_exists_for_stagiaires() -> None:
-    """7C.4A is an audit. Nothing here may become a collector by accident."""
-    from services.collector.collectors.factory import COLLECTOR_REGISTRY
-    from services.collector.sources import load_source_registry
+def test_the_audit_itself_still_activates_nothing() -> None:
+    """The audit remains an audit, even now that a collector exists.
 
-    assert set(COLLECTOR_REGISTRY) == {"greenhouse", "gmail_linkedin_alert"}
-    assert not any("stagiaires" in key.lower() for key in COLLECTOR_REGISTRY)
+    7C.4A asserted that no Stagiaires production source or collector existed
+    anywhere; Phase 7C.4B added both, deliberately and under review, so that
+    exact assertion belonged to that phase. What must still hold is narrower and
+    permanent: *this* module is evidence infrastructure. It builds no collector,
+    reads no production registry, and cannot put a source into service — the
+    import-direction test below is what keeps that true.
+    """
+    import sys
 
-    configured = load_source_registry(REPOSITORY_ROOT / "config" / "sources.yaml")
-    assert not any("stagiaires" in source.id.lower() for source in configured)
-    assert {source.type for source in configured} == {
-        "greenhouse",
-        "gmail_linkedin_alert",
-    }
+    for name in (
+        "evaluation.morocco_pfe.stagiaires_access",
+        "evaluation.morocco_pfe.cli.stagiaires_access_audit",
+    ):
+        __import__(name)
+        module = sys.modules[name]
+        # Nothing production-side is reachable from the audit's namespace, so it
+        # has nothing to build, register or persist with.
+        for attribute in vars(module).values():
+            origin = getattr(attribute, "__module__", "") or ""
+            assert not origin.startswith("services."), f"{name} -> {origin}"
+
+    report = cli.run(client=_FakeClient(_routes()), delay=0.0)
+    assert report["activated_production_source"] is False
+    assert report["wrote_database"] is False
 
 
 def test_a_stagiaires_production_source_would_still_be_rejected(tmp_path: Path) -> None:
@@ -784,29 +797,20 @@ def test_a_stagiaires_production_source_would_still_be_rejected(tmp_path: Path) 
         load_source_registry(registry)
 
 
-def test_the_production_tree_does_not_mention_stagiaires_at_all() -> None:
-    """An architectural proof, not a style check.
+def test_production_never_depends_on_the_evaluation_layer() -> None:
+    """The layering direction, which outlives any single phase.
 
-    If a later slice adds a parser, a collector or a `config/sources.yaml` row
-    for Stagiaires.ma, this fails — which is correct, because that slice is
-    7C.4B and must be reviewed as such rather than arriving inside an audit.
+    Phase 7C.4B legitimately added production Stagiaires code, so scanning the
+    production tree for the word no longer proves anything. The invariant that
+    still matters is the arrow between the layers: `evaluation/` is an audit
+    trail, free to change as evidence changes, and production importing it would
+    make the runtime depend on a record of what we once checked.
     """
     offenders = []
-    for directory in ("services", "config", "migrations", "apps"):
-        root = REPOSITORY_ROOT / directory
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            if not path.is_file() or path.suffix in {".pyc", ".png", ".ico", ".svg"}:
-                continue
-            if "node_modules" in path.parts:
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
-            if "stagiaires" in text.lower():
-                offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
+    for path in (REPOSITORY_ROOT / "services").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "evaluation." in text or "from evaluation" in text:
+            offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
     assert offenders == []
 
 

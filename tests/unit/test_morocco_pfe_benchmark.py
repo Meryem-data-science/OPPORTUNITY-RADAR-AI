@@ -619,18 +619,25 @@ def test_a_map_declaring_itself_a_production_registry_is_rejected() -> None:
         parse_source_map(document)
 
 
-def test_the_production_catalogue_is_untouched_by_this_slice() -> None:
-    """7C.1 activates nothing: the operational catalogue is still Phase 2's."""
+def test_the_production_catalogue_holds_only_sources_a_phase_really_added() -> None:
+    """The catalogue grows only when a phase actually integrates a collector.
+
+    It was Phase 2's three rows through 7C.1-7C.4A, which activated nothing.
+    Phase 7C.4B added the fourth: Stagiaires.ma, with a real collector behind it.
+    The list is pinned so a source cannot appear here without a phase claiming it.
+    """
     configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
 
     assert {source.id for source in configured} == {
         "scale_ai_greenhouse",
         "artefact_greenhouse",
         "linkedin_job_alert_email",
+        "stagiaires_ma",
     }
     assert {source.type for source in configured} == {
         "greenhouse",
         "gmail_linkedin_alert",
+        "stagiaires_sitemap",
     }
 
 
@@ -811,20 +818,41 @@ def test_the_stagiaires_note_records_evidence_without_a_legal_or_date_claim() ->
     assert "No collector" in note
 
 
-def test_the_audit_did_not_add_stagiaires_to_the_production_catalogue() -> None:
-    """The production-isolation invariant, asserted from the source-map side."""
-    configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
+def test_the_stagiaires_production_source_is_configured_and_bounded() -> None:
+    """Phase 7C.4B's row, pinned to the values the architecture approved.
 
-    assert {source.id for source in configured} == {
-        "scale_ai_greenhouse",
-        "artefact_greenhouse",
-        "linkedin_job_alert_email",
+    7C.4A asserted the opposite — that no such row existed — because an audit
+    that quietly activated its subject would have been an audit of nothing. That
+    invariant belonged to that phase; this one records what replaced it, and
+    keeps the bound from being widened without a test failing.
+    """
+    configured = {
+        source.id: source for source in load_source_registry(PRODUCTION_SOURCE_REGISTRY)
     }
-    assert not any("stagiaires" in source.id.lower() for source in configured)
-    assert {source.type for source in configured} == {
-        "greenhouse",
-        "gmail_linkedin_alert",
-    }
+    stagiaires = configured["stagiaires_ma"]
+
+    assert stagiaires.type == "stagiaires_sitemap"
+    assert stagiaires.enabled is True
+    assert stagiaires.country == "MA"
+    assert stagiaires.detail_page_limit == 25
+    assert stagiaires.frequency_minutes == 360
+
+
+def test_the_source_map_still_records_stagiaires_honestly() -> None:
+    """Code existing is not evidence that it works.
+
+    The map moves to ACTIVE only on a real dry-run and SQLite double-run, not
+    because a collector was written. Until that evidence exists it stays a
+    CANDIDATE with no production identity — which is also why the validator's
+    "only an ACTIVE entry may name a production_source_id" rule still holds.
+    """
+    entry = {
+        item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
+    }["stagiaires_ma"]
+
+    assert entry.integration_status in {"CANDIDATE", "ACTIVE"}
+    if entry.integration_status == "CANDIDATE":
+        assert entry.production_source_id is None
 
 
 def test_linkedin_is_still_the_only_active_entry_after_7c4a() -> None:
