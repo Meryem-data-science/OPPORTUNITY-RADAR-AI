@@ -55,7 +55,8 @@ sources:
     production_source_id: linkedin_job_alert_email
     live_canary: false
     notes: >-
-      The only source in this map that already collects. Opportunities are read
+      The first source in this map that collected, and since Phase 7C.4B no
+      longer the only one. Opportunities are read
       conservatively out of LinkedIn job-alert email through the read-only Gmail
       API; LinkedIn itself is never authenticated to, opened or scraped. Alert
       mail is a filtered feed of what LinkedIn chose to send, so its coverage of
@@ -103,11 +104,11 @@ sources:
       second-hand.
 
   # ---------------------------------------------------------------- P1 -----
-  # The current collector candidates, in the order the architect fixed:
-  # Stagiaires.ma, then Stage.ma, then the TalentSoft-hosted career sites.
-  # None of them is implemented. ReKrute used to head this list; Phase 7C.3
-  # evaluated it and did not select it, so it now sits in the
-  # evaluated/not-selected section at the end of this file rather than here.
+  # The collector candidates, in the order the architect fixed: Stagiaires.ma,
+  # then Stage.ma, then the TalentSoft-hosted career sites. Stagiaires.ma is
+  # implemented and ACTIVE as of Phase 7C.4B; the rest are not. ReKrute used to
+  # head this list; Phase 7C.3 evaluated it and did not select it, so it now
+  # sits in the evaluated/not-selected section at the end of this file.
   - id: stagiaires_ma
     name: Stagiaires.ma
     homepage_url: https://www.stagiaires.ma
@@ -115,39 +116,47 @@ sources:
     source_class: INTERNSHIP_BOARD
     priority: P1
     coverage_role: PRIMARY
-    collection_strategy: FUTURE_COLLECTOR
-    integration_status: CANDIDATE
+    collection_strategy: EXISTING_COLLECTOR
+    integration_status: ACTIVE
     country: MA
-    production_source_id: null
+    production_source_id: stagiaires_ma
     live_canary: false
     notes: >-
       Internship-specific board, so its listings are close to the product's
-      narrowed scope. Phase 7C.4A audited its public access and structure and
-      it remains a CANDIDATE: nothing collects it. A bounded, GET-only,
-      robots-obeying audit reached both https://www.stagiaires.ma/robots.txt and
-      the public PFE page /stage-emploi-type-stage/stage-de-fin-d-etudes, which
-      is why homepage_url_status now reads EVIDENCED rather than
-      WELL_KNOWN_UNVERIFIED; it records those responses and nothing more.
-      robots.txt declares an official sitemap index, which declares public offer
-      sitemaps of the offre-sitemap*.xml family, which list offer detail URLs
-      shaped /stage-emploi-maroc/<numeric-id>-<slug>. That numeric ID is a
-      CANDIDATE source_external_id: it was observed, and one audit cannot
-      establish that it is stable over time, so no such claim is made. The PFE
-      listing itself is a client-rendered application and is deliberately NOT
-      the discovery mechanism — the site's own sitemap chain is, and reading it
-      needs no browser. Sitemap <lastmod> is page-modification metadata and is
-      NOT a publication date; nothing in this project maps it to published_at.
-      No bypass of anything was attempted or implemented: no browser
-      automation, no browser impersonation, no proxy, no CAPTCHA handling, no
-      authentication, no user cookies, no private API found in a JS bundle. This
-      entry makes NO legal claim in either direction; a public HTTP 200 is
-      reachability, not permission, and the site's terms remain a separate
-      question for a human. No collector, no production parser, no
-      config/sources.yaml row, no SourceConfig type, no factory registration, no
-      RadarAgent run, no database row, no migration and no scheduler exist for
-      it. The reusable audit is
-      evaluation/morocco_pfe/cli/stagiaires_access_audit.py. The planned next
-      step is Phase 7C.4B, only after the Architect has validated 7C.4A.
+      narrowed scope. It collects. Phase 7C.4A established public feasibility
+      and structure; Phase 7C.4B added the bounded production collector behind
+      the config/sources.yaml row stagiaires_ma, and this entry is ACTIVE
+      because a real local validation proved it works, not because the code
+      exists. Production discovery follows the site's own chain: robots.txt, the
+      official sitemap it declares, the offre-sitemap*.xml family read from that
+      index, and a bounded set of offer detail pages capped by
+      detail_page_limit, which is 25. The public PFE listing is a
+      client-rendered application and is deliberately NOT the discovery
+      mechanism; the sitemap chain needs no browser. Real evidence, from the
+      user's local Windows run against PR #80: a GET-only production dry-run
+      succeeded and observed 25 candidates with real titles, organizations,
+      Morocco locations and stagiaires.ma detail URLs, persisting nothing;
+      against a fresh dedicated SQLite validation database, run #1 created 25
+      opportunities and 25 qualification rows, and run #2 created 0 and updated
+      25 with 25 qualifications unchanged, both runs recording SUCCESS with
+      parser_version stagiaires-jsonld-v1. 25 source links resolved to 25
+      distinct opportunities across 25 distinct source URLs, with no duplicate
+      source URL observed. That is idempotence demonstrated for the batch
+      observed on that day, and nothing broader is claimed. The numeric ID in
+      /stage-emploi-maroc/<id> remains only a CANDIDATE source_external_id: no
+      database constraint keys on it, and a larger ID is NOT treated as evidence
+      of a more recent publication anywhere, including the collector's fetch
+      order. Sitemap <lastmod> remains page-modification metadata used only to
+      decide which pages a bounded run refreshes first; it is NOT a publication
+      date and nothing maps it to published_at, which comes solely from the
+      posting's own datePosted and is null when the page states none. No bypass
+      of anything was attempted or implemented: no browser automation, no
+      browser impersonation, no proxy, no CAPTCHA handling, no authentication,
+      no user cookies, no private API found in a JS bundle. This entry makes NO
+      legal claim in either direction; a public HTTP 200 is reachability, not
+      permission, and the site's terms remain a separate question for a human.
+      The 7C.4A audit that established feasibility is still reusable at
+      evaluation/morocco_pfe/cli/stagiaires_access_audit.py.
 
   - id: stage_ma
     name: Stage.ma
