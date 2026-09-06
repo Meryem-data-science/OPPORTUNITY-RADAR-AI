@@ -1,6 +1,6 @@
 # Opportunity sources
 
-The operational catalogue in `config/sources.yaml` currently has three enabled,
+The operational catalogue in `config/sources.yaml` currently has five enabled,
 active sources:
 
 | Source ID | Type | Intake |
@@ -8,6 +8,8 @@ active sources:
 | `scale_ai_greenhouse` | Greenhouse | Public Scale AI board (`scaleai`) |
 | `artefact_greenhouse` | Greenhouse | Public Artefact board (`artefact`) |
 | `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:jobalerts-noreply@linkedin.com`, at most 50 messages |
+| `stagiaires_ma` | Stagiaires.ma sitemap | Official sitemap chain, at most 25 detail pages per run |
+| `stage_ma` | Stage.ma specialty HTML | `/specialites/computer-science` only, at most 25 detail pages per run |
 
 ## Greenhouse
 
@@ -199,6 +201,86 @@ page body is stored in this repository.**
 
 Phase **7C.4B** — an actual collector — is the next step, and only after the
 Architect has validated 7C.4A. Until then Stagiaires.ma collects nothing.
+
+## Stage.ma — Informatique specialty only (Phase 7C.5B)
+
+Stage.ma is collected from **one page**:
+
+```
+https://www.stage.ma/specialites/computer-science
+```
+
+**This is not comprehensive Stage.ma coverage, and the collector does not claim
+it is.** The Phase 7C.5A audit reached the homepage and the generic
+`/offres-stage` listing and found *zero* offer links in either's ordinary server
+HTML; the Informatique specialty page carried ten. So the collector reads that
+one surface and nothing else: no sitemap is fetched (robots declares none, and
+guessing one is not discovery), no other specialty is crawled, no "Afficher
+tout" is followed, and no pagination is discovered. Each of those would need its
+own audit.
+
+### How it behaves
+
+GET-only, sequential, one request at a time with a delay and an explicit
+timeout, no retries, no concurrency, under an honest collector user agent.
+`robots.txt` is fetched first and obeyed, matched on path **and** query;
+redirects are resolved by the collector, bounded, same-host only, with every hop
+re-checked against robots before the next request. No browser, no browser
+impersonation, no JavaScript execution, no Selenium or Playwright, no
+authentication, no cookies, no proxy, no CAPTCHA handling, no POST and no
+application submission. An off-domain application URL may be **recorded**; it is
+never fetched.
+
+A run reads at most `detail_page_limit` (25) detail pages, taken in the
+listing's own document order — never sorted by the numeric offer id, which is a
+candidate identifier and not evidence of recency.
+
+### What it skips, and what it fails
+
+The distinction matters, because Stage.ma publishes anonymous and expired offers
+alongside live ones. These are **individual skips** — ordinary content states,
+and the run continues:
+
+* the detail page 404s between listing discovery and the fetch;
+* the page says it is **expired** or **unpublished**;
+* the employer is deliberately anonymous, or unavailable from both the posting
+  and its listing card.
+
+These are **source failures** — the run is recorded FAILED rather than returning
+a smaller batch that looks like a slow day:
+
+* robots refused, unresolvable, or disallowing a required target;
+* the listing page unreachable, blocked, or returning zero offer links **without
+  the site's own explicit empty state** (a structural change is not "no
+  opportunities today");
+* an off-domain or robots-disallowed redirect;
+* a selected detail page that returns 200 but publishes no `JobPosting`;
+* an offer with no usable title from either the posting or its listing card.
+
+An empty batch is honest only when the site itself says it has nothing.
+
+### What it records
+
+`title` from `JobPosting.title`, falling back to the listing card. `organization`
+from `hiringOrganization.name`, falling back to the card's own employer-profile
+anchor text — the profile page is never fetched, and "Anonyme" is not a company.
+`location` and `description` are optional and stay `None` when absent; nothing is
+inferred from `country: MA`. `published_at` comes from `JobPosting.datePosted`
+alone, and is `None` when it is missing, malformed or an epoch sentinel —
+`01/01/1970` is never stored as a publication date, and no crawl time,
+`validThrough`, start date or URL id stands in for one.
+
+**No Data & AI filtering and no PFE keyword filtering happen here.** The
+collector observes; the existing qualification layer classifies; later ranking
+prioritizes.
+
+### Status
+
+The collector, its `stage_ma_html` source type, its `config/sources.yaml` row and
+its factory registration exist. **Activation is a separate question**: the
+Morocco PFE source map still records Stage.ma as `FUTURE_COLLECTOR` /
+`CANDIDATE` with a null `production_source_id`, because code existing is not
+evidence that it works. A real local dry-run and SQLite double-run come first.
 
 ## ReKrute — evaluated in Phase 7C.3, not selected
 

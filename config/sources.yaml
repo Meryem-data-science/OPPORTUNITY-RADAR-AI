@@ -35,3 +35,11 @@ sources:
     frequency_minutes: 360
     status: active
     detail_page_limit: 25
+  - id: stage_ma
+    type: stage_ma_html
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 360
+    status: active
+    detail_page_limit: 25

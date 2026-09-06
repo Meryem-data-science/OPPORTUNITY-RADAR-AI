@@ -21,9 +21,10 @@ def write_registry(tmp_path: Path, source: str) -> Path:
 
 def test_load_valid_source_registry() -> None:
     sources = load_source_registry(Path("config/sources.yaml"))
-    # Four since Phase 7C.4B added the Stagiaires.ma sitemap collector; the
-    # three below are unchanged by it, which is what the rest of this asserts.
-    assert len(sources) == 4
+    # Five: Phase 7C.4B added the Stagiaires.ma sitemap collector and 7C.5B the
+    # Stage.ma specialty collector. The originals are unchanged by either, which
+    # is what the rest of this asserts.
+    assert len(sources) == 5
     assert len({source.id for source in sources}) == len(sources)
 
     by_id = {source.id: source for source in sources}
@@ -53,6 +54,17 @@ def test_load_valid_source_registry() -> None:
     # needs one, because only it fetches a page per offer.
     for source in (scale_ai, artefact, linkedin):
         assert source.detail_page_limit is None
+
+    stage_ma = by_id["stage_ma"]
+    assert stage_ma.type == "stage_ma_html"
+    assert stage_ma.enabled is True
+    assert stage_ma.category == "jobs"
+    assert stage_ma.country == "MA"
+    assert stage_ma.frequency_minutes == 360
+    assert stage_ma.status == "active"
+    assert stage_ma.detail_page_limit == 25
+    assert stage_ma.organization is None
+    assert stage_ma.board_token is None
 
     stagiaires = by_id["stagiaires_ma"]
     assert stagiaires.type == "stagiaires_sitemap"

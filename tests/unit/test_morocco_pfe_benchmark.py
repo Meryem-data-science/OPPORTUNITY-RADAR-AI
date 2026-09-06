@@ -626,8 +626,9 @@ def test_the_production_catalogue_holds_only_sources_a_phase_really_added() -> N
     """The catalogue grows only when a phase actually integrates a collector.
 
     It was Phase 2's three rows through 7C.1-7C.4A, which activated nothing.
-    Phase 7C.4B added the fourth: Stagiaires.ma, with a real collector behind it.
-    The list is pinned so a source cannot appear here without a phase claiming it.
+    Phase 7C.4B added Stagiaires.ma and 7C.5B added Stage.ma, each with a real
+    collector behind it. The list is pinned so a source cannot appear here
+    without a phase claiming it.
     """
     configured = load_source_registry(PRODUCTION_SOURCE_REGISTRY)
 
@@ -636,11 +637,13 @@ def test_the_production_catalogue_holds_only_sources_a_phase_really_added() -> N
         "artefact_greenhouse",
         "linkedin_job_alert_email",
         "stagiaires_ma",
+        "stage_ma",
     }
     assert {source.type for source in configured} == {
         "greenhouse",
         "gmail_linkedin_alert",
         "stagiaires_sitemap",
+        "stage_ma_html",
     }
 
 
