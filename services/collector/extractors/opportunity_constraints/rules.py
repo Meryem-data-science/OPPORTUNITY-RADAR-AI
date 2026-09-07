@@ -207,7 +207,7 @@ _TYPE_SIGNALS: tuple[tuple[OpportunityType, str, tuple[str, ...], bool], ...] = 
 #: tuple above, and Unicode word characters (`ö`, `é`) are word characters, which
 #: is what makes the German cases fail to match.
 #:
-#: The Phase 2 classifier has always matched this way (`_contains` in
+#: The Phase 2 classifier has always matched this way (`contains_phrase` in
 #: `services/collector/qualification/classifier.py`); this brings the constraint
 #: rules to the same standard.
 _TYPE_SIGNAL_PATTERNS: dict[str, re.Pattern[str]] = {

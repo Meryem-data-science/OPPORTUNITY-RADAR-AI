@@ -38,7 +38,8 @@ def _selected(report: AuditReport, qualification: str | None, limit: int):
 
 def _human(report: AuditReport, qualification: str | None, limit: int) -> str:
     lines = [
-        "Opportunity qualification audit (STRICTLY READ-ONLY; classifications are not persisted)",
+        "Opportunity qualification + fine Data/AI category audit "
+        "(STRICTLY READ-ONLY; no classification is persisted)",
         f"Active opportunities inspected: {report.total_active_opportunities}",
         f"Sources ({len(report.sources)}): {', '.join(report.sources) or '(none)'}",
         f"Qualification counts: {report.qualification_counts}",
@@ -46,9 +47,12 @@ def _human(report: AuditReport, qualification: str | None, limit: int) -> str:
         f"Opportunity type counts: {report.opportunity_type_counts}",
         f"Employment type counts: {report.employment_type_counts}",
         f"Listing quality counts: {report.listing_quality_counts}",
+        f"Fine primary category counts: {report.fine_primary_category_counts}",
+        f"Fine secondary category counts: {report.fine_secondary_category_counts}",
+        f"Fine uncategorized (no safe fine category): {report.fine_uncategorized_count}",
     ]
     for index, item in enumerate(_selected(report, qualification, limit), 1):
-        result = item.classification
+        result, fine = item.classification, item.fine_classification
         lines.extend((
             "", f"[{index}] id={item.id} {result.qualification} / {result.primary_domain}",
             f"Title: {item.title!r} | Organization: {item.organization!r}",
@@ -60,6 +64,10 @@ def _human(report: AuditReport, qualification: str | None, limit: int) -> str:
             f"Description signals: {list(result.matched_description_signals)}",
             f"Exclusions: {list(result.matched_exclusion_signals)}",
             f"Reasons: {'; '.join(result.reasons)}",
+            f"Fine primary: {fine.primary_category} ({fine.classifier_version})"
+            f" | Fine secondaries: {[str(value) for value in fine.secondary_categories]}",
+            f"Fine evidence: {[(str(e.category), str(e.field), str(e.kind), e.signal) for e in fine.evidence]}",
+            f"Fine reasons: {'; '.join(fine.reasons)}",
         ))
     return "\n".join(lines)
 

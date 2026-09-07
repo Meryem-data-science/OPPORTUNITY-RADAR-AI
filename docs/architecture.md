@@ -1270,6 +1270,101 @@ in [database.md](database.md#opportunity-skill-and-language-requirements) and
 the commands are in
 [operations.md](operations.md#opportunity-skill-and-language-requirements-phase-35b).
 
+## Fine Data/AI categories (Phase 8A.1)
+
+Qualification and fine categories answer two different questions, and the
+packages keep them apart on purpose:
+
+```text
+    classifier.py       is this opportunity Data/AI relevant?      CORE_TARGET
+    taxonomy.py         (coarse Qualification + Domain)            ADJACENT_TARGET
+                                                                   OUT_OF_SCOPE
+                                                                   UNCERTAIN
+
+    fine_classifier.py  if it is, which Data/AI sub-domain?        DATA_SCIENCE
+    fine_taxonomy.py    (fine FineCategory)                        DATA_ANALYTICS
+                                                                   DATA_ENGINEERING
+                                                                   MACHINE_LEARNING
+                                                                   ARTIFICIAL_INTELLIGENCE
+                                                                   GENERATIVE_AI
+                                                                   NLP
+                                                                   COMPUTER_VISION
+                                                                   BUSINESS_INTELLIGENCE
+                                                                   MLOPS
+                                                                   OTHER
+```
+
+`FineCategory` is a second vocabulary, not a replacement for `Domain`. Nothing
+about `Qualification`, `Domain`, persistence or matching changed: the matching
+subsystem still consumes `qualification`, `primary_domain`, `opportunity_type`
+and `classifier_version` exactly as before.
+
+**The fine classifier runs only on an opportunity the coarse one already
+qualified.** `CORE_TARGET` and `ADJACENT_TARGET` are the only two inputs that
+produce a fine category; `OUT_OF_SCOPE` and `UNCERTAIN` produce
+`primary_category = None`, no secondaries and no evidence. That reuses the
+existing conservative gate rather than re-deciding relevance, so an AI Account
+Executive, an AI Product Manager and a Data Center Technician stay out by the
+rule that already excluded them, and a generic Software Engineer with nothing
+but "we are an AI company" boilerplate stays unclassified.
+
+**`OTHER` is not unknown.** `OTHER` states that the opportunity *is*
+demonstrably Data/AI and that none of the supported fine categories is
+evidenced — a Data Governance Analyst, or an AI Advisory Consultant. Absence of
+a category is the other thing entirely: nothing was proven, so nothing is
+claimed. `UNKNOWN != FALSE` holds here as everywhere, and an unqualified
+opportunity never becomes `OTHER`.
+
+**Evidence, not scores.** Every category is justified by a
+`FineEvidence(category, field, kind, signal)` row — the field is `TITLE` or
+`DESCRIPTION`, the kind is `ROLE_PHRASE`, `CONTEXT_PHRASE` or
+`CONCRETE_CONCEPT`, and the signal is the normalized phrase that matched. There
+is no confidence number, because nothing here is calibrated. Evidence order is
+the precedence order, never a set or hash order.
+
+**The primary category is chosen in two tiers, then by precedence.** Title
+evidence decides the primary; description evidence decides it only when the
+title evidenced nothing at all, and otherwise contributes secondaries. That is
+the title-first strategy the coarse classifier already uses, and it is why a
+Data Engineer whose description also covers model serving stays primarily
+`DATA_ENGINEERING` with `MLOPS` exposed as a secondary. Within one tier,
+`FINE_CATEGORY_PRECEDENCE` decides, ordering specific sub-domains above the
+broad ones they specialize:
+
+```text
+GENERATIVE_AI  NLP  COMPUTER_VISION  MLOPS  MACHINE_LEARNING
+ARTIFICIAL_INTELLIGENCE  DATA_SCIENCE  DATA_ENGINEERING
+BUSINESS_INTELLIGENCE  DATA_ANALYTICS  OTHER
+```
+
+So "Machine Learning Research Engineer, Agents - Enterprise GenAI" is
+`GENERATIVE_AI` with `MACHINE_LEARNING` secondary, and an analyst title holding
+explicit BI tooling is read as `BUSINESS_INTELLIGENCE` rather than as generic
+analytics.
+
+**Description evidence stays conservative.** A description names a category
+only when at least two *distinct* concrete concepts of that category matched —
+aliases of one concept collapse to one piece of evidence, and broad labels
+("machine learning", "AI", "LLM") are absent from the concept tables entirely.
+Company and product vocabulary therefore evidences nothing.
+
+The rules read normalized title and description text and the coarse
+qualification, and nothing else. Location, employer, source, profile and CV are
+not parameters of `classify_fine_categories`, so geography and employer
+neutrality are structural rather than a rule somebody could forget.
+
+**Versioning is separate.** The fine rules are `fine-data-ai-rules-v1`, distinct
+from `qualification-rules-v1`, because they are a distinct rule system; it
+changes whenever an observable fine classification changes.
+
+**Phase 8A.1 is read-only.** The fine categories exist in the classifier and in
+the read-only audit (`fine_primary_category_counts`,
+`fine_secondary_category_counts`, `fine_uncategorized_count`, plus the fine
+result per audited opportunity), and nowhere else. There is no migration, no
+column, no persisted row, no history table, and no API, frontend, notification
+or ranking change. Persistence is deliberately deferred to Phase 8B, so that it
+is designed after the real audit has been read rather than before.
+
 ## Data-processing boundaries
 
 - Opportunity persistence provides repeat-observation idempotence for a source.
@@ -1282,6 +1377,10 @@ the commands are in
 - Qualification is deterministic, explainable, versioned derived data. It is not
   personalized matching, ranking, or a recommendation model, and geography is
   metadata rather than an exclusion rule.
+- A fine Data/AI category is a second reading of the same text, never a second
+  opinion about relevance. It exists only where qualification already said
+  Data/AI, `OTHER` means "Data/AI, no supported sub-domain" rather than "we do
+  not know", and Phase 8A.1 persists none of it.
 - Source run history is recorded evidence, not a judgement. A run row states
   what one attempt observed, with unknown metrics left `NULL` rather than
   filled with zeros, and an unfinished attempt left `RUNNING` rather than given

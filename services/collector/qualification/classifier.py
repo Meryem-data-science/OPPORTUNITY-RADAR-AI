@@ -51,16 +51,18 @@ def normalize_text(value: str | None) -> str:
     return " ".join(normalized.split())
 
 
-def _contains(text: str, phrase: str) -> bool:
+def contains_phrase(text: str, phrase: str) -> bool:
+    """Boundary-safe phrase containment shared by every deterministic rule set."""
     return bool(text) and re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
 
 
-def _matches(text: str, signals: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(signal for signal in signals if _contains(text, signal))
+def matched_phrases(text: str, signals: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the matching signals in declaration order, never a set."""
+    return tuple(signal for signal in signals if contains_phrase(text, signal))
 
 
 def _domain_matches(text: str, rules: dict[Domain, tuple[str, ...]]) -> dict[Domain, tuple[str, ...]]:
-    return {domain: found for domain, signals in rules.items() if (found := _matches(text, signals))}
+    return {domain: found for domain, signals in rules.items() if (found := matched_phrases(text, signals))}
 
 
 def _context_matches(text: str) -> dict[Domain, tuple[str, ...]]:
@@ -73,7 +75,7 @@ def _context_matches(text: str) -> dict[Domain, tuple[str, ...]]:
         if (independent := tuple(
             signal
             for signal in signals
-            if not any(signal != other and _contains(other, signal) for other in all_signals)
+            if not any(signal != other and contains_phrase(other, signal) for other in all_signals)
         ))
     }
 
@@ -84,18 +86,18 @@ def _strong_description_concepts(text: str) -> dict[Domain, tuple[str, ...]]:
         domain: matched
         for domain, concepts in STRONG_DESCRIPTION_CONCEPTS.items()
         if (matched := tuple(
-            concept for concept, aliases in concepts.items() if _matches(text, aliases)
+            concept for concept, aliases in concepts.items() if matched_phrases(text, aliases)
         ))
     }
 
 
 def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
     """Infer from title first; ordinary description vocabulary cannot override it."""
-    title_pfe = _matches(title, PFE_SIGNALS)
-    title_apprenticeship = _matches(title, APPRENTICESHIP_SIGNALS)
-    title_internship = _matches(title, INTERNSHIP_SIGNALS)
-    title_graduate = _matches(title, GRADUATE_SIGNALS)
-    description_pfe = _matches(description, DESCRIPTION_PFE_SIGNALS)
+    title_pfe = matched_phrases(title, PFE_SIGNALS)
+    title_apprenticeship = matched_phrases(title, APPRENTICESHIP_SIGNALS)
+    title_internship = matched_phrases(title, INTERNSHIP_SIGNALS)
+    title_graduate = matched_phrases(title, GRADUATE_SIGNALS)
+    description_pfe = matched_phrases(description, DESCRIPTION_PFE_SIGNALS)
     if title_pfe:
         return OpportunityType.PFE
     if title_apprenticeship:
@@ -111,7 +113,7 @@ def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
 
 def _infer_employment_type(title: str, description: str) -> EmploymentType:
     combined = f"{title} {description}"
-    matched = [kind for kind, signals in EMPLOYMENT_SIGNALS.items() if _matches(combined, signals)]
+    matched = [kind for kind, signals in EMPLOYMENT_SIGNALS.items() if matched_phrases(combined, signals)]
     return matched[0] if len(matched) == 1 else EmploymentType.UNKNOWN
 
 
@@ -132,12 +134,12 @@ def classify_opportunity(
     title_context = _context_matches(normalized_title)
     description_context = _context_matches(normalized_description)
     strong_description = _strong_description_concepts(normalized_description)
-    exclusions = _matches(normalized_title, NON_TARGET_ROLE_SIGNALS)
+    exclusions = matched_phrases(normalized_title, NON_TARGET_ROLE_SIGNALS)
 
     title_positive = {**title_adjacent, **title_core}
-    technical_roles = _matches(normalized_title, TECHNICAL_ROLE_SIGNALS)
-    postdoc_roles = _matches(normalized_title, POSTDOC_ROLE_SIGNALS)
-    is_generic_technical = bool(_matches(normalized_title, GENERIC_TECHNICAL_TITLES))
+    technical_roles = matched_phrases(normalized_title, TECHNICAL_ROLE_SIGNALS)
+    postdoc_roles = matched_phrases(normalized_title, POSTDOC_ROLE_SIGNALS)
+    is_generic_technical = bool(matched_phrases(normalized_title, GENERIC_TECHNICAL_TITLES))
     strong_concept_count = sum(len(concepts) for concepts in strong_description.values())
     description_promotes = is_generic_technical and strong_concept_count >= 2
     structural_title_match = bool((technical_roles or postdoc_roles) and title_context)
