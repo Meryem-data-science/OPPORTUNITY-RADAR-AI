@@ -37,6 +37,11 @@ class AuditReport:
     fine_primary_category_counts: dict[str, int]
     fine_secondary_category_counts: dict[str, int]
     fine_uncategorized_count: int
+    #: Phase 8A.2 calibration read-out: how many opportunities each deciding rule
+    #: accounts for. Both are read-time aggregations of values already computed
+    #: above, so they add no query, no write and no schema.
+    qualification_reason_counts: dict[str, int]
+    fine_reason_counts: dict[str, int]
     opportunities: tuple[AuditedOpportunity, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -73,6 +78,11 @@ def _fine_secondary_counts(items: list[AuditedOpportunity]) -> dict[str, int]:
         for item in items
         for category in item.fine_classification.secondary_categories
     ).items()))
+
+
+def _deciding_reason_counts(reasons: list[tuple[str, ...]]) -> dict[str, int]:
+    """Count the first reason of each result: the rule that decided the outcome."""
+    return dict(sorted(Counter(value[0] for value in reasons if value).items()))
 
 
 def _audited(row: tuple[object, ...]) -> AuditedOpportunity:
@@ -117,6 +127,8 @@ def audit_database(database: str | Path) -> AuditReport:
             _count(items, "employment_type"), _count(items, "listing_quality"),
             _fine_primary_counts(items), _fine_secondary_counts(items),
             sum(1 for item in items if item.fine_classification.primary_category is None),
+            _deciding_reason_counts([item.classification.reasons for item in items]),
+            _deciding_reason_counts([item.fine_classification.reasons for item in items]),
             tuple(items),
         )
     finally:

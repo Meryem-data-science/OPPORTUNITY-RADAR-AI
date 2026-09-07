@@ -5,8 +5,10 @@ import re
 import unicodedata
 
 from .taxonomy import (
-    ADJACENT_SIGNALS, APPRENTICESHIP_SIGNALS, CORE_SIGNALS, DOMAIN_PRECEDENCE,
+    ADJACENT_DOMAINS, ADJACENT_SIGNALS, ADVISORY_ROLE_SIGNALS, APPRENTICESHIP_SIGNALS,
+    CORE_SIGNALS, DOMAIN_PRECEDENCE,
     DESCRIPTION_PFE_SIGNALS, DOMAIN_CONTEXT_SIGNALS, EMPLOYMENT_SIGNALS,
+    EXPLICIT_DOMAIN_ROLE_FAMILIES, EXPLICIT_TITLE_DOMAIN_SIGNALS,
     GENERIC_CAREERS_TITLES,
     GENERIC_JOBS_TITLES, GENERIC_TECHNICAL_TITLES, GRADUATE_SIGNALS,
     INTERNSHIP_SIGNALS, NON_TARGET_ROLE_SIGNALS, PFE_SIGNALS,
@@ -15,7 +17,16 @@ from .taxonomy import (
 )
 
 
-CLASSIFIER_VERSION = "qualification-rules-v1"
+#: Bumped from ``qualification-rules-v1`` by the Phase 8A.2 calibration: the
+#: broadened role families, the CORE/ADJACENT domain split and the concrete
+#: NLP/CV description concepts all change observable qualification output.
+CLASSIFIER_VERSION = "qualification-rules-v2"
+
+TECHNICAL_STRUCTURAL_REASON = "technical role family + explicit Data/AI title context"
+EXPLICIT_STRUCTURAL_REASON = "role family + explicit Data/AI domain phrase in title"
+ADVISORY_CAP_REASON = (
+    "advisory/strategy role family: Data/AI advisory work is adjacent, not core"
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +102,58 @@ def _strong_description_concepts(text: str) -> dict[Domain, tuple[str, ...]]:
     }
 
 
+def technical_role_families(normalized_title: str) -> tuple[str, ...]:
+    """Return the technical role-family phrases a normalized title matched.
+
+    This is the narrow "the person builds or researches things" vocabulary —
+    engineer, research scientist, forward deployed, postdoc and friends. It is
+    deliberately *not* GENERIC_TECHNICAL_TITLES, which also holds "analyst" and
+    "consultant". Exposed as a named predicate because the fine classifier needs
+    the same population, and duplicating the list would let the two drift.
+    """
+    return (
+        matched_phrases(normalized_title, TECHNICAL_ROLE_SIGNALS)
+        + matched_phrases(normalized_title, POSTDOC_ROLE_SIGNALS)
+    )
+
+
+def advisory_role_families(normalized_title: str) -> tuple[str, ...]:
+    """Return the advisory/strategy role markers a normalized title matched."""
+    return matched_phrases(normalized_title, ADVISORY_ROLE_SIGNALS)
+
+
+def _explicit_title_domains(
+    title_context: dict[Domain, tuple[str, ...]]
+) -> dict[Domain, tuple[str, ...]]:
+    """Filter already-matched title context down to the high-specificity phrases.
+
+    Reading the explicit table as a filter over ``title_context`` rather than as
+    an independent match keeps one source of truth for phrase matching and for
+    nested-phrase suppression, and makes the subset invariant observable.
+    """
+    return {
+        domain: kept
+        for domain, signals in title_context.items()
+        if (kept := tuple(
+            signal for signal in signals
+            if signal in EXPLICIT_TITLE_DOMAIN_SIGNALS.get(domain, ())
+        ))
+    }
+
+
+def _promoted_qualification(primary: Domain, is_advisory: bool) -> Qualification:
+    """Decide CORE vs ADJACENT once, for every rule that promotes a title.
+
+    Domain family decides it, so a generalized rule agrees with the explicit
+    role tables: analytics, governance and cross-cutting Data/AI domains are
+    adjacent exactly as ADJACENT_SIGNALS already says. An advisory/strategy
+    title caps the outcome at adjacent whatever its domain.
+    """
+    if is_advisory or primary in ADJACENT_DOMAINS:
+        return Qualification.ADJACENT_TARGET
+    return Qualification.CORE_TARGET
+
+
 def _infer_opportunity_type(title: str, description: str) -> OpportunityType:
     """Infer from title first; ordinary description vocabulary cannot override it."""
     title_pfe = matched_phrases(title, PFE_SIGNALS)
@@ -137,12 +200,22 @@ def classify_opportunity(
     exclusions = matched_phrases(normalized_title, NON_TARGET_ROLE_SIGNALS)
 
     title_positive = {**title_adjacent, **title_core}
-    technical_roles = matched_phrases(normalized_title, TECHNICAL_ROLE_SIGNALS)
-    postdoc_roles = matched_phrases(normalized_title, POSTDOC_ROLE_SIGNALS)
+    technical_roles = technical_role_families(normalized_title)
+    extended_roles = tuple(
+        signal
+        for family in EXPLICIT_DOMAIN_ROLE_FAMILIES
+        for signal in matched_phrases(normalized_title, family)
+    )
+    advisory_roles = advisory_role_families(normalized_title)
+    explicit_title_domains = _explicit_title_domains(title_context)
     is_generic_technical = bool(matched_phrases(normalized_title, GENERIC_TECHNICAL_TITLES))
     strong_concept_count = sum(len(concepts) for concepts in strong_description.values())
     description_promotes = is_generic_technical and strong_concept_count >= 2
-    structural_title_match = bool((technical_roles or postdoc_roles) and title_context)
+    # The narrow technical families keep reading the full title context, which is
+    # what recognizes "ML Systems Engineer, Robotics". The far wider Phase 8A.2
+    # families demand a phrase that names the field outright.
+    technical_structural = bool(technical_roles and title_context)
+    explicit_structural = bool((extended_roles or advisory_roles) and explicit_title_domains)
 
     reasons: list[str] = []
     if exclusions:
@@ -160,15 +233,20 @@ def classify_opportunity(
         relevant_domains = set(title_positive) | set(title_context) | set(description_context)
         primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in title_adjacent)
         reasons.append("explicit adjacent Data/AI title signal")
-    elif structural_title_match:
-        qualification = Qualification.CORE_TARGET
+    elif technical_structural or explicit_structural:
+        structural_domains = title_context if technical_structural else explicit_title_domains
         relevant_domains = set(title_context) | set(description_context)
-        primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in title_context)
-        reasons.append("technical role family + explicit Data/AI title context")
+        primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in structural_domains)
+        qualification = _promoted_qualification(primary, bool(advisory_roles))
+        reasons.append(
+            TECHNICAL_STRUCTURAL_REASON if technical_structural else EXPLICIT_STRUCTURAL_REASON
+        )
+        if advisory_roles:
+            reasons.append(ADVISORY_CAP_REASON)
     elif description_promotes:
-        qualification = Qualification.CORE_TARGET
         relevant_domains = set(description_context)
         primary = next(domain for domain in DOMAIN_PRECEDENCE if domain in strong_description)
+        qualification = _promoted_qualification(primary, bool(advisory_roles))
         reasons.append(
             "generic technical/research title + strong description concepts: "
             + ", ".join(
@@ -177,6 +255,8 @@ def classify_opportunity(
                 for concept in strong_description.get(domain, ())
             )
         )
+        if advisory_roles:
+            reasons.append(ADVISORY_CAP_REASON)
     else:
         qualification = Qualification.UNCERTAIN
         primary = Domain.UNKNOWN
@@ -186,7 +266,7 @@ def classify_opportunity(
     matched_domains = tuple(domain for domain in DOMAIN_PRECEDENCE if domain in relevant_domains)
     title_signals = tuple(
         signal for domain in DOMAIN_PRECEDENCE for signal in title_positive.get(domain, ())
-    ) + technical_roles + postdoc_roles + tuple(
+    ) + technical_roles + extended_roles + advisory_roles + tuple(
         signal for domain in DOMAIN_PRECEDENCE for signal in title_context.get(domain, ())
     )
     description_signals = tuple(

@@ -207,3 +207,38 @@ def test_the_fine_audit_serializes_without_touching_persistence(tmp_path: Path) 
     finally:
         connection.close()
     assert _hash(path) == before_hash
+
+
+def test_the_calibration_reason_counts_are_read_only_aggregations(tmp_path: Path) -> None:
+    """Phase 8A.2 adds two read-time breakdowns of rules that already ran.
+
+    They exist so the real-corpus calibration can be read without writing
+    anything: no extra query, no column, no table, no migration.
+    """
+    path = _database(tmp_path)
+    before_hash = _hash(path)
+    before = sqlite3.connect(path)
+    try:
+        schema_before = before.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+    finally:
+        before.close()
+
+    report = audit_database(path)
+
+    assert sum(report.qualification_reason_counts.values()) == report.total_active_opportunities
+    assert sum(report.fine_reason_counts.values()) == report.total_active_opportunities
+    assert report.qualification_reason_counts["explicit core Data/AI title signal"] == 3
+    assert report.qualification_reason_counts["explicit adjacent Data/AI title signal"] == 1
+    assert list(report.qualification_reason_counts) == sorted(report.qualification_reason_counts)
+    assert list(report.fine_reason_counts) == sorted(report.fine_reason_counts)
+    assert audit_database(path) == report
+    assert _hash(path) == before_hash
+    after = sqlite3.connect(path)
+    try:
+        assert after.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall() == schema_before
+    finally:
+        after.close()

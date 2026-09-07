@@ -72,7 +72,7 @@ auditable and reversible instead of destructive.
 
 Migration `0004` stores one current derived result per eligible opportunity,
 including explanatory signals, classifier version, a SHA-256 input fingerprint,
-and timestamps. The current classifier version is `qualification-rules-v1`.
+and timestamps. The current classifier version is `qualification-rules-v2`.
 Reconciliation leaves a row unchanged when both its input fingerprint and
 classifier version match; otherwise it inserts or updates atomically. Merged,
 inactive duplicates are excluded. `RadarAgent` runs this global reconciliation

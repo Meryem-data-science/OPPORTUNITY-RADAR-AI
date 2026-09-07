@@ -88,18 +88,43 @@ python -m services.collector.cli.audit_qualification \
   --database .data/opportunity-radar.db --format human
 ```
 
-The classifier is deterministic `qualification-rules-v1`; unchanged fingerprints
-and versions are not rewritten. Geography is accepted as metadata and is not an
+The classifier is deterministic `qualification-rules-v2`; unchanged fingerprints
+and versions are not rewritten. The version moved from `qualification-rules-v1`
+with the Phase 8A.2 real-corpus calibration, so the first `--apply` after it
+reclassifies every row. Geography is accepted as metadata and is not an
 exclusion rule. Results are categorical qualification, not user-specific
 matching or ranking.
 
 The fine categories are a separate deterministic rule system,
-`fine-data-ai-rules-v1`. The audit adds `fine_primary_category_counts`,
+`fine-data-ai-rules-v2`. The audit adds `fine_primary_category_counts`,
 `fine_secondary_category_counts` and `fine_uncategorized_count`, plus the fine
 primary, secondaries and evidence per displayed opportunity. They are computed
 at read time and never written: there is no migration, no column and no
 persisted fine row in this phase. An opportunity that qualification left
 `UNCERTAIN` or `OUT_OF_SCOPE` is reported as uncategorized rather than `OTHER`.
+
+### Reading the real corpus after a rule change
+
+Calibration is validated by running the read-only audit above against the real
+operational database and reading the two Phase 8A.2 breakdowns,
+`qualification_reason_counts` and `fine_reason_counts`, which count the rule that
+decided each outcome. Compare the qualification and fine distributions before
+and after the change, then check the rules that moved:
+
+- fewer `UNCERTAIN` opportunities, with the recovered ones appearing under
+  `role family + explicit Data/AI domain phrase in title`;
+- an unchanged `OUT_OF_SCOPE` population, or a slightly larger one — exclusion
+  precedence is only ever strengthened;
+- fewer fine `OTHER` results, the difference appearing under the technical
+  single-concept fine reason. Advisory and governance roles stay `OTHER` unless
+  two independent concepts of one category name the work outright: the weaker
+  one-concept fallback is restricted to technical role families, while the
+  normal two-concept rule is not.
+
+The audit never writes, so it is safe against the operational file directly.
+Do not run `persist_qualifications --apply` or a collector to validate a rule
+change: reclassification is a separate, deliberate step taken after the audit
+has been read.
 
 ## Cross-source duplicate review
 

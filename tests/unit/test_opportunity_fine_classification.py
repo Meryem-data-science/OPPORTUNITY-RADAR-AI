@@ -268,9 +268,16 @@ def test_geography_cannot_change_the_fine_category(location: str) -> None:
 
 
 def test_the_fine_version_is_distinct_from_the_coarse_classifier_version() -> None:
+    """Phase 8A.2 changed observable fine rules, so the fine version had to move.
+
+    The pin was ``fine-data-ai-rules-v1`` until the single-concept fallback and
+    the concrete NLP/computer-vision concepts changed observable output. The two
+    versions stay independent: each moves only when its own rules change.
+    """
     from services.collector.qualification import CLASSIFIER_VERSION
 
-    assert FINE_CLASSIFIER_VERSION == "fine-data-ai-rules-v1"
+    assert FINE_CLASSIFIER_VERSION == "fine-data-ai-rules-v2"
+    assert CLASSIFIER_VERSION == "qualification-rules-v2"
     assert FINE_CLASSIFIER_VERSION != CLASSIFIER_VERSION
 
 
@@ -314,4 +321,465 @@ def test_real_corpus_structural_titles_keep_a_stable_fine_category(
     ],
 )
 def test_real_corpus_known_false_positives_gain_no_fine_category(title: str) -> None:
+    assert fine(title).primary_category is None
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2: fine-category calibration against the real operational corpus.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "primary", "secondaries"),
+    [
+        (
+            "Data Science Intern - GenAI",
+            FineCategory.GENERATIVE_AI, (FineCategory.DATA_SCIENCE,),
+        ),
+        ("Director, AI & Data Science", FineCategory.DATA_SCIENCE, ()),
+        ("Data Analytics Manager", FineCategory.DATA_ANALYTICS, ()),
+        ("Tech Lead - GenAI", FineCategory.GENERATIVE_AI, ()),
+        ("Data Architect", FineCategory.DATA_ENGINEERING, ()),
+    ],
+)
+def test_recovered_real_corpus_titles_receive_a_supported_fine_category(
+    title: str, primary: FineCategory, secondaries: tuple[FineCategory, ...],
+) -> None:
+    """The five coarse false negatives now reach the fine classifier as well.
+
+    "Data Architect" is a fine DATA_ENGINEERING role phrase for the same reason
+    it is a coarse one: the architect designs the storage and pipeline layer.
+    """
+    result = fine(title)
+    assert result.primary_category is primary
+    assert result.secondary_categories == secondaries
+    assert result.evidence
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "AI Advisory Consultant", "AI Advisory Principal", "AI Strategy Consultant, Frontier Tech",
+        "Senior Consultant (m/f/d) Data & AI Strategy",
+    ],
+)
+def test_data_ai_advisory_roles_stay_other_without_concrete_sub_domain_work(title: str) -> None:
+    """Advisory is not a supported fine sub-domain, and "AI" in a title is not evidence.
+
+    These are qualified Data/AI opportunities with no supported technical
+    sub-domain, which is exactly what OTHER states.
+    """
+    coarse = classify_opportunity(title, "Advise executives on their AI roadmap.")
+    result = classify_fine_categories(
+        title, "Advise executives on their AI roadmap.", qualification=coarse.qualification
+    )
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert result.secondary_categories == ()
+
+
+def test_a_qualified_technical_role_with_scattered_concepts_is_no_longer_other() -> None:
+    """The coarse gate counts concepts across domains; the fine threshold counts within one.
+
+    A real technical role could therefore be proven Data/AI and still evidence
+    no single fine category, landing in OTHER — which claims no sub-domain
+    applies. The concepts that did match are weaker evidence than two, but they
+    are evidence, and they are more faithful than that claim.
+    """
+    title, description = (
+        "Forward Deployed Software Engineer, Public Sector",
+        "Own model deployment for customer systems and run experimentation on rollouts.",
+    )
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.CORE_TARGET
+    assert result.primary_category is FineCategory.MLOPS
+    assert result.secondary_categories == (FineCategory.DATA_SCIENCE,)
+    assert all(item.kind is EvidenceKind.CONCRETE_CONCEPT for item in result.evidence)
+    assert [item.signal for item in result.evidence] == ["model deployment", "experimentation"]
+
+
+def test_the_single_concept_fallback_can_only_ever_replace_other() -> None:
+    """It fires only where there is no title evidence and nothing met the threshold."""
+    # Title evidence exists: one stray concept stays invisible, as before.
+    titled = fine("Data Engineer", "We occasionally do model serving.")
+    assert titled.primary_category is FineCategory.DATA_ENGINEERING
+    assert titled.secondary_categories == ()
+    # A category met the threshold: the categories below it stay invisible too.
+    threshold = fine(
+        "Software Engineer",
+        "Build model serving and model deployment, and occasionally object detection.",
+    )
+    assert threshold.primary_category is FineCategory.MLOPS
+    assert threshold.secondary_categories == ()
+
+
+def test_a_qualified_role_naming_no_concrete_concept_still_becomes_other() -> None:
+    assert fine("Data Governance Analyst").primary_category is FineCategory.OTHER
+    assert fine(
+        "Data Governance Analyst", "We are an AI company building the future."
+    ).primary_category is FineCategory.OTHER
+
+
+def test_an_unqualified_role_is_never_rescued_by_the_fallback() -> None:
+    """The fallback runs behind the coarse gate, exactly like every other fine rule."""
+    coarse = classify_opportunity("Software Engineer", "We sometimes do model serving.")
+    result = fine("Software Engineer", "We sometimes do model serving.")
+    assert coarse.qualification is Qualification.UNCERTAIN
+    assert result.primary_category is None
+    assert result.evidence == ()
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "category"),
+    [
+        (
+            "Research Scientist",
+            "Research natural language processing, named entity recognition and "
+            "text classification for document understanding.",
+            FineCategory.NLP,
+        ),
+        (
+            "Software Engineer",
+            "Build computer vision pipelines covering object detection and image segmentation.",
+            FineCategory.COMPUTER_VISION,
+        ),
+    ],
+)
+def test_explicit_nlp_and_vision_descriptions_produce_those_categories(
+    title: str, description: str, category: FineCategory,
+) -> None:
+    """The real audit produced no NLP or COMPUTER_VISION primary, for two reasons.
+
+    The coarse concept table held neither the concrete NLP nor the concrete
+    vision work concepts, so such a description could not clear the coarse gate;
+    and the fine concept tables did not treat "natural language processing" or
+    "computer vision" as concepts at all, only as title context. Both are fixed
+    here, and both remain two-concept rules.
+    """
+    result = fine(title, description)
+    assert result.primary_category is category
+    assert len(result.evidence) >= 2
+    assert all(item.kind is EvidenceKind.CONCRETE_CONCEPT for item in result.evidence)
+
+
+@pytest.mark.parametrize(
+    ("title", "category"),
+    [("NLP Engineer", FineCategory.NLP), ("Computer Vision Engineer", FineCategory.COMPUTER_VISION)],
+)
+def test_explicit_nlp_and_vision_titles_are_unaffected_by_the_calibration(
+    title: str, category: FineCategory,
+) -> None:
+    assert fine(title).primary_category is category
+
+
+def test_a_lone_vision_sentence_cannot_reclassify_an_unrelated_qualified_role() -> None:
+    """One incidental mention is a mention. The role keeps its own category."""
+    result = fine("Data Engineer", "Some teams here also work on object detection.")
+    assert result.primary_category is FineCategory.DATA_ENGINEERING
+    assert FineCategory.COMPUTER_VISION not in result.secondary_categories
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Science Intern - GenAI", "Work on generative AI and large language models."),
+        ("Forward Deployed Software Engineer, Public Sector", "Own model deployment and experimentation."),
+        ("Data Analytics Manager", "Own dbt models and Power BI dashboards."),
+    ],
+)
+def test_calibrated_fine_results_are_byte_for_byte_reproducible(
+    title: str, description: str,
+) -> None:
+    first, second = fine(title, description), fine(title, description)
+    assert first == second
+    assert first.evidence == second.evidence
+    assert first.reasons == second.reasons
+    assert first.secondary_categories == second.secondary_categories
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2 review correction: the one-concept fallback is technical-only.
+#
+# As first written the fallback fired for any qualified role, so a Data
+# Governance Analyst mentioning "model serving" once became MLOPS and an AI
+# Advisory Consultant mentioning RAG once became GENERATIVE_AI. One incidental
+# technical concept must not convert a non-technical advisory or governance
+# OTHER into a technical sub-domain.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "primary", "secondaries"),
+    [
+        (
+            "Forward Deployed Software Engineer, Public Sector",
+            "Own model deployment for customer systems and run experimentation on rollouts.",
+            FineCategory.MLOPS, (FineCategory.DATA_SCIENCE,),
+        ),
+        (
+            "Senior Mission Software Engineer, Public Sector",
+            "Own model serving for the platform and build data pipelines for mission data.",
+            FineCategory.MLOPS, (FineCategory.DATA_ENGINEERING,),
+        ),
+        (
+            "Senior Manager, Research Scientist",
+            "Lead research using deep learning and build the data pipelines behind it.",
+            FineCategory.MACHINE_LEARNING, (FineCategory.DATA_ENGINEERING,),
+        ),
+    ],
+)
+def test_the_fallback_still_serves_the_technical_roles_that_motivated_it(
+    title: str, description: str, primary: FineCategory, secondaries: tuple[FineCategory, ...],
+) -> None:
+    """Concepts scattered one-per-category across a real technical role.
+
+    The coarse gate counts strong concepts across domains and qualified these;
+    the fine threshold counts within one category and reached none of them.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.CORE_TARGET
+    assert result.primary_category is primary
+    assert result.secondary_categories == secondaries
+    assert result.reasons == (
+        "qualified technical Data/AI role with no fine title evidence and no category "
+        "reaching the description threshold; the single concrete concepts matched are "
+        "more faithful than OTHER",
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Governance Analyst", "We occasionally do model serving."),
+        ("Data Governance Analyst", "Some dashboarding happens here."),
+        ("Data Quality Analyst", "The team touches feature engineering now and then."),
+    ],
+)
+def test_a_governance_role_is_not_reclassified_by_one_incidental_concept(
+    title: str, description: str,
+) -> None:
+    """OTHER is the true statement: demonstrably Data/AI, no supported sub-domain."""
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("AI Advisory Consultant", "We sometimes prototype with RAG."),
+        ("AI Strategy Consultant, Frontier Tech", "Model deployment comes up occasionally."),
+        ("AI Advisory Principal", "Clients ask about fine tuning from time to time."),
+        ("Senior Consultant (m/f/d) Data & AI Strategy", "Model monitoring is on the roadmap."),
+    ],
+)
+def test_an_advisory_role_is_not_reclassified_by_one_incidental_concept(
+    title: str, description: str,
+) -> None:
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+@pytest.mark.parametrize(
+    "title", ["Consultant Software Engineer, Delivery", "Software Engineer, Advisory Services"],
+)
+def test_an_advisory_marker_vetoes_the_fallback_even_beside_a_technical_family(
+    title: str,
+) -> None:
+    """Advising on Data/AI is not building it, whatever else the title says.
+
+    The coarse classifier caps exactly these titles at ADJACENT_TARGET for the
+    same reason, and the fine fallback reads the same marker. Note that an
+    explicit core role phrase outranks the cap on both sides: "Research Scientist,
+    AI Strategy" is core, and it never reaches the fallback anyway because that
+    phrase is fine title evidence.
+    """
+    description = "Own model deployment and run experimentation on client rollouts."
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_fallback_reuses_the_coarse_technical_vocabulary_not_a_second_list() -> None:
+    """The predicate is the coarse classifier's own, so the two cannot drift.
+
+    GENERIC_TECHNICAL_TITLES is deliberately *not* the source: it also holds
+    "analyst" and "consultant", which are the two families this correction is
+    about.
+    """
+    from services.collector.qualification.classifier import (
+        advisory_role_families, technical_role_families,
+    )
+    from services.collector.qualification.taxonomy import GENERIC_TECHNICAL_TITLES
+
+    assert technical_role_families("forward deployed software engineer public sector")
+    assert technical_role_families("senior manager research scientist")
+    assert technical_role_families("cus postdoctoral researcher in spatial data science")
+    assert not technical_role_families("data governance analyst")
+    assert not technical_role_families("ai advisory consultant")
+    assert advisory_role_families("ai advisory consultant")
+    assert "analyst" in GENERIC_TECHNICAL_TITLES and "consultant" in GENERIC_TECHNICAL_TITLES
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "category"),
+    [
+        (
+            "Data Governance Analyst",
+            "Own the Power BI estate and the dashboarding standards.",
+            FineCategory.BUSINESS_INTELLIGENCE,
+        ),
+        (
+            "AI Advisory Consultant",
+            "Own retrieval augmented generation and prompt engineering workstreams.",
+            FineCategory.GENERATIVE_AI,
+        ),
+    ],
+)
+def test_the_normal_two_concept_rule_stays_unrestricted_for_every_qualified_role(
+    title: str, description: str, category: FineCategory,
+) -> None:
+    """The chosen semantics, stated explicitly: the threshold rule is not technical-only.
+
+    Two *independent* concrete concepts inside one category are the work being
+    described, not a passing mention, and that is a far stronger claim than the
+    single concept the fallback rests on. A governance analyst who owns the BI
+    estate is doing business intelligence; an advisory consultant who owns RAG
+    and prompt engineering workstreams is doing generative AI. Only the weaker
+    one-concept fallback is restricted to technical role families.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is category
+    assert len(result.evidence) >= 2
+    assert result.reasons == (
+        "no fine title evidence; concrete description concepts decide the primary category",
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Software Engineer", "We sometimes do model serving."),
+        ("Research Scientist", "The platform includes some object detection."),
+        ("AI Product Manager", "Coordinate model serving work."),
+        ("Recruiter - AI Division", "Our teams own model deployment."),
+    ],
+)
+def test_an_unqualified_role_is_still_never_rescued_by_the_restricted_fallback(
+    title: str, description: str,
+) -> None:
+    """The fallback runs behind the coarse gate; a technical family is not a bypass."""
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification in (Qualification.UNCERTAIN, Qualification.OUT_OF_SCOPE)
+    assert result.primary_category is None
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_two_description_rules_stay_distinct_on_the_same_technical_role() -> None:
+    """One title, three descriptions, three different rules — and three reasons."""
+    title = "Forward Deployed Software Engineer, Public Sector"
+    threshold = fine(title, "Own model serving and model deployment for customer systems.")
+    fallback = fine(title, "Own model deployment and run experimentation on rollouts.")
+    assert threshold.primary_category is FineCategory.MLOPS
+    assert threshold.secondary_categories == ()
+    assert fallback.primary_category is FineCategory.MLOPS
+    assert fallback.secondary_categories == (FineCategory.DATA_SCIENCE,)
+    assert threshold.reasons != fallback.reasons
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2 second calibration pass: fine categories for the newly recovered
+# real families. The fine tables mirror only the coarse rules that name a
+# supported sub-domain; the cross-cutting ones stay OTHER.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "primary", "secondaries"),
+    [
+        ("Delivery AI Scientist", FineCategory.ARTIFICIAL_INTELLIGENCE, ()),
+        ("Senior Delivery AI Scientist", FineCategory.ARTIFICIAL_INTELLIGENCE, ()),
+        ("Senior, AI & Data Science", FineCategory.DATA_SCIENCE, ()),
+        ("Director, AI & Agentic Engineering", FineCategory.GENERATIVE_AI, ()),
+        ("Tech Lead Manager- MLRE, ML Systems", FineCategory.MLOPS, ()),
+        ("Senior Full Stack Developer - GenAI Solutions", FineCategory.GENERATIVE_AI, ()),
+        (
+            "Assistant Professor in Data Science and Artificial Intelligence",
+            FineCategory.ARTIFICIAL_INTELLIGENCE, (FineCategory.DATA_SCIENCE,),
+        ),
+    ],
+)
+def test_second_pass_recovered_titles_get_a_deterministic_supported_category(
+    title: str, primary: FineCategory, secondaries: tuple[FineCategory, ...],
+) -> None:
+    """"ai scientist" and "agentic engineering" were mirrored into the fine tables.
+
+    The professorship evidences both fields, and precedence decides:
+    ARTIFICIAL_INTELLIGENCE primary, DATA_SCIENCE secondary.
+    """
+    result = fine(title)
+    assert result.primary_category is primary
+    assert result.secondary_categories == secondaries
+    assert result.evidence
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Consultant", ""),
+        ("Data Consultant Intern", "We occasionally do model serving for clients."),
+        ("Data Consulting Manager", "Model deployment comes up sometimes."),
+        ("Manager, AI & Data Consulting", "Clients ask about fine tuning."),
+        ("AI Transformation Manager", "We sometimes touch model monitoring."),
+        ("AI & Automation Intern", "Some model training happens here."),
+    ],
+)
+def test_consulting_and_cross_cutting_families_stay_other(title: str, description: str) -> None:
+    """Data consulting and AI transformation are not fine technical sub-domains.
+
+    They are demonstrably Data/AI, which is exactly what OTHER states, and none
+    of them may reach the one-concept fallback: the consulting titles carry an
+    advisory marker and none of them matches a technical role family. They are
+    never forced into ARTIFICIAL_INTELLIGENCE just because "AI" is in the title.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_normal_two_concept_rule_still_reaches_a_consulting_role() -> None:
+    """The accepted correction is preserved exactly: only the weak rule is restricted."""
+    title, description = (
+        "Data Consultant", "Own the data pipelines and ETL for client warehouses.",
+    )
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.DATA_ENGINEERING
+    assert len(result.evidence) >= 2
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Full Stack Developer", "Assistant Professor of Economics", "Automation Manager",
+        "Digital Transformation Manager", "Senior Product Manager, Data Science",
+        "Senior Marketing Manager, Generative AI", "Data Center Manager",
+    ],
+)
+def test_second_pass_negatives_receive_no_fine_category(title: str) -> None:
     assert fine(title).primary_category is None

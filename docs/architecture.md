@@ -1353,9 +1353,10 @@ qualification, and nothing else. Location, employer, source, profile and CV are
 not parameters of `classify_fine_categories`, so geography and employer
 neutrality are structural rather than a rule somebody could forget.
 
-**Versioning is separate.** The fine rules are `fine-data-ai-rules-v1`, distinct
-from `qualification-rules-v1`, because they are a distinct rule system; it
-changes whenever an observable fine classification changes.
+**Versioning is separate.** The fine rules are `fine-data-ai-rules-v2`, distinct
+from `qualification-rules-v2`, because they are a distinct rule system; each
+version changes whenever an observable classification of its own rules changes,
+independently of the other.
 
 **Phase 8A.1 is read-only.** The fine categories exist in the classifier and in
 the read-only audit (`fine_primary_category_counts`,
@@ -1364,6 +1365,168 @@ result per audited opportunity), and nowhere else. There is no migration, no
 column, no persisted row, no history table, and no API, frontend, notification
 or ranking change. Persistence is deliberately deferred to Phase 8B, so that it
 is designed after the real audit has been read rather than before.
+
+## Real-corpus calibration (Phase 8A.2)
+
+Phase 8A.1 was read against the real operational corpus with the strictly
+read-only audit. The gate held on the false-positive side — commercial,
+marketing, recruiting and product titles stayed out even with heavy AI
+vocabulary in their descriptions — but it left proven false negatives behind:
+`Data Science Intern - GenAI`, `Director, AI & Data Science`,
+`Data Analytics Manager`, `Tech Lead - GenAI` and `Data Architect` were all
+`UNCERTAIN`. Every one of them names its domain outright in the title. The
+narrow `TECHNICAL_ROLE_SIGNALS` family simply had no entry for an intern, a
+manager, a director, a tech lead or an architect.
+
+**The generalized rule is a role family next to an explicit domain phrase.**
+`LEADERSHIP_ROLE_SIGNALS`, `EARLY_CAREER_ROLE_SIGNALS`, `ARCHITECT_ROLE_SIGNALS`
+and `ADVISORY_ROLE_SIGNALS` name the *shape* of a job and never its domain, so a
+family alone proves nothing. It becomes evidence only beside a phrase from
+`EXPLICIT_TITLE_DOMAIN_SIGNALS`, the high-specificity subset of the context
+table: phrases that name the field itself, such as `data science`,
+`data analytics`, `machine learning` or `generative ai`. Bare `ai`, `ml`, `llm`,
+`rag`, `agents` and `foundation models` are absent on purpose, because these
+families are far wider than the technical ones and that vocabulary is what every
+AI company writes on every job. `Director, AI` therefore evidences nothing while
+`Director, AI & Data Science` is decided. The original technical families keep
+reading the full context table unchanged, which is what still recognizes
+`ML Systems Engineer, Robotics`.
+
+**Exclusion precedence was strengthened, never relaxed.**
+`NON_TARGET_ROLE_SIGNALS` is still evaluated first, so `Marketing Manager, AI
+Products`, `Product Manager, Gen AI`, `Recruiter - AI Division`, `HR Manager`,
+`Lead Counsel` and `Engagement Manager` stay `OUT_OF_SCOPE` however strong their
+descriptions are. Because the leadership markers newly expose `manager`,
+`director`, `lead` and `head of`, the table also gained the commercial, marketing
+and people families those markers would otherwise have let through — account,
+partner, community and brand managers, marketing and sales leadership, people
+operations and customer support.
+
+**Domain family decides core versus adjacent, once.** `CORE_DOMAINS` and
+`ADJACENT_DOMAINS` split the coarse `Domain` exactly as `CORE_SIGNALS` and
+`ADJACENT_SIGNALS` always split it, and every promoting rule now reads that
+split. A generalized rule can therefore never call an analytics or governance
+domain `CORE_TARGET` when the explicit role phrase for the same domain says
+`ADJACENT_TARGET`: `Data Analytics Manager` is adjacent because `Data Analyst`
+is. On top of that an advisory or strategy marker caps the outcome at
+`ADJACENT_TARGET` whatever the domain — advising on Data/AI is Data/AI-adjacent
+work, not Data/AI execution — which is what places
+`Senior Consultant, Data & AI Strategy` next to `AI Advisory Consultant`. An
+explicit core role phrase still outranks the cap, so `Data Scientist Consultant`
+stays core.
+
+**Naming the work is stronger evidence than naming the technology.** The real
+audit produced no `NLP` and no `COMPUTER_VISION` primary at all, and the reason
+was mechanical rather than a property of the corpus: the coarse concept table
+held only `natural language processing` and `computer vision`, so an explicitly
+NLP or CV description could never reach two distinct concepts and the role stayed
+`UNCERTAIN` before any fine rule ran. Concrete work concepts — `object
+detection`, `named entity recognition`, `image segmentation`, `machine
+translation` and their siblings — were added to the coarse table, and the field
+names themselves became fine concepts. No threshold moved: two distinct concepts
+are still required, and one incidental sentence still promotes nothing.
+
+**The fine classifier now has two description rules, and they are different
+strengths.** The normal one is unchanged and unrestricted: a category is
+evidenced when the description shows `MINIMUM_DESCRIPTION_CONCEPTS` (two)
+*distinct* concrete concepts of it, aliases collapsed. Two independent concepts
+inside one category are the work being described rather than a passing mention,
+so that rule classifies any qualified opportunity — a Data Governance Analyst
+who owns the BI estate is `BUSINESS_INTELLIGENCE`, an AI Advisory Consultant who
+owns RAG and prompt-engineering workstreams is `GENERATIVE_AI`.
+
+**The weaker one-concept fallback is technical-only.** The coarse gate promotes
+a generic technical title on two strong concepts *across* domains, while the
+fine threshold counts *within* one category. A real technical role could
+therefore be proven Data/AI and still evidence no single fine category, landing
+in `OTHER` — a claim that no sub-domain applies, stronger than the evidence
+supported. The fallback repairs exactly that, and its guard says so in code:
+the title must match a *technical* role family — the coarse classifier's own
+`TECHNICAL_ROLE_SIGNALS`/`POSTDOC_ROLE_SIGNALS`, reused through a named
+predicate so the two cannot drift, and deliberately not the wider
+`GENERIC_TECHNICAL_TITLES`, which also holds `analyst` and `consultant` — it
+must carry no advisory or strategy marker, there must be no fine title evidence
+at all, and no category may have reached the threshold. Only then do the single
+concrete concepts that matched decide the category.
+
+**Advisory and governance roles are protected from it.** A Data Governance
+Analyst or an AI Advisory Consultant whose description mentions `model serving`
+once stays `OTHER`, because one incidental technical concept must never convert
+a non-technical role into a technical sub-domain — and because `OTHER` is the
+true statement about it. Advising on Data/AI is not building it, which is why an
+advisory marker vetoes the fallback even beside a technical family, exactly as
+it caps the coarse outcome at `ADJACENT_TARGET`. `OTHER` remains a positive
+Data/AI outcome throughout: it says the opportunity *is* Data/AI and that no
+supported sub-domain is evidenced, never "we do not know".
+
+Nothing else about the fine result can change: a role with title evidence, or
+with a category over the threshold, is untouched, and a qualified role naming no
+concrete concept is still `OTHER`. The fine classifier's inputs stayed `title`,
+`description` and the coarse `Qualification`; enriching that contract with
+coarse domains was considered and rejected, because both rules are expressible
+from the fine tables plus the shared role predicate, and the classifier has to
+stay independently explainable.
+
+**A second pass followed a second real audit.** Reading the corpus again after
+the first calibration (394 active: 121 core, 16 adjacent, 85 out of scope, 172
+uncertain) showed the gate was right to leave most of those 172 alone — a
+Deployment Strategist, a Solutions Engineer, an Engineering Manager for
+Infrastructure assert nothing about Data/AI, and no employer or source context
+may be used to rescue them. But a second set of titles did assert it, and each
+was recovered by a generalized phrase rather than an exception:
+
+- `ai scientist` completes the scientist row of the core role table, which
+  already named a data scientist and an ML scientist. `Delivery` and `Senior
+  Delivery` are ordinary decoration and appear in no rule.
+- `data consultant` and `data consulting` are an adjacent family. A title that
+  says Data Consultant is not an unknown generic consultant, and two phrases
+  cover the whole real family — senior, junior and intern variants, `Data
+  Consulting Manager`, and both orderings of `AI & Data Consulting`.
+- The cross-cutting compound gained its reverse ordering (`ai data`, `ai and
+  data`) and two more compounds, `ai transformation` and `ai automation`. Every
+  entry is a compound on purpose: bare `ai` and bare `data` stay powerless, so
+  `Director, AI` and `Automation Manager` are still unknown.
+- `ml systems` / `machine learning systems` and `agentic engineering` joined the
+  high-specificity subset. Each names a discipline as precisely as `ml platform`
+  does; broad `systems` and the bare product nouns `agent` and `agents` did not.
+- The technical family gained the developer spellings of roles it already held
+  (`software developer`, `full stack developer`, `fullstack developer`), so
+  `Full Stack Developer - GenAI Solutions` reads like its engineer equivalent
+  while a bare `Full Stack Developer` still evidences nothing.
+- Two new families joined `EXPLICIT_DOMAIN_ROLE_FAMILIES`, the one list every
+  such family now lives in. `SENIORITY_ROLE_SIGNALS` (`senior`, `junior`) is
+  kept apart from the leadership markers because a senior individual
+  contributor is not a leader; it is what reads a field-track title that is
+  nothing but a level and a field name, `Senior, AI & Data Science`.
+  `ACADEMIC_ROLE_SIGNALS` (`professor`, `lecturer` — the bare noun covers the
+  whole rank ladder) reads a professorship in Data Science as the Data/AI
+  opportunity it is, because Phase 8 classifies what an opportunity is about
+  and not whether it suits anyone. A professorship in economics matches no
+  domain phrase and stays unknown.
+
+Exclusion precedence again decides first, so a seniority, academic or developer
+marker is never a route around it: `Senior Product Manager, Data Science`,
+`Senior Marketing Manager, Generative AI` and `Senior Account Executive, AI`
+stay out of scope, and the data-centre facilities family was completed with
+`data center manager`. On the fine side only the rules naming a supported
+sub-domain were mirrored — `ai scientist` into `ARTIFICIAL_INTELLIGENCE`,
+`agentic engineering` into `GENERATIVE_AI`. Data consulting, AI transformation
+and AI automation are cross-cutting rather than technical sub-domains, so they
+resolve to `OTHER`, never forced into `ARTIFICIAL_INTELLIGENCE` because the
+string "AI" appears; none of them can reach the one-concept fallback either,
+since they carry an advisory marker or match no technical family. The audit
+still shows no `NLP` or `COMPUTER_VISION` primary, and no rule was loosened to
+change that: no eligible opportunity in this corpus evidences either.
+
+**Phase 8A.2 changed no contract.** The coarse rules moved to
+`qualification-rules-v2` and the fine rules to `fine-data-ai-rules-v2` because
+observable output changed. There is no migration, no schema change, no new
+persistence, no API, frontend, notification, ranking, collector or scheduler
+work, and no matching change: `Domain` keeps its names and matching keeps
+consuming it unchanged. The audit gained two read-time breakdowns —
+`qualification_reason_counts` and `fine_reason_counts`, counting the rule that
+decided each outcome — so the calibration can be re-read locally without writing
+anything.
 
 ## Data-processing boundaries
 
