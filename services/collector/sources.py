@@ -8,7 +8,8 @@ import yaml
 
 DEFAULT_SOURCE_REGISTRY = Path("config/sources.yaml")
 
-#: The most detail pages one sitemap-driven run may ever fetch. A hard ceiling
+#: The most detail pages one bounded detail-page run may ever fetch, whatever
+#: discovers them — a sitemap chain or an approved HTML listing. A hard ceiling
 #: rather than a suggestion: the configured limit bounds a normal run, and this
 #: bounds what any configuration is allowed to ask for.
 MAX_DETAIL_PAGE_LIMIT = 50
@@ -66,6 +67,7 @@ class SourceConfig:
             "greenhouse",
             "gmail_linkedin_alert",
             "stagiaires_sitemap",
+            "stage_ma_html",
         }:
             raise SourceConfigurationError(
                 f"source {source_id!r} has unsupported type {source_type!r}"
@@ -80,9 +82,9 @@ class SourceConfig:
                     raise SourceConfigurationError(
                         f"source {source_id!r} {field_name} must be a non-empty string"
                     )
-        elif source_type == "stagiaires_sitemap":
-            # Required, because this collector fetches one page per offer and an
-            # unbounded run would read the whole site. There is no default: a
+        elif source_type in {"stagiaires_sitemap", "stage_ma_html"}:
+            # Required for every collector that fetches one page per offer: an
+            # unbounded run would read the whole site. There is no default — a
             # source that does not state its bound does not get to have one
             # chosen for it silently.
             if (

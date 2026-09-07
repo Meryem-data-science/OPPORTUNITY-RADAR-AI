@@ -296,10 +296,13 @@ def test_the_factory_builds_the_stagiaires_collector() -> None:
 
 
 def test_the_existing_collector_registrations_are_unchanged() -> None:
+    # Phase 7C.5B added stage_ma_html alongside these; what this asserts is that
+    # it displaced none of them.
     assert set(COLLECTOR_REGISTRY) == {
         "greenhouse",
         "gmail_linkedin_alert",
         "stagiaires_sitemap",
+        "stage_ma_html",
     }
     assert COLLECTOR_REGISTRY["greenhouse"] is GreenhouseCollector
     assert COLLECTOR_REGISTRY["gmail_linkedin_alert"] is LinkedInJobAlertCollector

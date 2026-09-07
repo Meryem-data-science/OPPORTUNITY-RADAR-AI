@@ -1186,26 +1186,59 @@ def test_the_report_declares_the_guarantees_this_slice_makes() -> None:
 # ============================ PRODUCTION ISOLATION ==========================
 
 
-def test_this_slice_adds_no_stage_ma_production_code() -> None:
-    for directory in ("collectors", "parsers"):
-        root = REPOSITORY_ROOT / "services" / "collector" / directory
-        for path in root.glob("*.py"):
-            assert "stage_ma" not in path.name
-            assert path.name != "stage.py"
+def test_the_audit_itself_remains_evaluation_only() -> None:
+    """The audit stays an audit, even now that a collector exists.
+
+    7C.5A asserted that no Stage.ma production code existed anywhere; Phase
+    7C.5B added a collector and a parser, deliberately and under review, so that
+    exact assertion belonged to that phase. What must still hold is narrower and
+    permanent: *this* module is evidence infrastructure. It builds no collector,
+    reads no production registry, and cannot put a source into service.
+    """
+    import sys
+
+    for name in (
+        "evaluation.morocco_pfe.stage_ma_access",
+        "evaluation.morocco_pfe.cli.stage_ma_access_audit",
+    ):
+        __import__(name)
+        module = sys.modules[name]
+        for attribute in vars(module).values():
+            origin = getattr(attribute, "__module__", "") or ""
+            assert not origin.startswith("services."), f"{name} -> {origin}"
+
+    report = audit(_FakeClient(routes()))
+    assert report["activated_production_source"] is False
+    assert report["wrote_database"] is False
 
 
-def test_stage_ma_has_no_production_source_row_or_collector_type() -> None:
-    from services.collector.collectors.factory import COLLECTOR_REGISTRY
-    from services.collector.sources import load_source_registry
+def test_activating_the_source_map_required_a_real_configured_row() -> None:
+    """Phase 7C.5B built the collector and a live run validated it; activation
+    followed from that run, never from the code merely existing.
 
-    assert set(COLLECTOR_REGISTRY) == {
-        "greenhouse",
-        "gmail_linkedin_alert",
-        "stagiaires_sitemap",
-    }
-    configured = load_source_registry(REPOSITORY_ROOT / "config" / "sources.yaml")
-    assert not any("stage_ma" == source.id for source in configured)
-    assert not any(source.type == "stage_ma_html" for source in configured)
+    7C.5A asserted no production row existed at all, which was true of that
+    phase. The invariant that replaces it is the one that outlives every phase:
+    an ACTIVE map entry may not be a claim on its own. The validator resolves
+    `production_source_id` against `config/sources.yaml` and refuses the entry
+    unless that row is really configured, really enabled and really `active`, so
+    the map and the agent cannot drift apart.
+    """
+    from evaluation.morocco_pfe.validator import (
+        DEFAULT_SOURCE_MAP_PATH,
+        DEFAULT_SOURCE_REGISTRY,
+        check_source_map_against_production_registry,
+        load_source_map,
+    )
+
+    active = check_source_map_against_production_registry(
+        load_source_map(DEFAULT_SOURCE_MAP_PATH), DEFAULT_SOURCE_REGISTRY
+    )
+    entry = {item.id: item for item in active}["stage_ma"]
+
+    assert entry.integration_status == "ACTIVE"
+    assert entry.collection_strategy == "EXISTING_COLLECTOR"
+    assert entry.production_source_id == "stage_ma"
+    assert entry.live_canary is False
 
 
 def test_this_phase_added_no_database_migration_for_stage_ma() -> None:
@@ -1215,12 +1248,24 @@ def test_this_phase_added_no_database_migration_for_stage_ma() -> None:
 
 
 def test_production_services_never_import_this_audit_module() -> None:
-    """`evaluation/` is an audit trail, not a runtime dependency."""
+    """`evaluation/` is an audit trail, not a runtime dependency.
+
+    Asserted from the import graph rather than from the text: the production
+    parser's docstring names this module precisely to explain that it re-states
+    its semantics instead of importing them, and that sentence is worth keeping.
+    """
     offenders = []
     for path in (REPOSITORY_ROOT / "services").rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        if "stage_ma_access" in text or "from evaluation" in text:
-            offenders.append(str(path.relative_to(REPOSITORY_ROOT)))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            for module in modules:
+                if module.split(".")[0] == "evaluation":
+                    offenders.append(f"{path.relative_to(REPOSITORY_ROOT)}: {module}")
     assert offenders == []
 
 
@@ -1263,8 +1308,15 @@ def test_the_audit_never_issues_a_non_get_request() -> None:
 # ================================ SOURCE MAP ================================
 
 
-def test_stage_ma_remains_a_non_production_candidate() -> None:
-    """7C.5A audits a source. It does not promote one."""
+def test_the_audit_did_not_promote_the_source_by_itself() -> None:
+    """7C.5A audits a source; it never promotes one.
+
+    Stage.ma is ACTIVE today, and this test is about *what made it so*. The
+    audit established feasibility; a 7C.5B collector and a real live run
+    established that it works. What did not change either way is the rest of the
+    entry — priority, coverage role and country are the audit's findings and no
+    activation may quietly rewrite them.
+    """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
         load_source_map,
@@ -1274,16 +1326,23 @@ def test_stage_ma_remains_a_non_production_candidate() -> None:
         item.id: item for item in load_source_map(DEFAULT_SOURCE_MAP_PATH).sources
     }["stage_ma"]
 
-    assert entry.integration_status == "CANDIDATE"
-    assert entry.collection_strategy == "FUTURE_COLLECTOR"
-    assert entry.production_source_id is None
     assert entry.live_canary is False
     assert entry.priority == "P1"
     assert entry.coverage_role == "PRIMARY"
     assert entry.country == "MA"
+    assert entry.homepage_url_status == "EVIDENCED"
+    assert "PHASE 7C.5B" in " ".join(entry.notes.split())
 
 
-def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
+def test_the_stage_ma_note_claims_no_more_than_the_evidence_supports() -> None:
+    """Stage.ma is activated, so "claims no activation" is no longer the
+    invariant — that assertion would now contradict the map itself.
+
+    Two claims survive the promotion, because neither was ever earned: nothing
+    proved SQLite idempotence for this source, and nothing established coverage
+    beyond one specialty listing. An ACTIVE status is exactly the moment those
+    two would be easiest to quietly assume.
+    """
     from evaluation.morocco_pfe.validator import (
         DEFAULT_SOURCE_MAP_PATH,
         load_source_map,
@@ -1295,9 +1354,16 @@ def test_the_stage_ma_note_claims_no_collector_and_no_activation() -> None:
         }["stage_ma"].notes.split()
     )
 
-    assert "ACTIVE" not in note
-    assert "no collector" in note.lower()
-    assert "production_source_id: stage_ma" not in note
+    assert "idempotence is NOT proven for Stage.ma" in note
+    assert "this is NOT Stage.ma as a whole" in note
+    assert "all TEN were explicitly EXPIRED" in note
+    for overclaim in (
+        "double-run passed",
+        "idempotence proven",
+        "comprehensive",
+        "all specialties",
+    ):
+        assert overclaim not in note
 
 
 def test_stagiaires_activation_is_untouched_by_this_slice() -> None:

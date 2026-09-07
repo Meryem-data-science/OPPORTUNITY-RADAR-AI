@@ -1,6 +1,6 @@
 # Opportunity sources
 
-The operational catalogue in `config/sources.yaml` currently has three enabled,
+The operational catalogue in `config/sources.yaml` currently has five enabled,
 active sources:
 
 | Source ID | Type | Intake |
@@ -8,6 +8,19 @@ active sources:
 | `scale_ai_greenhouse` | Greenhouse | Public Scale AI board (`scaleai`) |
 | `artefact_greenhouse` | Greenhouse | Public Artefact board (`artefact`) |
 | `linkedin_job_alert_email` | Gmail LinkedIn alert | `newer_than:7d from:jobalerts-noreply@linkedin.com`, at most 50 messages |
+| `stagiaires_ma` | Stagiaires.ma sitemap | Official sitemap chain, at most 25 detail pages per run |
+| `stage_ma` | Stage.ma specialty HTML | `/specialites/computer-science` only, at most 25 detail pages per run |
+
+Enabled and active are two different fields, and the distinction is worth
+knowing even while all five agree. `RadarAgent` runs a source only when it is
+`enabled` **and** its `status` is `active`; `enabled` on its own is what keeps a
+manual `collect_source --source <id> --dry-run` possible. A source can therefore
+be configured and reachable by hand while still being kept out of automatic runs.
+
+`frequency_minutes` is **metadata only**. Nothing in this phase schedules
+anything: no scheduler, no cron, no queue. A source is collected when
+`RadarAgent` is executed, and "a future run" means exactly that — the next time
+someone or something runs the agent.
 
 ## Greenhouse
 
@@ -80,19 +93,24 @@ published" from "this collector or parser may be broken". An unknown
 [database.md](database.md). Nothing is alerted, retried, or rescheduled as a
 result.
 
-## Stagiaires.ma — audited in Phase 7C.4A, not collected
+## Stagiaires.ma — audited in Phase 7C.4A, collected since Phase 7C.4B
 
-Stagiaires.ma is **not** a source. It has no row in `config/sources.yaml`, no
-`SourceConfig` type, no entry in the collector factory and no
-`production_source_id` in the Morocco PFE source map, where it stays a `P1`
-`CANDIDATE` with `collection_strategy: FUTURE_COLLECTOR`. No collector, no
-production parser, no `RadarAgent` run, no database row, no migration and no
-scheduler exist for it.
+Stagiaires.ma **is** a source. `stagiaires_ma` is an enabled, active row in
+`config/sources.yaml` of type `stagiaires_sitemap`, with a `SourceConfig`, an
+entry in the collector factory, and `production_source_id: stagiaires_ma` in the
+Morocco PFE source map, where it is `ACTIVE` with
+`collection_strategy: EXISTING_COLLECTOR`. Production discovery is the site's own
+official sitemap chain described below, and a run is bounded by
+`detail_page_limit`, which is 25.
 
-Phase 7C.4A is a **public-access and structure feasibility audit**, and nothing
-more. It answers "could this be collected, and would an offer page give us the
-fields we need?" so that the decision to build a collector — Phase 7C.4B — can
-be made on evidence instead of on optimism.
+The two phases did different jobs, and the distinction is worth keeping. Phase
+7C.4A was a **public-access and structure feasibility audit**, and nothing more:
+it answered "could this be collected, and would an offer page give us the fields
+we need?" so that the decision to build a collector could be made on evidence
+instead of on optimism. Phase 7C.4B then built that collector and validated it
+against the live site, and the source map says `ACTIVE` because of that
+validation rather than because the code exists. None of this says anything about
+Stage.ma, which is a separate source on its own evidence.
 
 ### The discovery chain
 
@@ -195,10 +213,135 @@ JSON-LD type and key *names*, and per-signal presence with a short excerpt for
 verification. Job descriptions are reported by length only. **No Stagiaires.ma
 page body is stored in this repository.**
 
-### Next
+### What came of it
 
-Phase **7C.4B** — an actual collector — is the next step, and only after the
-Architect has validated 7C.4A. Until then Stagiaires.ma collects nothing.
+Phase **7C.4B** built the bounded production collector this audit made the case
+for, and a real local validation run — not the mere existence of the code — is
+what moved the source map entry to `ACTIVE`. Stagiaires.ma collects.
+
+## Stage.ma — Informatique specialty only (Phase 7C.5B)
+
+Stage.ma is collected from **one page**:
+
+```
+https://www.stage.ma/specialites/computer-science
+```
+
+**This is not comprehensive Stage.ma coverage, and the collector does not claim
+it is.** The Phase 7C.5A audit reached the homepage and the generic
+`/offres-stage` listing and found *zero* offer links in either's ordinary server
+HTML; the Informatique specialty page carried ten. So the collector reads that
+one surface and nothing else: no sitemap is fetched (robots declares none, and
+guessing one is not discovery), no other specialty is crawled, no "Afficher
+tout" is followed, and no pagination is discovered. Each of those would need its
+own audit.
+
+### How it behaves
+
+GET-only, sequential, one request at a time with a delay and an explicit
+timeout, no retries, no concurrency, under an honest collector user agent.
+`robots.txt` is fetched first and obeyed, matched on path **and** query;
+redirects are resolved by the collector, bounded, same-host only, with every hop
+re-checked against robots before the next request. No browser, no browser
+impersonation, no JavaScript execution, no Selenium or Playwright, no
+authentication, no cookies, no proxy, no CAPTCHA handling, no POST and no
+application submission. An off-domain application URL may be **recorded**; it is
+never fetched.
+
+A run reads at most `detail_page_limit` (25) detail pages, taken in the
+listing's own document order — never sorted by the numeric offer id, which is a
+candidate identifier and not evidence of recency.
+
+### What it skips, and what it fails
+
+The distinction matters, because Stage.ma publishes anonymous and expired offers
+alongside live ones. These are **individual skips** — ordinary content states,
+and the run continues:
+
+* the detail page 404s between listing discovery and the fetch;
+* the page says it is **expired** or **unpublished**;
+* the employer is deliberately anonymous, or unavailable from both the posting
+  and its listing card.
+
+These are **source failures** — the run is recorded FAILED rather than returning
+a smaller batch that looks like a slow day:
+
+* robots refused, unresolvable, or disallowing a required target;
+* the listing page unreachable, blocked, or returning zero offer links **without
+  the site's own explicit empty state** (a structural change is not "no
+  opportunities today");
+* an off-domain or robots-disallowed redirect;
+* a selected detail page that returns 200 but publishes no `JobPosting`;
+* an offer with no usable title from either the posting or its listing card.
+
+An empty batch is honest two ways: the listing says outright that it has
+nothing, **or** it exposes offers normally and every selected one is individually
+skipped for an ordinary reason. The validated run was the second kind — 10
+offers discovered, all 10 expired, 0 candidates, a successful run. What is never
+honest is zero offer links with no explicit empty state: that is a structural
+failure, as is any robots, network or parser fault.
+
+### What it records
+
+`title` from `JobPosting.title`, falling back to the listing card. `organization`
+from `hiringOrganization.name`, falling back to the card's own employer-profile
+anchor text — the profile page is never fetched, and "Anonyme" is not a company.
+`location` and `description` are optional and stay `None` when absent; nothing is
+inferred from `country: MA`. `published_at` comes from `JobPosting.datePosted`
+alone, and is `None` when it is missing, malformed or an epoch sentinel —
+`01/01/1970` is never stored as a publication date, and no crawl time,
+`validThrough`, start date or URL id stands in for one.
+
+**No Data & AI filtering and no PFE keyword filtering happen here.** The
+collector observes; the existing qualification layer classifies; later ranking
+prioritizes.
+
+### Status — active, on evidence from a live run that collected nothing
+
+Stage.ma is an **ACTIVE** configured collector: `enabled: true`, `status: active`
+in `config/sources.yaml`, and `EXISTING_COLLECTOR` / `ACTIVE` /
+`production_source_id: stage_ma` in the Morocco PFE source map.
+
+The real local bounded GET-only production dry-run that this rests on
+**completed successfully**, exit 0, at collector SHA
+`2cbb703c7eb769e927667915bb237ac9de019903` — and it collected nothing:
+
+* **10** current listing entries were checked and their detail pages read;
+* **all 10 were expired**;
+* **0** current admissible opportunities;
+* `pages_checked` 12, `parser_version` `stage-ma-html-v1`.
+
+Those ten were current *discovered listing entries* at validation time. They were
+**not** current opportunities — an expired offer is not an opportunity, and this
+document will not call one that.
+
+That result is what activation was granted on, so it is worth being exact about
+what it demonstrates:
+
+* **The collector worked correctly.** Robots was obeyed, the approved listing was
+  read, ten detail pages were fetched and each was correctly recognised as
+  expired. Nothing here was a network barrier, a robots refusal, a parser failure
+  or a missing organization.
+* **No fake opportunity was inserted.** Zero admissible candidates produced zero
+  rows. No expired or historical offer was persisted to make the run look
+  productive, and no placeholder was invented for a missing field.
+* **When a new admissible offer appears, a future `RadarAgent` run can collect
+  it.** "Future run" means the next execution of `RadarAgent` — **Phase 7C.5B
+  added no scheduler**, and `frequency_minutes: 360` is metadata that nothing
+  acts on yet.
+
+A run that reads a site correctly and honestly reports that it currently has
+nothing admissible is a *successful* run, not a failure. Keeping the source
+dormant on that basis would only guarantee that the next genuinely new offer went
+uncollected.
+
+**No SQLite candidate double-run was performed, and none was possible.** With
+zero admissible candidates there is nothing to persist twice, so opportunity
+idempotence is **not proven** for Stage.ma and nothing in this repository claims
+it is. Not performed — not passed, and not failed.
+
+Coverage is unchanged by activation: still `/specialites/computer-science` only,
+still not comprehensive Stage.ma coverage.
 
 ## ReKrute — evaluated in Phase 7C.3, not selected
 

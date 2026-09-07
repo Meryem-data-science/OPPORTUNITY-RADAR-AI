@@ -35,3 +35,17 @@ sources:
     frequency_minutes: 360
     status: active
     detail_page_limit: 25
+  # Active on the Architect's decision. The real Phase 7C.5B validation read ten
+  # live offers off the approved listing and every one was expired, so the run
+  # succeeded with zero admissible candidates. That is an honest empty result
+  # about the site on one day, not a defect in the collector, so the source is
+  # collected from here on and a later run picks up whatever is newly published.
+  # frequency_minutes is metadata only: nothing in this phase schedules anything.
+  - id: stage_ma
+    type: stage_ma_html
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 360
+    status: active
+    detail_page_limit: 25
