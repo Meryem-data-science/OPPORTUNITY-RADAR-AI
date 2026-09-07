@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from .classifier import Classification, classify_opportunity
+from .fine_classifier import FineClassification, classify_fine_categories
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class AuditedOpportunity:
     location: str | None
     source_ids: tuple[str, ...]
     classification: Classification
+    fine_classification: FineClassification
 
     def to_dict(self) -> dict[str, object]:
         value = asdict(self)
@@ -32,6 +34,9 @@ class AuditReport:
     opportunity_type_counts: dict[str, int]
     employment_type_counts: dict[str, int]
     listing_quality_counts: dict[str, int]
+    fine_primary_category_counts: dict[str, int]
+    fine_secondary_category_counts: dict[str, int]
+    fine_uncategorized_count: int
     opportunities: tuple[AuditedOpportunity, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -53,6 +58,38 @@ def _count(items: list[AuditedOpportunity], attribute: str) -> dict[str, int]:
     return dict(sorted(Counter(str(getattr(item.classification, attribute)) for item in items).items()))
 
 
+def _fine_primary_counts(items: list[AuditedOpportunity]) -> dict[str, int]:
+    """Count assigned fine primaries only; an absent category is counted separately."""
+    return dict(sorted(Counter(
+        str(item.fine_classification.primary_category)
+        for item in items
+        if item.fine_classification.primary_category is not None
+    ).items()))
+
+
+def _fine_secondary_counts(items: list[AuditedOpportunity]) -> dict[str, int]:
+    return dict(sorted(Counter(
+        str(category)
+        for item in items
+        for category in item.fine_classification.secondary_categories
+    ).items()))
+
+
+def _audited(row: tuple[object, ...]) -> AuditedOpportunity:
+    """Classify one row twice: coarse relevance first, then its fine category."""
+    classification = classify_opportunity(
+        row[1], row[4], source_url=row[5], application_url=row[6],
+        canonical_url=row[7], location=row[3],
+    )
+    fine = classify_fine_categories(
+        row[1], row[4], qualification=classification.qualification
+    )
+    return AuditedOpportunity(
+        row[0], row[1], row[2], row[3], tuple(sorted(set(row[8].split(chr(31))))),
+        classification, fine,
+    )
+
+
 def audit_database(database: str | Path) -> AuditReport:
     """Read and classify active, non-merge-tombstone rows without migrations/writes."""
     connection = open_read_only_database(database)
@@ -72,21 +109,14 @@ def audit_database(database: str | Path) -> AuditReport:
             ORDER BY o.id
             """
         ).fetchall()
-        items = [
-            AuditedOpportunity(
-                row[0], row[1], row[2], row[3], tuple(sorted(set(row[8].split(chr(31))))),
-                classify_opportunity(
-                    row[1], row[4], source_url=row[5], application_url=row[6],
-                    canonical_url=row[7], location=row[3],
-                ),
-            )
-            for row in rows
-        ]
+        items = [_audited(row) for row in rows]
         sources = tuple(sorted({source for item in items for source in item.source_ids}))
         return AuditReport(
             len(items), sources, _count(items, "qualification"),
             _count(items, "primary_domain"), _count(items, "opportunity_type"),
             _count(items, "employment_type"), _count(items, "listing_quality"),
+            _fine_primary_counts(items), _fine_secondary_counts(items),
+            sum(1 for item in items if item.fine_classification.primary_category is None),
             tuple(items),
         )
     finally:

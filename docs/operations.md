@@ -80,7 +80,8 @@ python -m services.collector.cli.persist_qualifications \
   --database .data/opportunity-radar.db --apply
 ```
 
-The read-only audit can compare persisted classifications with current rules:
+The read-only audit can compare persisted classifications with current rules,
+and also reports the fine Data/AI categories added by Phase 8A.1:
 
 ```bash
 python -m services.collector.cli.audit_qualification \
@@ -91,6 +92,14 @@ The classifier is deterministic `qualification-rules-v1`; unchanged fingerprints
 and versions are not rewritten. Geography is accepted as metadata and is not an
 exclusion rule. Results are categorical qualification, not user-specific
 matching or ranking.
+
+The fine categories are a separate deterministic rule system,
+`fine-data-ai-rules-v1`. The audit adds `fine_primary_category_counts`,
+`fine_secondary_category_counts` and `fine_uncategorized_count`, plus the fine
+primary, secondaries and evidence per displayed opportunity. They are computed
+at read time and never written: there is no migration, no column and no
+persisted fine row in this phase. An opportunity that qualification left
+`UNCERTAIN` or `OUT_OF_SCOPE` is reported as uncategorized rather than `OTHER`.
 
 ## Cross-source duplicate review
 
