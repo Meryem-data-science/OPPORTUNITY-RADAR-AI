@@ -21,12 +21,15 @@
 # * almost no homepage URL below has been fetched. `homepage_url_status` says
 #   whether the URL is evidence (EVIDENCED — either handed to us, or confirmed
 #   by a real request in a later phase), a domain written from public knowledge
-#   and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN). Two entries
+#   and not confirmed (WELL_KNOWN_UNVERIFIED), or absent (UNKNOWN). Three entries
 #   have URLs that were actually requested: ReKrute, whose public robots.txt and
-#   terms pages Phase 7C.3 reached, and Stagiaires.ma, whose robots.txt, public
-#   PFE listing and official sitemap chain a bounded GET-only Phase 7C.4A audit
-#   reached. Both read EVIDENCED for that reason and for no other. No other
-#   entry's status should be read as a claim that anyone visited it;
+#   terms pages Phase 7C.3 reached; Stagiaires.ma, whose robots.txt, public PFE
+#   listing and official sitemap chain a bounded GET-only Phase 7C.4A audit
+#   reached; and Stage.ma, whose robots.txt, public listings and offer detail
+#   pages the bounded GET-only Phase 7C.5A audit reached and the Phase 7C.5B
+#   collector then read in a real production run. All three read EVIDENCED for
+#   that reason and for no other. No other entry's status should be read as a
+#   claim that anyone visited it;
 # * LinkedIn is collected from Gmail job-alert mail and from nothing else. There
 #   is no LinkedIn scraping in this project and the strategy registry has no
 #   member that would describe one.
@@ -106,9 +109,13 @@ sources:
   # ---------------------------------------------------------------- P1 -----
   # The collector candidates, in the order the architect fixed: Stagiaires.ma,
   # then Stage.ma, then the TalentSoft-hosted career sites. Stagiaires.ma is
-  # implemented and ACTIVE as of Phase 7C.4B; the rest are not. ReKrute used to
-  # head this list; Phase 7C.3 evaluated it and did not select it, so it now
-  # sits in the evaluated/not-selected section at the end of this file.
+  # implemented and ACTIVE since Phase 7C.4B, and Stage.ma is implemented and
+  # ACTIVE since Phase 7C.5B — on one specialty listing, and after a live run
+  # that validated the collector while collecting nothing, which its own note
+  # records. The TalentSoft-hosted career sites remain unverified and are not
+  # integrated. ReKrute used to head this list; Phase 7C.3 evaluated it and did
+  # not select it, so it now sits in the evaluated/not-selected section at the
+  # end of this file.
   - id: stagiaires_ma
     name: Stagiaires.ma
     homepage_url: https://www.stagiaires.ma
