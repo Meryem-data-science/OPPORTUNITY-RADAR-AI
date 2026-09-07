@@ -97,6 +97,8 @@ FINE_ROLE_SIGNALS: dict[FineCategory, tuple[str, ...]] = {
     ),
     FineCategory.ARTIFICIAL_INTELLIGENCE: (
         "ai engineer", "artificial intelligence engineer", "ai builder",
+        # Mirrors the coarse core role phrase.
+        "ai scientist", "artificial intelligence scientist",
         "applied scientist ai", "research scientist ai", "software engineer ai",
         "ingenieur intelligence artificielle", "ingenieure intelligence artificielle",
     ),
@@ -154,7 +156,7 @@ FINE_CONTEXT_SIGNALS: dict[FineCategory, tuple[str, ...]] = {
         "generative ai", "genai", "gen ai", "large language model",
         "large language models", "llm", "llms", "retrieval augmented generation",
         "rag", "foundation model", "foundation models", "ai agents", "agentic ai",
-        "agentic systems", "frontier agents", "prompt engineering",
+        "agentic systems", "agentic engineering", "frontier agents", "prompt engineering",
     ),
     FineCategory.NLP: (
         "nlp", "natural language processing", "text classification",

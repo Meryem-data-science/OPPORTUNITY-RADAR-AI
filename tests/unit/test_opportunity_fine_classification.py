@@ -697,3 +697,89 @@ def test_the_two_description_rules_stay_distinct_on_the_same_technical_role() ->
     assert fallback.primary_category is FineCategory.MLOPS
     assert fallback.secondary_categories == (FineCategory.DATA_SCIENCE,)
     assert threshold.reasons != fallback.reasons
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2 second calibration pass: fine categories for the newly recovered
+# real families. The fine tables mirror only the coarse rules that name a
+# supported sub-domain; the cross-cutting ones stay OTHER.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "primary", "secondaries"),
+    [
+        ("Delivery AI Scientist", FineCategory.ARTIFICIAL_INTELLIGENCE, ()),
+        ("Senior Delivery AI Scientist", FineCategory.ARTIFICIAL_INTELLIGENCE, ()),
+        ("Senior, AI & Data Science", FineCategory.DATA_SCIENCE, ()),
+        ("Director, AI & Agentic Engineering", FineCategory.GENERATIVE_AI, ()),
+        ("Tech Lead Manager- MLRE, ML Systems", FineCategory.MLOPS, ()),
+        ("Senior Full Stack Developer - GenAI Solutions", FineCategory.GENERATIVE_AI, ()),
+        (
+            "Assistant Professor in Data Science and Artificial Intelligence",
+            FineCategory.ARTIFICIAL_INTELLIGENCE, (FineCategory.DATA_SCIENCE,),
+        ),
+    ],
+)
+def test_second_pass_recovered_titles_get_a_deterministic_supported_category(
+    title: str, primary: FineCategory, secondaries: tuple[FineCategory, ...],
+) -> None:
+    """"ai scientist" and "agentic engineering" were mirrored into the fine tables.
+
+    The professorship evidences both fields, and precedence decides:
+    ARTIFICIAL_INTELLIGENCE primary, DATA_SCIENCE secondary.
+    """
+    result = fine(title)
+    assert result.primary_category is primary
+    assert result.secondary_categories == secondaries
+    assert result.evidence
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Consultant", ""),
+        ("Data Consultant Intern", "We occasionally do model serving for clients."),
+        ("Data Consulting Manager", "Model deployment comes up sometimes."),
+        ("Manager, AI & Data Consulting", "Clients ask about fine tuning."),
+        ("AI Transformation Manager", "We sometimes touch model monitoring."),
+        ("AI & Automation Intern", "Some model training happens here."),
+    ],
+)
+def test_consulting_and_cross_cutting_families_stay_other(title: str, description: str) -> None:
+    """Data consulting and AI transformation are not fine technical sub-domains.
+
+    They are demonstrably Data/AI, which is exactly what OTHER states, and none
+    of them may reach the one-concept fallback: the consulting titles carry an
+    advisory marker and none of them matches a technical role family. They are
+    never forced into ARTIFICIAL_INTELLIGENCE just because "AI" is in the title.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_normal_two_concept_rule_still_reaches_a_consulting_role() -> None:
+    """The accepted correction is preserved exactly: only the weak rule is restricted."""
+    title, description = (
+        "Data Consultant", "Own the data pipelines and ETL for client warehouses.",
+    )
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.DATA_ENGINEERING
+    assert len(result.evidence) >= 2
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Full Stack Developer", "Assistant Professor of Economics", "Automation Manager",
+        "Digital Transformation Manager", "Senior Product Manager, Data Science",
+        "Senior Marketing Manager, Generative AI", "Data Center Manager",
+    ],
+)
+def test_second_pass_negatives_receive_no_fine_category(title: str) -> None:
+    assert fine(title).primary_category is None

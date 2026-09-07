@@ -1467,6 +1467,57 @@ coarse domains was considered and rejected, because both rules are expressible
 from the fine tables plus the shared role predicate, and the classifier has to
 stay independently explainable.
 
+**A second pass followed a second real audit.** Reading the corpus again after
+the first calibration (394 active: 121 core, 16 adjacent, 85 out of scope, 172
+uncertain) showed the gate was right to leave most of those 172 alone — a
+Deployment Strategist, a Solutions Engineer, an Engineering Manager for
+Infrastructure assert nothing about Data/AI, and no employer or source context
+may be used to rescue them. But a second set of titles did assert it, and each
+was recovered by a generalized phrase rather than an exception:
+
+- `ai scientist` completes the scientist row of the core role table, which
+  already named a data scientist and an ML scientist. `Delivery` and `Senior
+  Delivery` are ordinary decoration and appear in no rule.
+- `data consultant` and `data consulting` are an adjacent family. A title that
+  says Data Consultant is not an unknown generic consultant, and two phrases
+  cover the whole real family — senior, junior and intern variants, `Data
+  Consulting Manager`, and both orderings of `AI & Data Consulting`.
+- The cross-cutting compound gained its reverse ordering (`ai data`, `ai and
+  data`) and two more compounds, `ai transformation` and `ai automation`. Every
+  entry is a compound on purpose: bare `ai` and bare `data` stay powerless, so
+  `Director, AI` and `Automation Manager` are still unknown.
+- `ml systems` / `machine learning systems` and `agentic engineering` joined the
+  high-specificity subset. Each names a discipline as precisely as `ml platform`
+  does; broad `systems` and the bare product nouns `agent` and `agents` did not.
+- The technical family gained the developer spellings of roles it already held
+  (`software developer`, `full stack developer`, `fullstack developer`), so
+  `Full Stack Developer - GenAI Solutions` reads like its engineer equivalent
+  while a bare `Full Stack Developer` still evidences nothing.
+- Two new families joined `EXPLICIT_DOMAIN_ROLE_FAMILIES`, the one list every
+  such family now lives in. `SENIORITY_ROLE_SIGNALS` (`senior`, `junior`) is
+  kept apart from the leadership markers because a senior individual
+  contributor is not a leader; it is what reads a field-track title that is
+  nothing but a level and a field name, `Senior, AI & Data Science`.
+  `ACADEMIC_ROLE_SIGNALS` (`professor`, `lecturer` — the bare noun covers the
+  whole rank ladder) reads a professorship in Data Science as the Data/AI
+  opportunity it is, because Phase 8 classifies what an opportunity is about
+  and not whether it suits anyone. A professorship in economics matches no
+  domain phrase and stays unknown.
+
+Exclusion precedence again decides first, so a seniority, academic or developer
+marker is never a route around it: `Senior Product Manager, Data Science`,
+`Senior Marketing Manager, Generative AI` and `Senior Account Executive, AI`
+stay out of scope, and the data-centre facilities family was completed with
+`data center manager`. On the fine side only the rules naming a supported
+sub-domain were mirrored — `ai scientist` into `ARTIFICIAL_INTELLIGENCE`,
+`agentic engineering` into `GENERATIVE_AI`. Data consulting, AI transformation
+and AI automation are cross-cutting rather than technical sub-domains, so they
+resolve to `OTHER`, never forced into `ARTIFICIAL_INTELLIGENCE` because the
+string "AI" appears; none of them can reach the one-concept fallback either,
+since they carry an advisory marker or match no technical family. The audit
+still shows no `NLP` or `COMPUTER_VISION` primary, and no rule was loosened to
+change that: no eligible opportunity in this corpus evidences either.
+
 **Phase 8A.2 changed no contract.** The coarse rules moved to
 `qualification-rules-v2` and the fine rules to `fine-data-ai-rules-v2` because
 observable output changed. There is no migration, no schema change, no new

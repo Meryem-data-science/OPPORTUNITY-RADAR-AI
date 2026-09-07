@@ -6,12 +6,12 @@ import unicodedata
 
 from .taxonomy import (
     ADJACENT_DOMAINS, ADJACENT_SIGNALS, ADVISORY_ROLE_SIGNALS, APPRENTICESHIP_SIGNALS,
-    ARCHITECT_ROLE_SIGNALS, CORE_SIGNALS, DOMAIN_PRECEDENCE,
-    DESCRIPTION_PFE_SIGNALS, DOMAIN_CONTEXT_SIGNALS, EARLY_CAREER_ROLE_SIGNALS,
-    EMPLOYMENT_SIGNALS, EXPLICIT_TITLE_DOMAIN_SIGNALS,
+    CORE_SIGNALS, DOMAIN_PRECEDENCE,
+    DESCRIPTION_PFE_SIGNALS, DOMAIN_CONTEXT_SIGNALS, EMPLOYMENT_SIGNALS,
+    EXPLICIT_DOMAIN_ROLE_FAMILIES, EXPLICIT_TITLE_DOMAIN_SIGNALS,
     GENERIC_CAREERS_TITLES,
     GENERIC_JOBS_TITLES, GENERIC_TECHNICAL_TITLES, GRADUATE_SIGNALS,
-    INTERNSHIP_SIGNALS, LEADERSHIP_ROLE_SIGNALS, NON_TARGET_ROLE_SIGNALS, PFE_SIGNALS,
+    INTERNSHIP_SIGNALS, NON_TARGET_ROLE_SIGNALS, PFE_SIGNALS,
     POSTDOC_ROLE_SIGNALS, STRONG_DESCRIPTION_CONCEPTS, TECHNICAL_ROLE_SIGNALS,
     Domain, EmploymentType, ListingQuality, OpportunityType, Qualification,
 )
@@ -201,10 +201,10 @@ def classify_opportunity(
 
     title_positive = {**title_adjacent, **title_core}
     technical_roles = technical_role_families(normalized_title)
-    extended_roles = (
-        matched_phrases(normalized_title, LEADERSHIP_ROLE_SIGNALS)
-        + matched_phrases(normalized_title, EARLY_CAREER_ROLE_SIGNALS)
-        + matched_phrases(normalized_title, ARCHITECT_ROLE_SIGNALS)
+    extended_roles = tuple(
+        signal
+        for family in EXPLICIT_DOMAIN_ROLE_FAMILIES
+        for signal in matched_phrases(normalized_title, family)
     )
     advisory_roles = advisory_role_families(normalized_title)
     explicit_title_domains = _explicit_title_domains(title_context)

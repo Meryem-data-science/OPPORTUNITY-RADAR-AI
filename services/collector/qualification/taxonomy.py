@@ -85,6 +85,10 @@ CORE_SIGNALS = {
     Domain.DATA_SCIENCE: ("data scientist",),
     Domain.MACHINE_LEARNING_AI: (
         "machine learning engineer", "ml engineer", "ai engineer", "ai builder",
+        # "ai scientist" completes the scientist row: the table already names a
+        # data scientist and an ML scientist, and the phrase is a job title in
+        # its own right rather than a company's product vocabulary.
+        "ai scientist", "artificial intelligence scientist",
         "artificial intelligence engineer", "software engineer machine learning",
         "software engineer ai", "applied scientist machine learning",
         "applied scientist ai", "ml scientist", "research scientist machine learning",
@@ -105,7 +109,8 @@ CORE_SIGNALS = {
 # Structural title matching requires a role family plus domain context. This
 # prevents AI, agent, or platform product wording from being sufficient alone.
 TECHNICAL_ROLE_SIGNALS = (
-    "software engineer", "infrastructure software engineer", "infrastructure engineer",
+    "software engineer", "software developer", "full stack developer", "fullstack developer",
+    "infrastructure software engineer", "infrastructure engineer",
     "research engineer", "systems research engineer", "systems engineer",
     "solutions engineer", "research scientist", "forward deployed engineer",
     "forward deployed engineering", "agents engineer", "director of engineering", "fellow",
@@ -132,12 +137,39 @@ EARLY_CAREER_ROLE_SIGNALS = (
 
 ARCHITECT_ROLE_SIGNALS = ("architect", "architecture")
 
+# Pure seniority markers, carrying no role content at all. A field-track title
+# can be nothing but a level and the field name ("Senior, AI & Data Science"),
+# and this is the only way to read one. Kept apart from LEADERSHIP_ROLE_SIGNALS
+# because a senior individual contributor is not a leader, and dependent on an
+# explicit domain phrase exactly like every other family here: "Senior Product
+# Manager, Data Science" is still excluded by its job family, and "Senior
+# Software Engineer, Full-Stack" still evidences nothing.
+SENIORITY_ROLE_SIGNALS = ("senior", "junior")
+
+# Academic role families. Phase 8 classifies what an opportunity is about, not
+# whether it suits anyone, so a professorship in Data Science is a Data/AI
+# opportunity. "assistant professor" and "associate professor" both contain
+# "professor", so the bare noun covers the whole rank ladder; a professorship in
+# any other field matches no domain phrase and stays UNCERTAIN.
+ACADEMIC_ROLE_SIGNALS = ("professor", "lecturer")
+
 # Advisory markers never promote a title on their own either, and they *cap* the
 # outcome at ADJACENT_TARGET: advising on Data/AI is Data/AI-adjacent work, not
 # Data/AI execution. An explicit core role phrase still wins over the cap.
 ADVISORY_ROLE_SIGNALS = (
     "consultant", "consulting", "advisor", "adviser", "advisory", "strategist",
     "strategy",
+)
+
+# Every family that may combine with an EXPLICIT_TITLE_DOMAIN_SIGNALS phrase,
+# in the order their matches are reported. Centralized so the classifier reads
+# one list rather than a concatenation that grows with each calibration.
+EXPLICIT_DOMAIN_ROLE_FAMILIES = (
+    LEADERSHIP_ROLE_SIGNALS,
+    EARLY_CAREER_ROLE_SIGNALS,
+    ARCHITECT_ROLE_SIGNALS,
+    SENIORITY_ROLE_SIGNALS,
+    ACADEMIC_ROLE_SIGNALS,
 )
 
 DOMAIN_CONTEXT_SIGNALS = {
@@ -160,7 +192,7 @@ DOMAIN_CONTEXT_SIGNALS = {
         "generative ai", "genai", "gen ai", "large language model",
         "large language models", "llm", "llms", "retrieval augmented generation",
         "rag", "foundation model", "foundation models", "ai agents",
-        "agentic systems", "frontier agents", "agents",
+        "agentic systems", "agentic engineering", "frontier agents", "agents",
     ),
     Domain.MLOPS_ML_PLATFORM: (
         "mlops", "ml platform", "machine learning platform", "model serving", "serving platform",
@@ -175,10 +207,15 @@ DOMAIN_CONTEXT_SIGNALS = {
     Domain.DATA_QUALITY_GOVERNANCE: (
         "data quality", "data governance", "data lineage", "metadata management",
     ),
-    # "Data & AI", "Data/AI" and "Data, AI" all normalize to "data ai". The
-    # phrase names the field as a whole rather than one sub-domain, which is
-    # exactly what OTHER_DATA_AI is for.
-    Domain.OTHER_DATA_AI: ("data ai", "data and ai"),
+    # "Data & AI", "Data/AI" and "Data, AI" all normalize to "data ai", and the
+    # real corpus writes the pair in both orders. Each phrase names the field as
+    # a whole rather than one sub-domain, which is exactly what OTHER_DATA_AI is
+    # for. Every entry is a *compound*: bare "ai" and bare "data" stay powerless,
+    # which is what keeps "Marketing Director, AI" and "Automation Manager" out.
+    Domain.OTHER_DATA_AI: (
+        "data ai", "data and ai", "ai data", "ai and data",
+        "ai transformation", "ai automation",
+    ),
 }
 
 # The high-specificity subset of DOMAIN_CONTEXT_SIGNALS: phrases that name the
@@ -204,14 +241,24 @@ EXPLICIT_TITLE_DOMAIN_SIGNALS = {
     Domain.GENAI_LLM: (
         "generative ai", "genai", "gen ai",
         "large language model", "large language models",
+        # Naming the engineering discipline, unlike the bare product nouns
+        # "agent", "agents" and "ai agents", which stay out of this table.
+        "agentic engineering",
     ),
     Domain.MLOPS_ML_PLATFORM: (
         "mlops", "ml platform", "machine learning platform",
         "ml infrastructure", "machine learning infrastructure",
+        # "ML Systems" names the discipline as specifically as "ML Platform"
+        # does, and it was already trusted next to the technical families; broad
+        # "systems" and "systems engineering" remain powerless.
+        "ml systems", "machine learning systems",
     ),
     Domain.BI_ANALYTICS: ("data analytics", "business intelligence"),
     Domain.DATA_QUALITY_GOVERNANCE: ("data quality", "data governance"),
-    Domain.OTHER_DATA_AI: ("data ai", "data and ai"),
+    Domain.OTHER_DATA_AI: (
+        "data ai", "data and ai", "ai data", "ai and data",
+        "ai transformation", "ai automation",
+    ),
 }
 
 # Description-only promotion uses concepts rather than raw phrase counts.
@@ -289,6 +336,12 @@ ADJACENT_SIGNALS = {
     ),
     Domain.OTHER_DATA_AI: (
         "ai advisory consultant", "ai strategy consultant", "ai advisory principal",
+        # A title that says "Data Consultant" or "Data Consulting" is not an
+        # unknown generic consultant: it names Data advisory work outright. The
+        # two phrases cover the whole real family on their own -- senior, junior
+        # and intern variants, "Data Consulting Manager", and both orderings of
+        # "AI & Data Consulting" -- without enumerating a single full title.
+        "data consultant", "data consulting",
     ),
 }
 
@@ -296,7 +349,7 @@ ADJACENT_SIGNALS = {
 # precedence even when a title also contains AI, GenAI, or data-platform terms.
 NON_TARGET_ROLE_SIGNALS = (
     "data center technician", "data centre technician", "data center operations manager",
-    "data centre operations manager", "account executive", "sales manager",
+    "data centre operations manager", "data center manager", "data centre manager", "account executive", "sales manager",
     "sales representative", "sales enablement", "business development", "recruiter",
     "recruiting coordinator", "talent acquisition", "human resources", "hr manager",
     "marketing manager", "content manager", "customer success", "legal counsel",
