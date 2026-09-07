@@ -58,10 +58,28 @@ DOMAIN_PRECEDENCE = (
     Domain.OTHER_DATA_AI,
 )
 
+# Whether a promoted domain is core or adjacent is decided once, here, so every
+# generalized rule agrees with the explicit role tables below: the domains that
+# CORE_SIGNALS names are core, the domains that ADJACENT_SIGNALS names are
+# adjacent. A generalized rule can therefore never say CORE_TARGET about an
+# analytics or governance domain that an explicit role phrase calls adjacent.
+CORE_DOMAINS = (
+    Domain.DATA_ENGINEERING, Domain.DATA_SCIENCE, Domain.MACHINE_LEARNING_AI,
+    Domain.GENAI_LLM, Domain.MLOPS_ML_PLATFORM,
+)
+ADJACENT_DOMAINS = (
+    Domain.BI_ANALYTICS, Domain.DATA_QUALITY_GOVERNANCE, Domain.OTHER_DATA_AI,
+)
+
 # Complete role phrases remain the highest-confidence target evidence.
 CORE_SIGNALS = {
     Domain.DATA_ENGINEERING: (
         "data engineer", "analytics engineer", "data platform engineer",
+        # "data architect" is an established, unambiguous data role name, and it
+        # is listed for the same reason "data engineer" is: the bare word "data"
+        # can never be a domain phrase, so the complete role phrase is the only
+        # honest way to recognize it.
+        "data architect", "big data architect",
         "ingenieur data", "ingenieure data",
     ),
     Domain.DATA_SCIENCE: ("data scientist",),
@@ -95,10 +113,37 @@ TECHNICAL_ROLE_SIGNALS = (
 
 POSTDOC_ROLE_SIGNALS = ("postdoc", "post doc", "postdoctoral", "post doctoral")
 
+# Phase 8A.2 role families. Each tuple names the *shape* of a job and never its
+# domain, so a family alone proves nothing: it becomes evidence only next to an
+# explicit Data/AI domain phrase in EXPLICIT_TITLE_DOMAIN_SIGNALS, and only
+# after NON_TARGET_ROLE_SIGNALS has had its say. That ordering is what keeps
+# "Marketing Manager, AI Products" and "Product Manager, Gen AI" out while
+# letting "Data Analytics Manager" and "Tech Lead - GenAI" in.
+LEADERSHIP_ROLE_SIGNALS = (
+    "head of", "director", "vp", "vice president", "chief", "manager",
+    "lead", "tech lead", "technical lead", "team lead", "principal", "staff",
+)
+
+EARLY_CAREER_ROLE_SIGNALS = (
+    "intern", "internship", "stage", "stagiaire", "trainee", "apprentice",
+    "apprenticeship", "alternance", "alternant", "alternante", "graduate",
+    "working student", "junior",
+)
+
+ARCHITECT_ROLE_SIGNALS = ("architect", "architecture")
+
+# Advisory markers never promote a title on their own either, and they *cap* the
+# outcome at ADJACENT_TARGET: advising on Data/AI is Data/AI-adjacent work, not
+# Data/AI execution. An explicit core role phrase still wins over the cap.
+ADVISORY_ROLE_SIGNALS = (
+    "consultant", "consulting", "advisor", "adviser", "advisory", "strategist",
+    "strategy",
+)
+
 DOMAIN_CONTEXT_SIGNALS = {
     Domain.DATA_ENGINEERING: (
-        "data pipeline", "data pipelines", "etl", "elt", "data warehouse",
-        "data lake", "lakehouse", "data platform", "data infrastructure",
+        "data engineering", "data pipeline", "data pipelines", "etl", "elt",
+        "data warehouse", "data lake", "lakehouse", "data platform", "data infrastructure",
         "spark", "dbt", "airflow", "kafka", "data orchestration", "streaming pipelines",
     ),
     Domain.DATA_SCIENCE: (
@@ -118,18 +163,55 @@ DOMAIN_CONTEXT_SIGNALS = {
         "agentic systems", "frontier agents", "agents",
     ),
     Domain.MLOPS_ML_PLATFORM: (
-        "ml platform", "machine learning platform", "model serving", "serving platform",
+        "mlops", "ml platform", "machine learning platform", "model serving", "serving platform",
         "sandbox platform", "inference platform", "model deployment", "model monitoring",
         "ml infrastructure", "machine learning infrastructure", "ai infrastructure",
         "frontier ai infrastructure", "ml systems", "machine learning systems", "feature store",
     ),
     Domain.BI_ANALYTICS: (
-        "business intelligence", "power bi", "tableau", "dashboarding",
+        "data analytics", "business intelligence", "power bi", "tableau", "dashboarding",
         "analytics reporting", "data visualization",
     ),
     Domain.DATA_QUALITY_GOVERNANCE: (
         "data quality", "data governance", "data lineage", "metadata management",
     ),
+    # "Data & AI", "Data/AI" and "Data, AI" all normalize to "data ai". The
+    # phrase names the field as a whole rather than one sub-domain, which is
+    # exactly what OTHER_DATA_AI is for.
+    Domain.OTHER_DATA_AI: ("data ai", "data and ai"),
+}
+
+# The high-specificity subset of DOMAIN_CONTEXT_SIGNALS: phrases that name the
+# Data/AI field itself rather than describing a product built with it. Only
+# these may combine with the broadened Phase 8A.2 role families, because those
+# families are far wider than TECHNICAL_ROLE_SIGNALS. Vocabulary every AI
+# company applies to every job -- bare "ai", "ml", "llm", "rag", "agents",
+# "foundation models", "ai infrastructure" as a product noun -- is absent on
+# purpose, so "Marketing Director, AI" evidences nothing at all.
+# Every phrase here must also be a DOMAIN_CONTEXT_SIGNAL of the same domain;
+# the classifier reads this table as a filter over already-matched context.
+EXPLICIT_TITLE_DOMAIN_SIGNALS = {
+    Domain.DATA_ENGINEERING: (
+        "data engineering", "data pipeline", "data pipelines", "data warehouse",
+        "data lake", "lakehouse", "data platform", "data infrastructure",
+    ),
+    Domain.DATA_SCIENCE: ("data science", "statistical modeling", "predictive modeling"),
+    Domain.MACHINE_LEARNING_AI: (
+        "machine learning", "artificial intelligence", "deep learning",
+        "computer vision", "natural language processing", "nlp",
+        "applied ai", "enterprise ai", "physical ai", "ai ml",
+    ),
+    Domain.GENAI_LLM: (
+        "generative ai", "genai", "gen ai",
+        "large language model", "large language models",
+    ),
+    Domain.MLOPS_ML_PLATFORM: (
+        "mlops", "ml platform", "machine learning platform",
+        "ml infrastructure", "machine learning infrastructure",
+    ),
+    Domain.BI_ANALYTICS: ("data analytics", "business intelligence"),
+    Domain.DATA_QUALITY_GOVERNANCE: ("data quality", "data governance"),
+    Domain.OTHER_DATA_AI: ("data ai", "data and ai"),
 }
 
 # Description-only promotion uses concepts rather than raw phrase counts.
@@ -158,8 +240,22 @@ STRONG_DESCRIPTION_CONCEPTS = {
         "model_evaluation": ("model evaluation",),
         "model_development": ("model development",),
         "deep_learning": ("deep learning",),
+        # Concrete NLP and computer-vision work. A phrase like "object detection"
+        # or "named entity recognition" describes what the role builds; it is not
+        # the company vocabulary ("AI", "ML", "LLM") this table refuses. Without
+        # these, an explicitly NLP or CV description could never clear the
+        # two-concept bar and the role stayed UNCERTAIN.
         "computer_vision": ("computer vision",),
         "nlp": ("natural language processing", "nlp"),
+        "text_classification": ("text classification",),
+        "named_entity_recognition": ("named entity recognition",),
+        "information_extraction": ("information extraction",),
+        "sentiment_analysis": ("sentiment analysis",),
+        "machine_translation": ("machine translation",),
+        "object_detection": ("object detection",),
+        "image_recognition": ("image recognition",),
+        "image_classification": ("image classification",),
+        "image_segmentation": ("image segmentation", "semantic segmentation"),
     },
     Domain.GENAI_LLM: {
         "retrieval_augmented_generation": ("retrieval augmented generation", "rag"),
@@ -215,6 +311,13 @@ NON_TARGET_ROLE_SIGNALS = (
     "support specialist", "support team lead", "proposals manager", "engagement manager",
     "engagement management", "store manager", "retail associate", "graphic designer",
     "field technician", "hardware technician",
+    # Commercial, marketing and people job families that the Phase 8A.2
+    # leadership markers would otherwise expose next to an explicit Data/AI
+    # phrase. Exclusion precedence is only ever strengthened, never relaxed.
+    "account manager", "partner manager", "partnerships manager", "community manager",
+    "brand manager", "marketing director", "marketing lead", "head of marketing",
+    "sales director", "head of sales", "head of people", "people operations",
+    "customer support",
 )
 
 GENERIC_TECHNICAL_TITLES = (

@@ -15,13 +15,16 @@ from dataclasses import asdict, dataclass
 from .classifier import contains_phrase, matched_phrases, normalize_text
 from .fine_taxonomy import (
     FINE_CATEGORY_PRECEDENCE, FINE_CONTEXT_SIGNALS, FINE_DESCRIPTION_CONCEPTS,
-    FINE_ROLE_SIGNALS, MINIMUM_DESCRIPTION_CONCEPTS,
+    FINE_ROLE_SIGNALS, MINIMUM_DESCRIPTION_CONCEPTS, SINGLE_CONCEPT_FALLBACK_MINIMUM,
     EvidenceField, EvidenceKind, FineCategory,
 )
 from .taxonomy import Qualification
 
 
-FINE_CLASSIFIER_VERSION = "fine-data-ai-rules-v1"
+#: Bumped from ``fine-data-ai-rules-v1`` by the Phase 8A.2 calibration: the
+#: single-concept fallback and the concrete NLP/computer-vision concepts change
+#: observable fine output. It stays independent of ``CLASSIFIER_VERSION``.
+FINE_CLASSIFIER_VERSION = "fine-data-ai-rules-v2"
 
 #: Only these two coarse outcomes are demonstrably Data/AI. ``UNCERTAIN`` and
 #: ``OUT_OF_SCOPE`` receive no fine category at all, because absence of evidence
@@ -35,6 +38,11 @@ NO_EVIDENCE_REASON = (
 TITLE_EVIDENCE_REASON = "fine categories evidenced by the title take precedence"
 DESCRIPTION_EVIDENCE_REASON = (
     "no fine title evidence; concrete description concepts decide the primary category"
+)
+SINGLE_CONCEPT_REASON = (
+    "qualified as Data/AI with no fine title evidence and no category reaching the "
+    "description threshold; the single concrete concepts matched are more faithful "
+    "than OTHER"
 )
 
 
@@ -98,22 +106,30 @@ def _title_evidence(title: str) -> tuple[FineEvidence, ...]:
     )
 
 
-def _description_evidence(description: str) -> tuple[FineEvidence, ...]:
-    """Keep only categories showing several independent concrete concepts."""
-    matched: dict[FineCategory, tuple[str, ...]] = {}
-    for category, concepts in FINE_DESCRIPTION_CONCEPTS.items():
+def _description_concepts(description: str) -> dict[FineCategory, tuple[str, ...]]:
+    """Return each category's distinct concrete concepts, aliases collapsed."""
+    return {
+        category: found
+        for category, concepts in FINE_DESCRIPTION_CONCEPTS.items()
         # One concept contributes one signal: the first alias it matched, so
         # naming the same idea twice never counts as two pieces of evidence.
-        found = tuple(
+        if (found := tuple(
             hits[0] for aliases in concepts.values()
             if (hits := matched_phrases(description, aliases))
-        )
-        if len(found) >= MINIMUM_DESCRIPTION_CONCEPTS:
-            matched[category] = found
+        ))
+    }
+
+
+def _concept_evidence(
+    concepts: dict[FineCategory, tuple[str, ...]], minimum: int
+) -> tuple[FineEvidence, ...]:
+    """Turn the concepts of every category meeting ``minimum`` into ordered evidence."""
     return tuple(
         FineEvidence(category, EvidenceField.DESCRIPTION, EvidenceKind.CONCRETE_CONCEPT, signal)
         for category in FINE_CATEGORY_PRECEDENCE
-        for signal in matched.get(category, ())
+        for signal in (
+            concepts.get(category, ()) if len(concepts.get(category, ())) >= minimum else ()
+        )
     )
 
 
@@ -139,14 +155,22 @@ def classify_fine_categories(
         return FineClassification(None, (), (), (NOT_QUALIFIED_REASON,))
 
     title_evidence = _title_evidence(normalize_text(title))
-    description_evidence = _description_evidence(normalize_text(description))
-    evidence = title_evidence + description_evidence
-    if not evidence:
+    concepts = _description_concepts(normalize_text(description))
+    description_evidence = _concept_evidence(concepts, MINIMUM_DESCRIPTION_CONCEPTS)
+    if title_evidence or description_evidence:
+        evidence = title_evidence + description_evidence
+        reason = TITLE_EVIDENCE_REASON if title_evidence else DESCRIPTION_EVIDENCE_REASON
+        primary_pool = {item.category for item in (title_evidence or description_evidence)}
+    elif concepts:
+        # The result would otherwise be OTHER, which claims no sub-domain applies.
+        # The concepts that did match are weaker evidence, but they are evidence.
+        evidence = _concept_evidence(concepts, SINGLE_CONCEPT_FALLBACK_MINIMUM)
+        reason = SINGLE_CONCEPT_REASON
+        primary_pool = set(concepts)
+    else:
         return FineClassification(FineCategory.OTHER, (), (), (NO_EVIDENCE_REASON,))
 
-    primary_pool = {item.category for item in (title_evidence or description_evidence)}
     matched = _ordered({item.category for item in evidence})
     primary = next(category for category in FINE_CATEGORY_PRECEDENCE if category in primary_pool)
     secondaries = tuple(category for category in matched if category is not primary)
-    reason = TITLE_EVIDENCE_REASON if title_evidence else DESCRIPTION_EVIDENCE_REASON
     return FineClassification(primary, secondaries, evidence, (reason,))

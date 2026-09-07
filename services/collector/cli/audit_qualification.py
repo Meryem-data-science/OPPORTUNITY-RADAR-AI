@@ -50,6 +50,8 @@ def _human(report: AuditReport, qualification: str | None, limit: int) -> str:
         f"Fine primary category counts: {report.fine_primary_category_counts}",
         f"Fine secondary category counts: {report.fine_secondary_category_counts}",
         f"Fine uncategorized (no safe fine category): {report.fine_uncategorized_count}",
+        f"Deciding qualification rules: {report.qualification_reason_counts}",
+        f"Deciding fine rules: {report.fine_reason_counts}",
     ]
     for index, item in enumerate(_selected(report, qualification, limit), 1):
         result, fine = item.classification, item.fine_classification

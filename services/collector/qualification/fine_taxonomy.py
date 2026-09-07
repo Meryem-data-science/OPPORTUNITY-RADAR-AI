@@ -83,6 +83,9 @@ FINE_ROLE_SIGNALS: dict[FineCategory, tuple[str, ...]] = {
     FineCategory.DATA_ENGINEERING: (
         "data engineer", "analytics engineer", "data platform engineer",
         "big data engineer", "etl developer", "etl engineer",
+        # Mirrors the coarse core role phrase: a data architect designs the
+        # storage and pipeline layer, which is the data-engineering sub-domain.
+        "data architect", "big data architect",
         "ingenieur data", "ingenieure data",
     ),
     FineCategory.MACHINE_LEARNING: (
@@ -229,6 +232,10 @@ FINE_DESCRIPTION_CONCEPTS: dict[FineCategory, dict[str, tuple[str, ...]]] = {
         "vector_search": ("vector database", "vector search"),
     },
     FineCategory.NLP: {
+        # The field's own name is a concrete concept here, unlike "AI" or "ML":
+        # a description that says "natural language processing" is describing
+        # the work, not the employer. The same holds for "computer vision".
+        "natural_language_processing": ("natural language processing",),
         "text_classification": ("text classification",),
         "information_extraction": ("information extraction",),
         "named_entity_recognition": ("named entity recognition",),
@@ -236,6 +243,7 @@ FINE_DESCRIPTION_CONCEPTS: dict[FineCategory, dict[str, tuple[str, ...]]] = {
         "machine_translation": ("machine translation",),
     },
     FineCategory.COMPUTER_VISION: {
+        "computer_vision": ("computer vision",),
         "object_detection": ("object detection",),
         "image_recognition": ("image recognition",),
         "image_classification": ("image classification",),
@@ -266,3 +274,17 @@ FINE_DESCRIPTION_CONCEPTS: dict[FineCategory, dict[str, tuple[str, ...]]] = {
 #: of one category before that category is evidenced. One concept is a mention;
 #: two independent concepts are the work being described.
 MINIMUM_DESCRIPTION_CONCEPTS = 2
+
+#: Phase 8A.2. The coarse gate qualifies a generic technical title on two strong
+#: concepts *across* domains, while the threshold above counts concepts *within*
+#: one category. A real technical role could therefore be proven Data/AI and
+#: still evidence no single fine category, and land in ``OTHER`` — which asserts
+#: that no sub-domain applies, a stronger claim than the evidence supports.
+#:
+#: The fallback below applies to exactly that population and to nothing else:
+#: an already-qualified opportunity, with no fine title evidence at all, and no
+#: category reaching the threshold. There, the single concrete concepts that did
+#: match decide the category instead of ``OTHER``. It can only ever turn an
+#: ``OTHER`` into an evidenced category; no other result can change, and a
+#: qualified role whose description names no concrete concept stays ``OTHER``.
+SINGLE_CONCEPT_FALLBACK_MINIMUM = 1

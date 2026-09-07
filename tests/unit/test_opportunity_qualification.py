@@ -435,3 +435,275 @@ def test_ai_builder_intern_is_a_narrow_explicit_core_title() -> None:
     assert result.qualification is Qualification.CORE_TARGET
     assert result.primary_domain is Domain.MACHINE_LEARNING_AI
     assert result.opportunity_type is OpportunityType.INTERNSHIP
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2: calibration against the real operational corpus.
+#
+# Every case below came from the read-only audit of the real SQLite corpus,
+# where it was UNCERTAIN/UNKNOWN. None of these rules names an employer, a
+# source, a location or an opportunity id: they combine a role family with an
+# explicit Data/AI domain phrase, and they stay behind the exclusion table.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "qualification", "domain"),
+    [
+        ("Data Science Intern - GenAI", Qualification.CORE_TARGET, Domain.GENAI_LLM),
+        ("Director, AI & Data Science", Qualification.CORE_TARGET, Domain.DATA_SCIENCE),
+        ("Data Analytics Manager", Qualification.ADJACENT_TARGET, Domain.BI_ANALYTICS),
+        ("Tech Lead - GenAI", Qualification.CORE_TARGET, Domain.GENAI_LLM),
+        ("Data Architect", Qualification.CORE_TARGET, Domain.DATA_ENGINEERING),
+    ],
+)
+def test_real_corpus_false_negatives_are_recovered(
+    title: str, qualification: Qualification, domain: Domain,
+) -> None:
+    """These five were UNCERTAIN in the real audit and are now decided.
+
+    "Data Analytics Manager" lands on ADJACENT_TARGET rather than CORE_TARGET
+    because its only explicit domain is analytics, and an explicit "Data Analyst"
+    role phrase has always been adjacent. The generalized rule is not allowed to
+    disagree with the explicit one.
+    """
+    result = classify_opportunity(title)
+    assert result.qualification is qualification
+    assert result.primary_domain is domain
+    assert result.matched_title_signals
+
+
+@pytest.mark.parametrize(
+    ("title", "domain"),
+    [
+        ("Data Science Intern - GenAI", Domain.GENAI_LLM),
+        ("Director, AI & Data Science", Domain.DATA_SCIENCE),
+        ("Data Analytics Manager", Domain.BI_ANALYTICS),
+        ("Tech Lead - GenAI", Domain.GENAI_LLM),
+        ("Data Engineering Manager", Domain.DATA_ENGINEERING),
+        ("Head of Machine Learning", Domain.MACHINE_LEARNING_AI),
+        ("Machine Learning Architect", Domain.MACHINE_LEARNING_AI),
+        ("Graduate Data Science Analyst", Domain.DATA_SCIENCE),
+    ],
+)
+def test_the_generalized_rule_is_a_role_family_plus_an_explicit_domain_phrase(
+    title: str, domain: Domain,
+) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification in (Qualification.CORE_TARGET, Qualification.ADJACENT_TARGET)
+    assert result.primary_domain is domain
+    assert "role family + explicit Data/AI domain phrase in title" in result.reasons
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Senior Consultant (m/f/d) Data & AI Strategy",
+        "Senior Consultant (Strategy & Data/AI Transformation)",
+        "Data and AI Strategy Advisor",
+    ],
+)
+def test_data_ai_advisory_and_strategy_roles_are_adjacent_rather_than_core(title: str) -> None:
+    """Advising on Data/AI is Data/AI-adjacent work, never Data/AI execution."""
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_domain is Domain.OTHER_DATA_AI
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Machine Learning Consultant", "Data Science Strategist", "GenAI Advisory Lead"],
+)
+def test_the_advisory_cap_holds_even_over_a_core_data_ai_domain(title: str) -> None:
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.ADJACENT_TARGET
+    assert "advisory/strategy role family: Data/AI advisory work is adjacent, not core" in (
+        result.reasons
+    )
+
+
+def test_the_advisory_cap_also_applies_to_description_promotion() -> None:
+    """The cap is about the role family in the title, not about which rule fired.
+
+    A bare "Consultant" whose description describes the work was CORE_TARGET
+    before this calibration. Reading the same advisory marker in both promoting
+    rules is the conservative reading and keeps the two consistent.
+    """
+    result = classify_opportunity(
+        "Consultant", "Implement model training and model evaluation pipelines."
+    )
+    assert result.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_domain is Domain.MACHINE_LEARNING_AI
+    plain = classify_opportunity("Analyst", "Implement data pipelines and ETL jobs.")
+    assert plain.qualification is Qualification.CORE_TARGET
+
+
+def test_an_explicit_core_role_phrase_still_outranks_the_advisory_cap() -> None:
+    """"Data Scientist" names the work; "Consultant" only names the arrangement."""
+    result = classify_opportunity("Data Scientist Consultant")
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.DATA_SCIENCE
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Manager", "Director", "Team Lead", "Intern", "Graduate Trainee",
+        "Architect", "Consultant", "Principal", "Head of Delivery",
+    ],
+)
+def test_a_role_family_alone_proves_nothing(title: str) -> None:
+    assert classify_opportunity(title).qualification is Qualification.UNCERTAIN
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Director, AI",
+        "Manager, AI Agents",
+        "Intern, LLM Products",
+        "Head of Frontier Agents",
+        "Technical Lead, RAG Products",
+        "Architect, Foundation Models",
+    ],
+)
+def test_broad_ai_vocabulary_is_not_an_explicit_title_domain_phrase(title: str) -> None:
+    """Bare "AI", "LLM", "RAG", "agents" and "foundation models" name products.
+
+    The broadened role families are far wider than the technical ones, so they
+    may only combine with a phrase that names the field itself. Company and
+    product vocabulary keeps evidencing nothing.
+    """
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.primary_domain is Domain.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Marketing Manager, Data Analytics",
+        "Marketing Director, Generative AI",
+        "Account Manager, Machine Learning Platform",
+        "Product Manager, Data Science",
+        "Recruiter, Machine Learning",
+        "Program Manager, Data Engineering",
+        "Engagement Manager, Artificial Intelligence",
+        "Head of Field Marketing, Data Analytics",
+    ],
+)
+def test_explicit_exclusions_still_win_over_a_role_family_and_an_explicit_domain(
+    title: str,
+) -> None:
+    """The exclusion table is evaluated first and was only ever strengthened."""
+    result = classify_opportunity(title)
+    assert result.qualification is Qualification.OUT_OF_SCOPE
+    assert result.primary_domain is Domain.NON_TARGET
+    assert result.matched_exclusion_signals
+
+
+@pytest.mark.parametrize(
+    ("title", "qualification"),
+    [
+        ("Data Engineering Manager", Qualification.CORE_TARGET),
+        ("Machine Learning Lead", Qualification.CORE_TARGET),
+        ("Data Analytics Lead", Qualification.ADJACENT_TARGET),
+        ("Business Intelligence Manager", Qualification.ADJACENT_TARGET),
+        ("Data Governance Lead", Qualification.ADJACENT_TARGET),
+        ("Data Quality Manager", Qualification.ADJACENT_TARGET),
+    ],
+)
+def test_domain_family_decides_core_versus_adjacent_for_every_promotion(
+    title: str, qualification: Qualification,
+) -> None:
+    assert classify_opportunity(title).qualification is qualification
+
+
+def test_the_domain_families_partition_the_target_domains_as_the_role_tables_do() -> None:
+    """The split is derived from the explicit tables, so it cannot drift from them."""
+    from services.collector.qualification.taxonomy import (
+        ADJACENT_DOMAINS, ADJACENT_SIGNALS, CORE_DOMAINS, CORE_SIGNALS, DOMAIN_PRECEDENCE,
+    )
+
+    assert set(CORE_DOMAINS) == set(CORE_SIGNALS)
+    assert set(ADJACENT_DOMAINS) == set(ADJACENT_SIGNALS)
+    assert set(CORE_DOMAINS).isdisjoint(ADJACENT_DOMAINS)
+    assert set(CORE_DOMAINS) | set(ADJACENT_DOMAINS) == set(DOMAIN_PRECEDENCE)
+
+
+def test_every_explicit_title_domain_phrase_is_also_a_context_signal() -> None:
+    """The explicit table is read as a filter over matched context, never beside it."""
+    from services.collector.qualification.taxonomy import (
+        DOMAIN_CONTEXT_SIGNALS, EXPLICIT_TITLE_DOMAIN_SIGNALS,
+    )
+
+    for domain, signals in EXPLICIT_TITLE_DOMAIN_SIGNALS.items():
+        assert set(signals) <= set(DOMAIN_CONTEXT_SIGNALS[domain])
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        (
+            "Research Scientist",
+            "Research natural language processing, named entity recognition and "
+            "text classification for document understanding.",
+        ),
+        (
+            "Software Engineer",
+            "Build computer vision pipelines covering object detection and image "
+            "segmentation.",
+        ),
+    ],
+)
+def test_concrete_nlp_and_vision_work_can_promote_a_generic_technical_title(
+    title: str, description: str,
+) -> None:
+    """Naming the work is stronger evidence than naming the technology.
+
+    Before this calibration the coarse concept table held only "natural language
+    processing" and "computer vision", so an explicitly NLP or CV description
+    could never reach two distinct concepts and the role stayed UNCERTAIN. That
+    is why the real audit produced no NLP or COMPUTER_VISION primary at all.
+    """
+    result = classify_opportunity(title, description)
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.MACHINE_LEARNING_AI
+    assert len(result.matched_description_signals) >= 1
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "We sometimes touch natural language processing.",
+        "The platform includes computer vision features.",
+        "Our customers use object detection.",
+    ],
+)
+def test_one_incidental_nlp_or_vision_sentence_still_promotes_nothing(description: str) -> None:
+    result = classify_opportunity("Software Engineer", description)
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.primary_domain is Domain.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Science Intern - GenAI", "Work on generative AI and large language models."),
+        ("Data Analytics Manager", "Own dbt models and Power BI dashboards."),
+        ("Senior Consultant (m/f/d) Data & AI Strategy", "Advise on the AI roadmap."),
+        ("Marketing Manager, AI Products", "Lead model training and model evaluation programs."),
+    ],
+)
+def test_calibrated_results_are_byte_for_byte_reproducible(title: str, description: str) -> None:
+    first, second = classify_opportunity(title, description), classify_opportunity(title, description)
+    assert first == second
+    assert first.reasons == second.reasons
+    assert first.matched_title_signals == second.matched_title_signals
+    assert first.matched_domains == second.matched_domains
+
+
+@pytest.mark.parametrize("location", ["Casablanca", "Paris", "Berlin", "Remote", None])
+def test_the_calibrated_rules_stay_geography_neutral(location: str | None) -> None:
+    baseline = classify_opportunity("Data Analytics Manager")
+    assert classify_opportunity("Data Analytics Manager", location=location) == baseline
