@@ -67,7 +67,7 @@ MIGRATIONS = Path("migrations")
 
 #: The last migration this slice runs against. Phase 7B.1 adds none of its own:
 #: the verdict depends on a profile, so there is nothing to store.
-LAST_MIGRATION_BEFORE_THIS_SLICE = "0024"
+LAST_MIGRATION_BEFORE_THIS_SLICE = "0025"
 
 #: Tables nobody may create for a derived verdict or a derived preference.
 FORBIDDEN_TABLES = (
@@ -434,7 +434,7 @@ def test_this_slice_adds_no_migration() -> None:
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY)
     )
     assert versions[-1] == LAST_MIGRATION_BEFORE_THIS_SLICE
-    assert not list(MIGRATIONS.glob("0025_*.sql"))
+    assert not list(MIGRATIONS.glob("0026_*.sql"))
 
 
 def test_no_targeting_table_exists(migrated) -> None:

@@ -96,12 +96,31 @@ exclusion rule. Results are categorical qualification, not user-specific
 matching or ranking.
 
 The fine categories are a separate deterministic rule system,
-`fine-data-ai-rules-v2`. The audit adds `fine_primary_category_counts`,
-`fine_secondary_category_counts` and `fine_uncategorized_count`, plus the fine
-primary, secondaries and evidence per displayed opportunity. They are computed
-at read time and never written: there is no migration, no column and no
-persisted fine row in this phase. An opportunity that qualification left
-`UNCERTAIN` or `OUT_OF_SCOPE` is reported as uncategorized rather than `OTHER`.
+`fine-data-ai-rules-v2`, versioned independently of the coarse rules. The audit
+adds `fine_primary_category_counts`, `fine_secondary_category_counts` and
+`fine_uncategorized_count`, plus the fine primary, secondaries and evidence per
+displayed opportunity; the audit itself still writes nothing. An opportunity
+that qualification left `UNCERTAIN` or `OUT_OF_SCOPE` is reported as
+uncategorized rather than `OTHER`.
+
+Since Phase 8B.1 the fine result is also persisted, in the same
+`opportunity_qualifications` row as the coarse one. Migration `0025` adds
+`fine_primary_category`, `fine_secondary_categories_json`,
+`fine_category_evidence_json`, `fine_reasons_json` and
+`fine_classifier_version`; it writes no values, so rows that existed before it
+read `NULL` in all five until persistence runs. A row is skipped as unchanged
+only when its input fingerprint **and both** classifier versions match, so a
+`NULL` fine version is always reconciled, and a fine-only version change
+reconciles without a coarse change. `persist_qualifications` refuses to run
+against a database missing migration `0004` or `0025` and names the missing one;
+it never applies a migration.
+
+Migrating and reconciling the operational database is a separate, deliberate
+Phase 8B.2 step with its own validated procedure. Phase 8B.1 introduced the
+schema and the persistence contract only: no operational data was migrated or
+reconciled, remote Turso qualification writes remain disabled, and nothing reads
+the new columns — matching, ranking, notifications, the API and the frontend are
+unchanged. Read exposure is Phase 8C.
 
 ### Reading the real corpus after a rule change
 
