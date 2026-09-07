@@ -274,7 +274,12 @@ a smaller batch that looks like a slow day:
 * a selected detail page that returns 200 but publishes no `JobPosting`;
 * an offer with no usable title from either the posting or its listing card.
 
-An empty batch is honest only when the site itself says it has nothing.
+An empty batch is honest two ways: the listing says outright that it has
+nothing, **or** it exposes offers normally and every selected one is individually
+skipped for an ordinary reason. The validated run was the second kind — 10
+offers discovered, all 10 expired, 0 candidates, a successful run. What is never
+honest is zero offer links with no explicit empty state: that is a structural
+failure, as is any robots, network or parser fault.
 
 ### What it records
 

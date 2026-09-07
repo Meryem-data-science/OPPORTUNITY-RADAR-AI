@@ -29,9 +29,17 @@ What the audit found, and what this module therefore has to be careful about:
 Card scoping is the other load-bearing idea. Organization and location must come
 from the *same offer card*, and "card" is derived from the document's own
 structure — the largest ancestor of an offer link that still contains exactly one
-offer link — never from CSS class names, which are generated and would break on
-the next redesign. An organization anchor sitting in a container with two offer
-links belongs to no card and is used for neither.
+**distinct offer identity**, one canonical offer URL — never from CSS class
+names, which are generated and would break on the next redesign.
+
+Distinct identity, not link count, is the invariant, and the real listing is why:
+it gives each offer both a title anchor and a "+ Voir Offre de Stage" anchor
+pointing at the same URL, so a card holding two anchors is ordinarily still a
+card holding one offer. Counting anchors made such a card look like two offers
+and collapsed its boundary onto the anchor itself, which left every employer
+outside its own card. Climbing therefore stops only when an ancestor contains two
+or more distinct offer identities — and an organization anchor sitting in such a
+container belongs to no card and is used for neither.
 """
 
 from __future__ import annotations

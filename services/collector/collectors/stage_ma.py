@@ -33,8 +33,23 @@ source publishes anonymous offers on purpose:
   `JobPosting`, or an offer with no usable title is a **structural failure** and
   raises, so the RadarAgent records the run as FAILED.
 
-A failed read never becomes an empty batch. Zero candidates is an observation
-only when the site itself says it has nothing to show.
+A failed read never becomes an empty batch — but an empty batch is not by itself
+a failure. A successful run may legitimately return zero candidates two ways:
+
+1. the listing itself declares an explicit empty state, or
+2. the listing is structurally sound and exposes offers, and every selected one
+   is individually rejected for an ordinary per-item reason — `EXPIRED`,
+   `UNPUBLISHED`, `DETAIL_GONE_AFTER_DISCOVERY`, or an unavailable or
+   deliberately anonymous organization.
+
+The second is not hypothetical: the real Phase 7C.5B validation run read ten
+live offers off the approved listing and every one of them was expired, so the
+batch was empty and the run was a genuine success.
+
+What stays a **structural failure** is a listing exposing zero offer links with
+no explicit empty-state evidence — a template change is never "no opportunities
+today" — and every robots refusal, network fault and parser structural failure,
+none of which may ever be reported as an empty success.
 
 It observes and normalizes; it does not judge. There is no Data & AI filter and
 no PFE keyword filter here — the existing qualification layer classifies, and
