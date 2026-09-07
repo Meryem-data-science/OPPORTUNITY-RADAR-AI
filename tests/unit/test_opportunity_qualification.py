@@ -907,3 +907,31 @@ def test_the_second_pass_families_are_centralized_and_ordered() -> None:
     assert classify_opportunity("Senior, AI & Data Science") == classify_opportunity(
         "Senior, AI & Data Science"
     )
+
+
+def test_no_signal_appears_in_two_explicit_domain_role_families() -> None:
+    """The classifier concatenates every family's matches into one evidence tuple.
+
+    A signal listed in two families would therefore be reported twice for the
+    same title. "junior" was, until it was left to EARLY_CAREER_ROLE_SIGNALS,
+    where it belongs semantically as well as functionally.
+    """
+    from services.collector.qualification.taxonomy import (
+        EARLY_CAREER_ROLE_SIGNALS, EXPLICIT_DOMAIN_ROLE_FAMILIES, SENIORITY_ROLE_SIGNALS,
+    )
+
+    signals = [signal for family in EXPLICIT_DOMAIN_ROLE_FAMILIES for signal in family]
+    assert len(signals) == len(set(signals))
+    assert "junior" in EARLY_CAREER_ROLE_SIGNALS
+    assert "junior" not in SENIORITY_ROLE_SIGNALS
+
+
+def test_an_early_career_field_track_title_reports_its_marker_once() -> None:
+    result = classify_opportunity("Junior, Data Analytics")
+    assert result.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_domain is Domain.BI_ANALYTICS
+    assert result.matched_title_signals.count("junior") == 1
+    senior = classify_opportunity("Senior, AI & Data Science")
+    assert senior.qualification is Qualification.CORE_TARGET
+    assert senior.primary_domain is Domain.DATA_SCIENCE
+    assert senior.matched_title_signals.count("senior") == 1

@@ -137,14 +137,17 @@ EARLY_CAREER_ROLE_SIGNALS = (
 
 ARCHITECT_ROLE_SIGNALS = ("architect", "architecture")
 
-# Pure seniority markers, carrying no role content at all. A field-track title
-# can be nothing but a level and the field name ("Senior, AI & Data Science"),
-# and this is the only way to read one. Kept apart from LEADERSHIP_ROLE_SIGNALS
-# because a senior individual contributor is not a leader, and dependent on an
-# explicit domain phrase exactly like every other family here: "Senior Product
-# Manager, Data Science" is still excluded by its job family, and "Senior
-# Software Engineer, Full-Stack" still evidences nothing.
-SENIORITY_ROLE_SIGNALS = ("senior", "junior")
+# The pure seniority marker, carrying no role content at all. A field-track
+# title can be nothing but a level and the field name ("Senior, AI & Data
+# Science"), and this is the only way to read one. Kept apart from
+# LEADERSHIP_ROLE_SIGNALS because a senior individual contributor is not a
+# leader, and dependent on an explicit domain phrase exactly like every other
+# family here: "Senior Product Manager, Data Science" is still excluded by its
+# job family, and "Senior Software Engineer, Full-Stack" still evidences
+# nothing. "junior" is deliberately absent: it already belongs to
+# EARLY_CAREER_ROLE_SIGNALS, and every signal in EXPLICIT_DOMAIN_ROLE_FAMILIES
+# must appear in exactly one family so a title never reports it twice.
+SENIORITY_ROLE_SIGNALS = ("senior",)
 
 # Academic role families. Phase 8 classifies what an opportunity is about, not
 # whether it suits anyone, so a professorship in Data Science is a Data/AI
