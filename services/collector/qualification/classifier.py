@@ -102,6 +102,26 @@ def _strong_description_concepts(text: str) -> dict[Domain, tuple[str, ...]]:
     }
 
 
+def technical_role_families(normalized_title: str) -> tuple[str, ...]:
+    """Return the technical role-family phrases a normalized title matched.
+
+    This is the narrow "the person builds or researches things" vocabulary —
+    engineer, research scientist, forward deployed, postdoc and friends. It is
+    deliberately *not* GENERIC_TECHNICAL_TITLES, which also holds "analyst" and
+    "consultant". Exposed as a named predicate because the fine classifier needs
+    the same population, and duplicating the list would let the two drift.
+    """
+    return (
+        matched_phrases(normalized_title, TECHNICAL_ROLE_SIGNALS)
+        + matched_phrases(normalized_title, POSTDOC_ROLE_SIGNALS)
+    )
+
+
+def advisory_role_families(normalized_title: str) -> tuple[str, ...]:
+    """Return the advisory/strategy role markers a normalized title matched."""
+    return matched_phrases(normalized_title, ADVISORY_ROLE_SIGNALS)
+
+
 def _explicit_title_domains(
     title_context: dict[Domain, tuple[str, ...]]
 ) -> dict[Domain, tuple[str, ...]]:
@@ -180,14 +200,13 @@ def classify_opportunity(
     exclusions = matched_phrases(normalized_title, NON_TARGET_ROLE_SIGNALS)
 
     title_positive = {**title_adjacent, **title_core}
-    technical_roles = matched_phrases(normalized_title, TECHNICAL_ROLE_SIGNALS)
-    postdoc_roles = matched_phrases(normalized_title, POSTDOC_ROLE_SIGNALS)
+    technical_roles = technical_role_families(normalized_title)
     extended_roles = (
         matched_phrases(normalized_title, LEADERSHIP_ROLE_SIGNALS)
         + matched_phrases(normalized_title, EARLY_CAREER_ROLE_SIGNALS)
         + matched_phrases(normalized_title, ARCHITECT_ROLE_SIGNALS)
     )
-    advisory_roles = matched_phrases(normalized_title, ADVISORY_ROLE_SIGNALS)
+    advisory_roles = advisory_role_families(normalized_title)
     explicit_title_domains = _explicit_title_domains(title_context)
     is_generic_technical = bool(matched_phrases(normalized_title, GENERIC_TECHNICAL_TITLES))
     strong_concept_count = sum(len(concepts) for concepts in strong_description.values())
@@ -195,7 +214,7 @@ def classify_opportunity(
     # The narrow technical families keep reading the full title context, which is
     # what recognizes "ML Systems Engineer, Robotics". The far wider Phase 8A.2
     # families demand a phrase that names the field outright.
-    technical_structural = bool((technical_roles or postdoc_roles) and title_context)
+    technical_structural = bool(technical_roles and title_context)
     explicit_structural = bool((extended_roles or advisory_roles) and explicit_title_domains)
 
     reasons: list[str] = []
@@ -247,7 +266,7 @@ def classify_opportunity(
     matched_domains = tuple(domain for domain in DOMAIN_PRECEDENCE if domain in relevant_domains)
     title_signals = tuple(
         signal for domain in DOMAIN_PRECEDENCE for signal in title_positive.get(domain, ())
-    ) + technical_roles + postdoc_roles + extended_roles + advisory_roles + tuple(
+    ) + technical_roles + extended_roles + advisory_roles + tuple(
         signal for domain in DOMAIN_PRECEDENCE for signal in title_context.get(domain, ())
     )
     description_signals = tuple(

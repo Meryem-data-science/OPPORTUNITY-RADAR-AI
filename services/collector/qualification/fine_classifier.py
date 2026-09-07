@@ -12,7 +12,10 @@ employer neutrality are structural rather than a rule that could be forgotten.
 
 from dataclasses import asdict, dataclass
 
-from .classifier import contains_phrase, matched_phrases, normalize_text
+from .classifier import (
+    advisory_role_families, contains_phrase, matched_phrases, normalize_text,
+    technical_role_families,
+)
 from .fine_taxonomy import (
     FINE_CATEGORY_PRECEDENCE, FINE_CONTEXT_SIGNALS, FINE_DESCRIPTION_CONCEPTS,
     FINE_ROLE_SIGNALS, MINIMUM_DESCRIPTION_CONCEPTS, SINGLE_CONCEPT_FALLBACK_MINIMUM,
@@ -40,9 +43,9 @@ DESCRIPTION_EVIDENCE_REASON = (
     "no fine title evidence; concrete description concepts decide the primary category"
 )
 SINGLE_CONCEPT_REASON = (
-    "qualified as Data/AI with no fine title evidence and no category reaching the "
-    "description threshold; the single concrete concepts matched are more faithful "
-    "than OTHER"
+    "qualified technical Data/AI role with no fine title evidence and no category "
+    "reaching the description threshold; the single concrete concepts matched are "
+    "more faithful than OTHER"
 )
 
 
@@ -133,6 +136,29 @@ def _concept_evidence(
     )
 
 
+def _single_concept_fallback_applies(normalized_title: str) -> bool:
+    """Restrict the weaker one-concept rule to the population that motivated it.
+
+    The rule exists for a *technical* role the coarse gate proved Data/AI on
+    concepts scattered across domains — a Forward Deployed Software Engineer, a
+    Research Scientist. It reuses the coarse classifier's own technical role
+    vocabulary rather than a second list, so the two cannot drift, and it
+    deliberately does not reuse GENERIC_TECHNICAL_TITLES, which also holds
+    "analyst" and "consultant".
+
+    An advisory or strategy marker vetoes it even next to a technical family:
+    advising on Data/AI is not building it, and the coarse classifier already
+    caps such a title at ADJACENT_TARGET for the same reason.
+
+    So a Data Governance Analyst or an AI Advisory Consultant that mentions
+    model serving once stays OTHER — which is the true statement about it: it is
+    demonstrably Data/AI, and no supported technical sub-domain is evidenced.
+    """
+    return bool(technical_role_families(normalized_title)) and not advisory_role_families(
+        normalized_title
+    )
+
+
 def _ordered(categories: set[FineCategory]) -> tuple[FineCategory, ...]:
     return tuple(category for category in FINE_CATEGORY_PRECEDENCE if category in categories)
 
@@ -154,14 +180,18 @@ def classify_fine_categories(
     if qualification not in FINE_ELIGIBLE_QUALIFICATIONS:
         return FineClassification(None, (), (), (NOT_QUALIFIED_REASON,))
 
-    title_evidence = _title_evidence(normalize_text(title))
+    normalized_title = normalize_text(title)
+    title_evidence = _title_evidence(normalized_title)
     concepts = _description_concepts(normalize_text(description))
     description_evidence = _concept_evidence(concepts, MINIMUM_DESCRIPTION_CONCEPTS)
     if title_evidence or description_evidence:
+        # The normal rules, unchanged and unrestricted: title evidence, or a
+        # category showing MINIMUM_DESCRIPTION_CONCEPTS distinct concepts. Both
+        # apply to every qualified opportunity, technical or not.
         evidence = title_evidence + description_evidence
         reason = TITLE_EVIDENCE_REASON if title_evidence else DESCRIPTION_EVIDENCE_REASON
         primary_pool = {item.category for item in (title_evidence or description_evidence)}
-    elif concepts:
+    elif concepts and _single_concept_fallback_applies(normalized_title):
         # The result would otherwise be OTHER, which claims no sub-domain applies.
         # The concepts that did match are weaker evidence, but they are evidence.
         evidence = _concept_evidence(concepts, SINGLE_CONCEPT_FALLBACK_MINIMUM)

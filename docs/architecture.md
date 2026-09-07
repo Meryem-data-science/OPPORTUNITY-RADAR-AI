@@ -1426,20 +1426,46 @@ translation` and their siblings — were added to the coarse table, and the fiel
 names themselves became fine concepts. No threshold moved: two distinct concepts
 are still required, and one incidental sentence still promotes nothing.
 
-**One fine rule changed, and it can only replace `OTHER`.** The coarse gate
-promotes a generic technical title on two strong concepts *across* domains,
-while the fine threshold counts concepts *within* one category. A real technical
-role could therefore be proven Data/AI and still evidence no single fine
-category, landing in `OTHER` — a claim that no sub-domain applies, stronger than
-the evidence supported. When an already-qualified opportunity has no fine title
-evidence at all and no category reached the threshold, the single concrete
-concepts that did match now decide the category instead. Nothing else can
-change: a role with title evidence, or with a category over the threshold, is
-untouched, and a qualified role naming no concrete concept is still `OTHER`. The
-fine classifier's inputs stayed `title`, `description` and the coarse
-`Qualification`; enriching that contract with coarse domains was considered and
-rejected, because the rule is expressible from the fine tables alone and the
-classifier has to stay independently explainable.
+**The fine classifier now has two description rules, and they are different
+strengths.** The normal one is unchanged and unrestricted: a category is
+evidenced when the description shows `MINIMUM_DESCRIPTION_CONCEPTS` (two)
+*distinct* concrete concepts of it, aliases collapsed. Two independent concepts
+inside one category are the work being described rather than a passing mention,
+so that rule classifies any qualified opportunity — a Data Governance Analyst
+who owns the BI estate is `BUSINESS_INTELLIGENCE`, an AI Advisory Consultant who
+owns RAG and prompt-engineering workstreams is `GENERATIVE_AI`.
+
+**The weaker one-concept fallback is technical-only.** The coarse gate promotes
+a generic technical title on two strong concepts *across* domains, while the
+fine threshold counts *within* one category. A real technical role could
+therefore be proven Data/AI and still evidence no single fine category, landing
+in `OTHER` — a claim that no sub-domain applies, stronger than the evidence
+supported. The fallback repairs exactly that, and its guard says so in code:
+the title must match a *technical* role family — the coarse classifier's own
+`TECHNICAL_ROLE_SIGNALS`/`POSTDOC_ROLE_SIGNALS`, reused through a named
+predicate so the two cannot drift, and deliberately not the wider
+`GENERIC_TECHNICAL_TITLES`, which also holds `analyst` and `consultant` — it
+must carry no advisory or strategy marker, there must be no fine title evidence
+at all, and no category may have reached the threshold. Only then do the single
+concrete concepts that matched decide the category.
+
+**Advisory and governance roles are protected from it.** A Data Governance
+Analyst or an AI Advisory Consultant whose description mentions `model serving`
+once stays `OTHER`, because one incidental technical concept must never convert
+a non-technical role into a technical sub-domain — and because `OTHER` is the
+true statement about it. Advising on Data/AI is not building it, which is why an
+advisory marker vetoes the fallback even beside a technical family, exactly as
+it caps the coarse outcome at `ADJACENT_TARGET`. `OTHER` remains a positive
+Data/AI outcome throughout: it says the opportunity *is* Data/AI and that no
+supported sub-domain is evidenced, never "we do not know".
+
+Nothing else about the fine result can change: a role with title evidence, or
+with a category over the threshold, is untouched, and a qualified role naming no
+concrete concept is still `OTHER`. The fine classifier's inputs stayed `title`,
+`description` and the coarse `Qualification`; enriching that contract with
+coarse domains was considered and rejected, because both rules are expressible
+from the fine tables plus the shared role predicate, and the classifier has to
+stay independently explainable.
 
 **Phase 8A.2 changed no contract.** The coarse rules moved to
 `qualification-rules-v2` and the fine rules to `fine-data-ai-rules-v2` because

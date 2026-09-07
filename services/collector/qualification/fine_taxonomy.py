@@ -281,10 +281,19 @@ MINIMUM_DESCRIPTION_CONCEPTS = 2
 #: still evidence no single fine category, and land in ``OTHER`` — which asserts
 #: that no sub-domain applies, a stronger claim than the evidence supports.
 #:
-#: The fallback below applies to exactly that population and to nothing else:
-#: an already-qualified opportunity, with no fine title evidence at all, and no
-#: category reaching the threshold. There, the single concrete concepts that did
-#: match decide the category instead of ``OTHER``. It can only ever turn an
-#: ``OTHER`` into an evidenced category; no other result can change, and a
-#: qualified role whose description names no concrete concept stays ``OTHER``.
+#: The fallback below is restricted to exactly that population, in code and not
+#: only in prose. Every one of these must hold: the opportunity is qualified;
+#: its title matches a *technical* role family (the coarse classifier's own
+#: ``TECHNICAL_ROLE_SIGNALS``/``POSTDOC_ROLE_SIGNALS``, never the wider
+#: ``GENERIC_TECHNICAL_TITLES``, which also holds "analyst" and "consultant");
+#: it carries no advisory or strategy marker; there is no fine title evidence at
+#: all; and no category reached ``MINIMUM_DESCRIPTION_CONCEPTS``. Only then do
+#: the single concrete concepts that matched decide the category.
+#:
+#: So a Data Governance Analyst or an AI Advisory Consultant that mentions model
+#: serving once stays ``OTHER``: one incidental technical concept must never
+#: convert a non-technical role into a technical sub-domain. The normal
+#: two-concept rule above is *not* restricted this way — two independent
+#: concepts inside one category are the work being described, and they classify
+#: any qualified role.
 SINGLE_CONCEPT_FALLBACK_MINIMUM = 1

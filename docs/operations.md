@@ -115,8 +115,11 @@ and after the change, then check the rules that moved:
   `role family + explicit Data/AI domain phrase in title`;
 - an unchanged `OUT_OF_SCOPE` population, or a slightly larger one — exclusion
   precedence is only ever strengthened;
-- fewer fine `OTHER` results, the difference appearing under the single-concept
-  fine reason, with advisory and governance roles still `OTHER`.
+- fewer fine `OTHER` results, the difference appearing under the technical
+  single-concept fine reason. Advisory and governance roles stay `OTHER` unless
+  two independent concepts of one category name the work outright: the weaker
+  one-concept fallback is restricted to technical role families, while the
+  normal two-concept rule is not.
 
 The audit never writes, so it is safe against the operational file directly.
 Do not run `persist_qualifications --apply` or a collector to validate a rule

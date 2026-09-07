@@ -496,3 +496,204 @@ def test_calibrated_fine_results_are_byte_for_byte_reproducible(
     assert first.evidence == second.evidence
     assert first.reasons == second.reasons
     assert first.secondary_categories == second.secondary_categories
+
+
+# --------------------------------------------------------------------------
+# Phase 8A.2 review correction: the one-concept fallback is technical-only.
+#
+# As first written the fallback fired for any qualified role, so a Data
+# Governance Analyst mentioning "model serving" once became MLOPS and an AI
+# Advisory Consultant mentioning RAG once became GENERATIVE_AI. One incidental
+# technical concept must not convert a non-technical advisory or governance
+# OTHER into a technical sub-domain.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "primary", "secondaries"),
+    [
+        (
+            "Forward Deployed Software Engineer, Public Sector",
+            "Own model deployment for customer systems and run experimentation on rollouts.",
+            FineCategory.MLOPS, (FineCategory.DATA_SCIENCE,),
+        ),
+        (
+            "Senior Mission Software Engineer, Public Sector",
+            "Own model serving for the platform and build data pipelines for mission data.",
+            FineCategory.MLOPS, (FineCategory.DATA_ENGINEERING,),
+        ),
+        (
+            "Senior Manager, Research Scientist",
+            "Lead research using deep learning and build the data pipelines behind it.",
+            FineCategory.MACHINE_LEARNING, (FineCategory.DATA_ENGINEERING,),
+        ),
+    ],
+)
+def test_the_fallback_still_serves_the_technical_roles_that_motivated_it(
+    title: str, description: str, primary: FineCategory, secondaries: tuple[FineCategory, ...],
+) -> None:
+    """Concepts scattered one-per-category across a real technical role.
+
+    The coarse gate counts strong concepts across domains and qualified these;
+    the fine threshold counts within one category and reached none of them.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.CORE_TARGET
+    assert result.primary_category is primary
+    assert result.secondary_categories == secondaries
+    assert result.reasons == (
+        "qualified technical Data/AI role with no fine title evidence and no category "
+        "reaching the description threshold; the single concrete concepts matched are "
+        "more faithful than OTHER",
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Data Governance Analyst", "We occasionally do model serving."),
+        ("Data Governance Analyst", "Some dashboarding happens here."),
+        ("Data Quality Analyst", "The team touches feature engineering now and then."),
+    ],
+)
+def test_a_governance_role_is_not_reclassified_by_one_incidental_concept(
+    title: str, description: str,
+) -> None:
+    """OTHER is the true statement: demonstrably Data/AI, no supported sub-domain."""
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("AI Advisory Consultant", "We sometimes prototype with RAG."),
+        ("AI Strategy Consultant, Frontier Tech", "Model deployment comes up occasionally."),
+        ("AI Advisory Principal", "Clients ask about fine tuning from time to time."),
+        ("Senior Consultant (m/f/d) Data & AI Strategy", "Model monitoring is on the roadmap."),
+    ],
+)
+def test_an_advisory_role_is_not_reclassified_by_one_incidental_concept(
+    title: str, description: str,
+) -> None:
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+@pytest.mark.parametrize(
+    "title", ["Consultant Software Engineer, Delivery", "Software Engineer, Advisory Services"],
+)
+def test_an_advisory_marker_vetoes_the_fallback_even_beside_a_technical_family(
+    title: str,
+) -> None:
+    """Advising on Data/AI is not building it, whatever else the title says.
+
+    The coarse classifier caps exactly these titles at ADJACENT_TARGET for the
+    same reason, and the fine fallback reads the same marker. Note that an
+    explicit core role phrase outranks the cap on both sides: "Research Scientist,
+    AI Strategy" is core, and it never reaches the fallback anyway because that
+    phrase is fine title evidence.
+    """
+    description = "Own model deployment and run experimentation on client rollouts."
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is FineCategory.OTHER
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_fallback_reuses_the_coarse_technical_vocabulary_not_a_second_list() -> None:
+    """The predicate is the coarse classifier's own, so the two cannot drift.
+
+    GENERIC_TECHNICAL_TITLES is deliberately *not* the source: it also holds
+    "analyst" and "consultant", which are the two families this correction is
+    about.
+    """
+    from services.collector.qualification.classifier import (
+        advisory_role_families, technical_role_families,
+    )
+    from services.collector.qualification.taxonomy import GENERIC_TECHNICAL_TITLES
+
+    assert technical_role_families("forward deployed software engineer public sector")
+    assert technical_role_families("senior manager research scientist")
+    assert technical_role_families("cus postdoctoral researcher in spatial data science")
+    assert not technical_role_families("data governance analyst")
+    assert not technical_role_families("ai advisory consultant")
+    assert advisory_role_families("ai advisory consultant")
+    assert "analyst" in GENERIC_TECHNICAL_TITLES and "consultant" in GENERIC_TECHNICAL_TITLES
+
+
+@pytest.mark.parametrize(
+    ("title", "description", "category"),
+    [
+        (
+            "Data Governance Analyst",
+            "Own the Power BI estate and the dashboarding standards.",
+            FineCategory.BUSINESS_INTELLIGENCE,
+        ),
+        (
+            "AI Advisory Consultant",
+            "Own retrieval augmented generation and prompt engineering workstreams.",
+            FineCategory.GENERATIVE_AI,
+        ),
+    ],
+)
+def test_the_normal_two_concept_rule_stays_unrestricted_for_every_qualified_role(
+    title: str, description: str, category: FineCategory,
+) -> None:
+    """The chosen semantics, stated explicitly: the threshold rule is not technical-only.
+
+    Two *independent* concrete concepts inside one category are the work being
+    described, not a passing mention, and that is a far stronger claim than the
+    single concept the fallback rests on. A governance analyst who owns the BI
+    estate is doing business intelligence; an advisory consultant who owns RAG
+    and prompt engineering workstreams is doing generative AI. Only the weaker
+    one-concept fallback is restricted to technical role families.
+    """
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification is Qualification.ADJACENT_TARGET
+    assert result.primary_category is category
+    assert len(result.evidence) >= 2
+    assert result.reasons == (
+        "no fine title evidence; concrete description concepts decide the primary category",
+    )
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        ("Software Engineer", "We sometimes do model serving."),
+        ("Research Scientist", "The platform includes some object detection."),
+        ("AI Product Manager", "Coordinate model serving work."),
+        ("Recruiter - AI Division", "Our teams own model deployment."),
+    ],
+)
+def test_an_unqualified_role_is_still_never_rescued_by_the_restricted_fallback(
+    title: str, description: str,
+) -> None:
+    """The fallback runs behind the coarse gate; a technical family is not a bypass."""
+    coarse = classify_opportunity(title, description)
+    result = classify_fine_categories(title, description, qualification=coarse.qualification)
+    assert coarse.qualification in (Qualification.UNCERTAIN, Qualification.OUT_OF_SCOPE)
+    assert result.primary_category is None
+    assert (result.secondary_categories, result.evidence) == ((), ())
+
+
+def test_the_two_description_rules_stay_distinct_on_the_same_technical_role() -> None:
+    """One title, three descriptions, three different rules — and three reasons."""
+    title = "Forward Deployed Software Engineer, Public Sector"
+    threshold = fine(title, "Own model serving and model deployment for customer systems.")
+    fallback = fine(title, "Own model deployment and run experimentation on rollouts.")
+    assert threshold.primary_category is FineCategory.MLOPS
+    assert threshold.secondary_categories == ()
+    assert fallback.primary_category is FineCategory.MLOPS
+    assert fallback.secondary_categories == (FineCategory.DATA_SCIENCE,)
+    assert threshold.reasons != fallback.reasons
