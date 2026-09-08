@@ -22,11 +22,14 @@ from fastapi.testclient import TestClient
 import pytest
 
 from services.api.fine_classification import (
+    UNCLASSIFIED,
     FineClassificationDecodeError,
     decode_fine_classification,
 )
 from services.api.main import app
 from services.collector.database.migrations import apply_migrations
+from services.collector.qualification.fine_classifier import FINE_ELIGIBLE_QUALIFICATIONS
+from services.collector.qualification.taxonomy import Qualification
 
 
 FINE_VERSION = "fine-data-ai-rules-v2"
@@ -636,7 +639,7 @@ def test_half_written_fine_row_is_refused_rather_than_read_as_never_classified(
         connection.close()
 
     with pytest.raises(FineClassificationDecodeError):
-        decode_fine_classification("NLP", None, None, None, None)
+        decode_fine_classification("CORE_TARGET", "NLP", None, None, None, None)
 
 
 # --- I: a read changes nothing ------------------------------------------------
@@ -682,3 +685,174 @@ def test_reading_the_api_modifies_no_row_and_no_qualification_value(
     assert _snapshot(path) == qualifications_before
     assert opportunities_after == opportunities_before
     assert len(qualifications_before) == 3
+
+
+# --- Coherence between the persisted coarse and fine halves of one row --------
+#
+# Migration 0025 states the fine half against itself: nothing written, or the
+# version and its three JSON columns written together. It cannot state the fine
+# half against the coarse half in the same row, so every row below is one SQLite
+# accepts and Phase 8 forbids. Each must fail closed through the public 503,
+# because publishing any of them would do the one thing this phase exists to
+# prevent: turn an unknown into an assertion, or an assertion into an unknown.
+
+EVIDENCE_NLP = (
+    '[{"category":"NLP","field":"TITLE","kind":"ROLE_PHRASE","signal":"nlp engineer"}]'
+)
+EVIDENCE_OTHER = (
+    '[{"category":"OTHER","field":"TITLE","kind":"ROLE_PHRASE","signal":"nlp engineer"}]'
+)
+
+INCOHERENT = (
+    # 1. An UNCERTAIN opportunity cannot be OTHER: OTHER claims the opportunity
+    #    is demonstrably Data/AI, which UNCERTAIN says was never established.
+    ("uncertain_other", "UNCERTAIN", "OTHER", "[]", "[]"),
+    # 2. Nor can an OUT_OF_SCOPE one carry a supported sub-domain.
+    ("out_of_scope_supported", "OUT_OF_SCOPE", "NLP", "[]", "[]"),
+    # 3-4. A qualified opportunity that was classified has a verdict. "Nothing"
+    #      is the answer for an ineligible row, never for CORE or ADJACENT.
+    ("core_no_primary", "CORE_TARGET", None, "[]", "[]"),
+    ("adjacent_no_primary", "ADJACENT_TARGET", None, "[]", "[]"),
+    # 5-6. A row with no primary category cannot carry matched secondaries or
+    #      evidence: the evidence would have produced a primary.
+    ("uncertain_secondary", "UNCERTAIN", None, '["NLP"]', "[]"),
+    ("uncertain_evidence", "UNCERTAIN", None, "[]", EVIDENCE_NLP),
+    ("out_of_scope_secondary", "OUT_OF_SCOPE", None, '["NLP"]', "[]"),
+    ("out_of_scope_evidence", "OUT_OF_SCOPE", None, "[]", EVIDENCE_NLP),
+    # 7-8. OTHER *means* no supported sub-domain was evidenced, so a secondary
+    #      category or evidence beside it contradicts the value itself.
+    ("core_other_secondary", "CORE_TARGET", "OTHER", '["NLP"]', "[]"),
+    ("core_other_evidence", "CORE_TARGET", "OTHER", "[]", EVIDENCE_NLP),
+    ("adjacent_other_secondary", "ADJACENT_TARGET", "OTHER", '["NLP"]', "[]"),
+    ("adjacent_other_evidence", "ADJACENT_TARGET", "OTHER", "[]", EVIDENCE_NLP),
+    # 9. OTHER is a primary-only value: the classifier assigns it exactly when
+    #    nothing was evidenced, so it can never itself be evidence.
+    ("core_other_as_secondary", "CORE_TARGET", "NLP", '["OTHER"]', EVIDENCE_NLP),
+    ("core_other_as_evidence", "CORE_TARGET", "NLP", "[]", EVIDENCE_OTHER),
+    ("adjacent_other_as_secondary", "ADJACENT_TARGET", "NLP", '["OTHER"]', "[]"),
+    ("adjacent_other_as_evidence", "ADJACENT_TARGET", "NLP", "[]", EVIDENCE_OTHER),
+)
+
+
+@pytest.mark.parametrize(
+    ("qualification", "primary", "secondary", "evidence"),
+    [case[1:] for case in INCOHERENT],
+    ids=[case[0] for case in INCOHERENT],
+)
+def test_incoherent_persisted_coarse_and_fine_halves_answer_the_public_503(
+    tmp_path, monkeypatch, qualification, primary, secondary, evidence
+) -> None:
+    path = _database(tmp_path)
+    connection = _connect(path)
+    try:
+        opportunity_id = _insert_opportunity(
+            connection, "incoherent", last_seen_at="2026-01-05T00:00:00+00:00"
+        )
+        _insert_qualification(
+            connection,
+            opportunity_id,
+            qualification=qualification,
+            fine_primary_category=primary,
+            fine_secondary_categories_json=secondary,
+            fine_category_evidence_json=evidence,
+            fine_reasons_json='["TEST ONLY persisted reason"]',
+            fine_classifier_version=FINE_VERSION,
+        )
+        connection.commit()
+        # The row really is one the schema accepts: the gap this test covers is
+        # exactly the coherence migration 0025 cannot express.
+        stored = connection.execute(
+            """SELECT qualification, fine_primary_category
+               FROM opportunity_qualifications WHERE opportunity_id = ?""",
+            (opportunity_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert stored == (qualification, primary)
+
+    response = _get(monkeypatch, path)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Opportunity data is temporarily unavailable."}
+    for leak in ("Traceback", "FineClassificationDecodeError", qualification):
+        assert leak not in response.text, leak
+
+
+@pytest.mark.parametrize(
+    "qualification", ["CORE_TARGET", "ADJACENT_TARGET", "OUT_OF_SCOPE", "UNCERTAIN"]
+)
+def test_legacy_never_fine_classified_row_is_legal_under_every_qualification(
+    tmp_path, monkeypatch, qualification
+) -> None:
+    """State B is the pre-reconciliation row, and coarse outcome says nothing about it.
+
+    Migration 0025 reached every existing row, whatever it was qualified as, and
+    fine classification reached none of them. Refusing any of these would break
+    a database that is merely not reconciled yet.
+    """
+    path = _database(tmp_path)
+    connection = _connect(path)
+    try:
+        opportunity_id = _insert_opportunity(
+            connection, "legacy", last_seen_at="2026-01-05T00:00:00+00:00"
+        )
+        _insert_qualification(connection, opportunity_id, qualification=qualification)
+        connection.commit()
+    finally:
+        connection.close()
+
+    response = _get(monkeypatch, path)
+
+    assert response.status_code == 200
+    item = _by_title(response.json())["TEST ONLY role legacy"]
+    assert item["fine_primary_category"] is None
+    assert item["fine_secondary_categories"] is None
+    assert item["fine_category_evidence"] is None
+    assert item["fine_reasons"] is None
+    assert item["fine_classifier_version"] is None
+
+
+def test_fine_values_without_a_qualification_row_are_refused(tmp_path) -> None:
+    """A LEFT JOIN miss NULLs every joined column, coarse and fine alike.
+
+    Fine data arriving with no coarse qualification therefore came from a row
+    that does not exist. SQL cannot produce it — there is no row to attach it to
+    — so the invariant is asserted against the decoder directly.
+    """
+    with pytest.raises(FineClassificationDecodeError):
+        decode_fine_classification(
+            None, "NLP", "[]", "[]", '["reason"]', FINE_VERSION
+        )
+    with pytest.raises(FineClassificationDecodeError):
+        decode_fine_classification(None, None, None, None, None, FINE_VERSION)
+    # The genuine LEFT JOIN miss stays legal and stays unclassified.
+    assert decode_fine_classification(None, None, None, None, None, None) == (
+        UNCLASSIFIED
+    )
+
+
+def test_a_qualification_outside_the_closed_coarse_vocabulary_is_refused(
+    tmp_path,
+) -> None:
+    """The coarse value is validated against `Qualification`, not merely read."""
+    with pytest.raises(FineClassificationDecodeError):
+        decode_fine_classification(
+            "PROBABLY_TARGET", "NLP", "[]", "[]", '["reason"]', FINE_VERSION
+        )
+
+
+def test_the_read_model_reuses_the_classifier_eligibility_contract() -> None:
+    """The eligible coarse outcomes are the classifier's set, not a second copy.
+
+    A duplicated pair here would keep passing today and start refusing valid
+    persisted rows the day the fine classifier's own contract moves.
+    """
+    assert FINE_ELIGIBLE_QUALIFICATIONS == (
+        Qualification.CORE_TARGET,
+        Qualification.ADJACENT_TARGET,
+    )
+    assert set(Qualification) - set(FINE_ELIGIBLE_QUALIFICATIONS) == {
+        Qualification.OUT_OF_SCOPE,
+        Qualification.UNCERTAIN,
+    }

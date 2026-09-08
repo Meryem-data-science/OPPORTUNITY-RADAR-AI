@@ -102,7 +102,12 @@ def _to_response(
 ) -> OpportunityResponse:
     fallback = preferred_link(row[5], row[4], row[6]) or row[4]
     original_url = select_original_url(observations, fallback=fallback)
-    fine = decode_fine_classification(row[11], row[12], row[13], row[14], row[15])
+    # `row[11]` is the persisted coarse qualification. It is read only so the
+    # fine values can be validated against it, and is deliberately not exposed:
+    # this phase adds five public fields and no sixth.
+    fine = decode_fine_classification(
+        row[11], row[12], row[13], row[14], row[15], row[16]
+    )
     return OpportunityResponse(
         id=row[0],
         canonical_title=row[1],
@@ -140,7 +145,9 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
         # has never been qualified is still a visible, active opportunity, and
         # it keeps its place in this listing and in `total`. Migration 0004
         # makes `opportunity_qualifications.opportunity_id` the primary key, so
-        # the join adds columns and can never add or drop a row.
+        # the join adds columns and can never add or drop a row. The coarse
+        # `qualification` is selected to validate the fine values against it;
+        # it stays internal and reaches no response field.
         rows = connection.execute(
             """
             SELECT opportunities.id, opportunities.canonical_title,
@@ -149,6 +156,7 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
                    opportunities.canonical_url, opportunities.discovered_at,
                    opportunities.last_seen_at, opportunities.status,
                    LENGTH(COALESCE(opportunities.description, '')),
+                   opportunity_qualifications.qualification,
                    opportunity_qualifications.fine_primary_category,
                    opportunity_qualifications.fine_secondary_categories_json,
                    opportunity_qualifications.fine_category_evidence_json,

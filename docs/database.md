@@ -1300,9 +1300,12 @@ Each item also carries the five public fine Data/AI fields added in Phase 8C —
 `opportunity_qualifications` row that migration `0025` extended, through an
 additive `LEFT JOIN` on `opportunity_id`, and they are the values persistence
 wrote: **the API runs no classifier**. Neither `classify_opportunity` nor
-`classify_fine_categories` is imported by the read surface, so a response cannot
-disagree with the stored row, and a title or description edited after
-classification does not silently change the answer — reconciliation does.
+`classify_fine_categories` is called — the read surface imports no classifier
+function, only the `FINE_ELIGIBLE_QUALIFICATIONS` constant it validates against
+— so a response cannot disagree with the stored row, and a title or description
+edited after classification does not silently change the answer; reconciliation
+does. The stored `fine_classifier_version` is reported, never compared against
+the version running now: this endpoint publishes versioned persisted data.
 
 The join is `LEFT` and stays `LEFT`. A visible, active opportunity with no
 qualification row is still an opportunity: it keeps its place in `items` and in
@@ -1341,6 +1344,39 @@ classified and deliberately assigned no sub-domain, because absence of evidence
 that an opportunity is Data/AI is not evidence about its sub-domain; `OTHER` is
 the opposite claim — a proven Data/AI opportunity for which no supported
 sub-domain is evidenced. UNKNOWN stays UNKNOWN.
+
+### The coarse half of the row is read too, and never published
+
+Structure alone cannot tell those states apart, so the read also selects the
+row's coarse `qualification`. It is an *input* to validation and nothing else:
+this phase adds five public fields and no sixth, and the coarse value reaches no
+response field. The eligible coarse outcomes are the fine classifier's own
+`FINE_ELIGIBLE_QUALIFICATIONS`, imported rather than restated, so the read model
+cannot start refusing valid rows the day that contract moves.
+
+Migration `0025` states the fine half of a row against itself — nothing written,
+or the version and its three JSON columns written together — and no `CHECK` can
+state it against the coarse half of the same row. The schema therefore still
+admits rows Phase 8 forbids, and each is refused here:
+
+* an `OUT_OF_SCOPE` or `UNCERTAIN` row carrying a fine primary category,
+  `OTHER` most of all — that converts an unknown into an assertion;
+* a `CORE_TARGET` or `ADJACENT_TARGET` row classified into *no* primary
+  category — a qualified opportunity that was classified has a verdict, and
+  "nothing" is the answer for an ineligible row;
+* a row with no primary category that still carries secondary categories or
+  evidence — the evidence would have produced a primary;
+* `OTHER` beside a secondary category or evidence, which contradicts what
+  `OTHER` means;
+* `OTHER` as a secondary category or as the category of a piece of evidence:
+  the classifier assigns `OTHER` exactly when nothing was evidenced, so it is a
+  primary-only value and is never itself evidence.
+
+A row that was never fine-classified is legal under every coarse qualification,
+because that is the legacy pre-reconciliation state and the coarse outcome says
+nothing about it. Everything else above answers the same public `503`. Reasons
+are validated for shape only — the classifier's prose is not a contract this
+read model is entitled to pin down.
 
 `GET /api/source-health` takes no parameter and returns
 `{"items": [...], "returned": n}` with one entry per known source, ordered by

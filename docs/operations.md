@@ -201,7 +201,10 @@ fine-classified (`fine_classifier_version` is `null`) and for an opportunity wit
 no qualification row at all; those opportunities are still listed and still
 counted in `total`. A row that *was* classified always answers with arrays,
 possibly empty, and a `null` `fine_primary_category` there means the classifier
-assigned no sub-domain — which is not `OTHER`. See
+assigned no sub-domain — which is not `OTHER`. A persisted row whose coarse and
+fine halves contradict each other — an `UNCERTAIN` opportunity carrying a
+category, a `CORE_TARGET` one classified into nothing — answers the same public
+`503` as any other unreadable data rather than being published or repaired. See
 [`docs/database.md`](database.md#the-fine-classification-is-read-never-derived).
 
 Inspect source health, which takes no parameter:

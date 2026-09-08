@@ -114,8 +114,11 @@ class _ReadOnlyConnection:
                     "2026-01-02T00:00:00+00:00",
                     "visible",
                     37,
-                    # The five persisted fine columns migration 0025 adds, in
-                    # the order the read model selects them.
+                    # The persisted coarse qualification, read only to validate
+                    # the fine values against it, then the five fine columns
+                    # migration 0025 adds, in the order the read model selects
+                    # them.
+                    "CORE_TARGET",
                     "MLOPS",
                     '["MACHINE_LEARNING"]',
                     '[{"category":"MLOPS","field":"TITLE","kind":"ROLE_PHRASE",'
