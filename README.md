@@ -283,6 +283,14 @@ stale.
   `opportunity_constraints` and the types a Digital Twin explicitly said it is
   looking for. It classifies nothing and adds no schema: the verdict depends on
   a stated preference and is never stored.
+- `services/recommendation/`: the Phase 9A personalized recommendation engine —
+  the layer that answers *how well does this opportunity fit this profile*, on
+  top of the Phase 4 matching snapshot, the Phase 8 fine classification, the
+  Phase 7 geography and the Phase 3.6 eligibility. It keeps Matching's audited
+  50/30/20 weights and spends the domain weight exactly once, on the fine
+  reading when it can be bridged honestly and on the persisted coarse one
+  otherwise. It classifies nothing, recomputes no upstream, and persists
+  nothing: no table, no migration, no route.
 - `evaluation/`: the Phase 7C.1 coverage-evaluation foundation — the declared,
   versioned universe of Morocco PFE/stage sources we want to be measured
   against, and a gold benchmark of real opportunities observed on them. Nothing
