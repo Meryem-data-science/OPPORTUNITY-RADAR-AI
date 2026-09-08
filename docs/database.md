@@ -1292,6 +1292,56 @@ returns the count and summary fields for visible, active rows, including
 description. The service opens existing configured storage read-only for the
 request and does not collect data or alter schema.
 
+### The fine classification is read, never derived
+
+Each item also carries the five public fine Data/AI fields added in Phase 8C —
+`fine_primary_category`, `fine_secondary_categories`, `fine_category_evidence`,
+`fine_reasons` and `fine_classifier_version`. They are read from the
+`opportunity_qualifications` row that migration `0025` extended, through an
+additive `LEFT JOIN` on `opportunity_id`, and they are the values persistence
+wrote: **the API runs no classifier**. Neither `classify_opportunity` nor
+`classify_fine_categories` is imported by the read surface, so a response cannot
+disagree with the stored row, and a title or description edited after
+classification does not silently change the answer — reconciliation does.
+
+The join is `LEFT` and stays `LEFT`. A visible, active opportunity with no
+qualification row is still an opportunity: it keeps its place in `items` and in
+`total`, with the fine fields in the unclassified state below. `0004` makes
+`opportunity_qualifications.opportunity_id` the primary key, so the join adds
+columns and can never add or drop a row; filtering, ordering, `limit`, `total`,
+`original_url` and `description_length` are exactly what they were.
+
+`fine_category_evidence` preserves the persisted object shape and order —
+`{"category", "field", "kind", "signal"}` — as do `fine_secondary_categories`
+(classifier precedence order) and `fine_reasons`. The three JSON `TEXT` columns
+are parsed with `json.loads` and validated against the closed `FineCategory`,
+`EvidenceField` and `EvidenceKind` vocabularies before anything is exposed;
+nothing is `eval`'d. A malformed or incoherent stored payload is refused rather
+than repaired, dropped or substituted: the request answers the same public `503`
+as any other unreadable data, with no internal detail in the body. The persisted
+`*_json` column names are never public.
+
+### Three states, and none of them is folded into another
+
+|                                    | `fine_classifier_version` | `fine_primary_category` | the three collections |
+| ---------------------------------- | ------------------------- | ----------------------- | --------------------- |
+| Never fine-classified, or no qualification row | `null`        | `null`                  | `null`                |
+| Classified, no sub-domain asserted  | present                   | `null`                  | `[]`, `[]`, the persisted reason |
+| Classified `OTHER`                  | present                   | `"OTHER"`               | as persisted          |
+| Classified into a sub-domain        | present                   | the category            | as persisted          |
+
+A `null` `fine_classifier_version` means migration `0025` reached the row and
+fine classification never did — the legacy state — and all five fields are
+`null` together. It is not a classification, and the API does not invent one for
+it. A row that *was* classified always answers with lists, possibly empty, never
+`null`.
+
+`null` is not `OTHER`. A reconciled `OUT_OF_SCOPE` or `UNCERTAIN` opportunity was
+classified and deliberately assigned no sub-domain, because absence of evidence
+that an opportunity is Data/AI is not evidence about its sub-domain; `OTHER` is
+the opposite claim — a proven Data/AI opportunity for which no supported
+sub-domain is evidenced. UNKNOWN stays UNKNOWN.
+
 `GET /api/source-health` takes no parameter and returns
 `{"items": [...], "returned": n}` with one entry per known source, ordered by
 `source_id`. Unknown values are serialized as `null` and never as zero.
