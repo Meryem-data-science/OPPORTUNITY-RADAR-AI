@@ -44,8 +44,11 @@ from services.collector.matching import (
     SemanticSimilarityStatus,
 )
 from services.collector.matching.models import MatchingPreferences
+from services.collector.matching.skill_fit import SkillFitResult
+from services.collector.matching.skill_signals import SkillSignalKind, SkillSignalSource
 from services.collector.qualification.fine_taxonomy import FineCategory
-from services.eligibility import GlobalStatus
+from services.eligibility import GlobalStatus, ReasonCode, RuleStatus
+from services.eligibility.models import Dimension, RequirementKind, RuleResult
 from services.geography.models import LocationResolution, ProfileTarget
 
 #: The assembly of the rules in `engine.py`: the components, the disposition
@@ -77,6 +80,7 @@ __all__ = [
     "RecommendationAssessment",
     "RecommendationBatchResult",
     "RecommendationDisposition",
+    "RecommendationEligibilityEvidence",
     "RecommendationEligibilityInput",
     "RecommendationFineClassification",
     "RecommendationGeographyInput",
@@ -84,6 +88,7 @@ __all__ = [
     "RecommendationInputError",
     "RecommendationMatchingSnapshot",
     "RecommendationReasonCode",
+    "RecommendationSkillEvidence",
     "RequiredSkillComponent",
     "SemanticComponent",
     "WorkModeSignal",
@@ -211,6 +216,13 @@ class RecommendationReasonCode(StrEnum):
     GEOGRAPHY_UNKNOWN = "GEOGRAPHY_UNKNOWN"
     ELIGIBILITY_UNKNOWN = "ELIGIBILITY_UNKNOWN"
     ELIGIBILITY_SNAPSHOT_MISSING = "ELIGIBILITY_SNAPSHOT_MISSING"
+    #: The person declared free-text constraints. This engine reads them, shows
+    #: them, and does not pretend to have checked them: there is no parser for
+    #: "pas de travail le weekend" here and inventing one would be worse than
+    #: saying so.
+    USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED = (
+        "USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED"
+    )
     NO_NUMERIC_EVIDENCE = "NO_NUMERIC_EVIDENCE"
 
 
@@ -261,6 +273,7 @@ class RecommendationMatchingSnapshot:
     required_skill_score: float | None
     required_skill_matched_count: int
     required_skill_total_count: int
+    required_skill_upstream_fingerprint: str
     semantic_status: SemanticSimilarityStatus
     semantic_percentile: float | None
     domain_status: AlignmentStatus
@@ -310,11 +323,17 @@ class RecommendationEligibilityInput:
     `status is None` means no decision row exists. It is carried as an absence
     all the way to `EligibilitySignalStatus.MISSING`; it never becomes
     `INELIGIBLE` and never becomes `ELIGIBLE`.
+
+    `results` are the persisted rule results of that decision, read back through
+    Phase 3.6's own repository and never re-evaluated. They are present exactly
+    when a decision is, and the assembly has already proved that the decision
+    still describes the current inputs before any of this is built.
     """
 
     status: GlobalStatus | None
     input_fingerprint: str | None
     engine_version: str | None
+    results: tuple[RuleResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -327,14 +346,25 @@ class RecommendationInput:
     not part of the persisted matching assessment, and Phase 9 reuses that logic
     rather than writing a second parser of `remote` / `hybrid` / `on-site`. Its
     fingerprint must equal the snapshot's, which is what makes reusing it safe.
+
+    `skill_fit` is there for the same reason and under the same guarantee: the
+    per-skill detail that explains a required-skill ratio is not in the
+    persisted assessment, only the ratio is. It is recomputed from the same
+    persisted rows and its fingerprint must equal the one the snapshot carries,
+    so the detail provably describes the number. **The number itself always
+    comes from the snapshot**; the recomputed fit never replaces it.
     """
 
     matching: RecommendationMatchingSnapshot
     preferences: MatchingPreferences | None
     structured: RoleDomainPreferencesResult
+    skill_fit: SkillFitResult
     fine: RecommendationFineClassification
     geography: RecommendationGeographyInput
     eligibility: RecommendationEligibilityInput
+    #: The free-text constraints the person stated, verbatim and in their own
+    #: order. Read and shown, never parsed, scored or routed on.
+    declared_constraints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -351,6 +381,7 @@ class RequiredSkillComponent:
     base_weight: float
     matched_count: int
     total_count: int
+    upstream_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -418,6 +449,11 @@ class GeographySignal:
     segments: int
     resolved_segments: int
     matching_segments: int
+    #: The countries this posting's segments resolved to, sorted and unique.
+    #: Content, not identity: it is what an explanation would name, and its
+    #: order is alphabetical rather than the order the strings happened to be
+    #: collected in.
+    resolved_countries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -427,6 +463,66 @@ class EligibilitySignal:
     status: EligibilitySignalStatus
     upstream_fingerprint: str | None
     engine_version: str | None
+
+
+@dataclass(frozen=True)
+class RecommendationSkillEvidence:
+    """One skill the posting signalled, and whether the profile confirms it.
+
+    The vocabulary is upstream's: `kind` and `sources` are the Phase 4 enums, so
+    there is no second skill taxonomy anywhere in Phase 9.
+
+    `confirmed_in_profile = False` means **this skill is not confirmed by the
+    facts currently projected from the profile**. It does not mean the person
+    lacks it, and it never becomes a confirmed gap: a CV that never mentioned
+    Docker has not said its author cannot use Docker.
+    """
+
+    canonical_key: str
+    canonical_name: str
+    kind: SkillSignalKind
+    sources: tuple[SkillSignalSource, ...]
+    confirmed_in_profile: bool
+    profile_normalizer_versions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RecommendationEligibilityEvidence:
+    """One persisted Phase 3.6 rule result, projected into Phase 9's contract.
+
+    The same fields `eligibility_rule_results` stores, restated as a value this
+    phase owns so that a later internal addition to `RuleResult` does not
+    silently widen what a recommendation publishes. Nothing is re-evaluated: the
+    rows are read through Phase 3.6's own repository, and the assembly has
+    already proved the decision they belong to still describes current inputs.
+
+    `explanation` is Phase 3.6's own deterministic sentence, persisted with the
+    row. It is not generated here and there is no model anywhere near it.
+    """
+
+    dimension: Dimension
+    rule_code: str
+    status: RuleStatus
+    is_blocking: bool
+    requirement_kind: RequirementKind | None
+    reason_code: ReasonCode
+    explanation: str
+    requirement_ref: str | None
+    profile_ref: str | None
+
+    @classmethod
+    def of(cls, result: RuleResult) -> "RecommendationEligibilityEvidence":
+        return cls(
+            dimension=result.dimension,
+            rule_code=result.rule_code,
+            status=result.status,
+            is_blocking=result.is_blocking,
+            requirement_kind=result.requirement_kind,
+            reason_code=result.reason_code,
+            explanation=result.explanation,
+            requirement_ref=result.requirement_ref,
+            profile_ref=result.profile_ref,
+        )
 
 
 @dataclass(frozen=True)
@@ -452,6 +548,9 @@ class RecommendationAssessment:
     strengths: tuple[RecommendationReasonCode, ...]
     confirmed_gaps: tuple[RecommendationReasonCode, ...]
     unknowns: tuple[RecommendationReasonCode, ...]
+    skill_evidence: tuple[RecommendationSkillEvidence, ...]
+    eligibility_evidence: tuple[RecommendationEligibilityEvidence, ...]
+    declared_constraints: tuple[str, ...]
     matching_engine_version: str
     matching_rules_version: str
     semantic_percentile_version: str

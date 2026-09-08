@@ -23,6 +23,7 @@ from tests.unit.recommendation_fixtures import (
     geography,
     opportunity,
     recommendation_input,
+    rule_result,
 )
 
 
@@ -158,3 +159,55 @@ def test_reason_codes_are_sorted_in_the_payload_so_emission_order_cannot_leak():
     payload = canonical_recommendation_assessment_payload(assess())
     for bucket in ("strengths", "confirmed_gaps", "unknowns"):
         assert payload["result"][bucket] == sorted(payload["result"][bucket])
+
+
+# --------------------------------------------------------------------------
+# the explanation is part of the result, so it is part of the digest
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "kwargs"),
+    [
+        ("skill evidence", {"profile_skills": ("Python",)}),
+        ("declared constraints", {"declared_constraints": ("TEST ONLY contrainte",)}),
+        (
+            "eligibility reasons",
+            {
+                "eligibility_results": (
+                    rule_result(explanation="TEST ONLY another explanation."),
+                )
+            },
+        ),
+    ],
+)
+def test_changing_what_a_reader_would_be_shown_changes_the_fingerprint(label, kwargs):
+    assert digest(**kwargs) != digest(), label
+
+
+def test_the_upstream_fingerprints_actually_consumed_are_in_the_payload():
+    payload = canonical_recommendation_assessment_payload(assess())
+    assert len(payload["required_skill"]["upstream_fingerprint"]) == 64
+    assert payload["baseline"]["assessment_fingerprint"] == "a" * 64
+    assert payload["eligibility"]["upstream_fingerprint"] == "e" * 64
+    assert payload["versions"]["geographic_resolver"] == "geographic-resolver-v1"
+    assert payload["versions"]["eligibility_engine"] == "eligibility-rules-v1"
+
+
+def test_the_evidence_keeps_the_order_that_carries_meaning():
+    payload = canonical_recommendation_assessment_payload(
+        assess(profile_skills=("Python",))
+    )
+    skills = payload["required_skill"]["evidence"]
+    # Upstream's own deterministic order, which is what a reader is shown.
+    assert [item["canonical_key"] for item in skills] == ["aws", "python", "sql"]
+    assert [item["confirmed_in_profile"] for item in skills] == [False, True, False]
+    assert payload["declared_constraints"] == []
+    assert payload["geography"]["resolved_countries"] == ["MA"]
+
+
+def test_the_same_explanation_in_a_different_upstream_order_is_the_same_digest():
+    """A digest is over content; a normalizer version list is a set, not a list."""
+    first = assess(profile_skills=("Python", "SQL"))
+    second = assess(profile_skills=("SQL", "Python"))
+    assert first.assessment_fingerprint == second.assessment_fingerprint

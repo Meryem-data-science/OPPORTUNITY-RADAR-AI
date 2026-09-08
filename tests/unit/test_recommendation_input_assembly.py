@@ -15,6 +15,7 @@ from services.collector.matching import (
     MATCHING_RULES_VERSION,
     MATCHING_SELECTION_VERSION,
     SEMANTIC_PERCENTILE_VERSION,
+    MatchingPersistenceAuditError,
     MatchingReadError,
 )
 from services.recommendation import (
@@ -54,7 +55,21 @@ def run(*assessments, status="READY", selected=(1,), **overrides):
     return SimpleNamespace(status=status, current_run=current)
 
 
-def invoke(monkeypatch, *, connection=None, snapshot=None, selected=(1,)):
+def audit(run_id=9, ok=True, issues=(), profile_issues=(), current_run_id=9):
+    """A Phase 4 persistence audit report, reduced to what the preflight reads."""
+    audited = SimpleNamespace(run_id=run_id, ok=ok, issues=tuple(issues))
+    return SimpleNamespace(
+        current_run_id=current_run_id,
+        runs=(audited,),
+        issues=tuple(issues) + tuple(profile_issues),
+    )
+
+
+def issue(code, run_id=9):
+    return SimpleNamespace(code=code, run_id=run_id)
+
+
+def invoke(monkeypatch, *, connection=None, snapshot=None, selected=(1,), report=None):
     monkeypatch.setattr(
         "services.recommendation.input_assembly.read_current_matching",
         lambda *_: snapshot if snapshot is not None else run(),
@@ -62,6 +77,10 @@ def invoke(monkeypatch, *, connection=None, snapshot=None, selected=(1,)):
     monkeypatch.setattr(
         "services.recommendation.input_assembly.select_matching_opportunity_ids",
         lambda *_: selected,
+    )
+    monkeypatch.setattr(
+        "services.recommendation.input_assembly.audit_matching_profile_history",
+        lambda *_: audit() if report is None else report,
     )
     return assemble_recommendation_inputs(connection or Connection(), PROFILE_ID)
 
@@ -130,3 +149,69 @@ def test_a_cohort_that_drifted_from_the_current_selection_is_refused(monkeypatch
     result = invoke(monkeypatch, snapshot=snapshot, selected=(1, 2))
     assert codes(result) == [RecommendationReadinessIssueCode.STALE_MATCHING_COHORT]
     assert result.records == ()
+
+
+def test_a_current_run_failing_its_own_persistence_audit_stops_the_cohort(
+    monkeypatch,
+):
+    result = invoke(
+        monkeypatch,
+        report=audit(ok=False, issues=[issue("ASSESSMENT_FINGERPRINT_MISMATCH")]),
+    )
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]
+    assert "ASSESSMENT_FINGERPRINT_MISMATCH" in result.issues[0].message
+    assert result.records == ()
+
+
+def test_a_corrupt_historical_run_does_not_stop_a_healthy_current_one(monkeypatch):
+    """An old run that rotted is a real problem, and not this cohort's."""
+    healthy = audit()
+    healthy.runs = (
+        *healthy.runs,
+        SimpleNamespace(run_id=4, ok=False, issues=(issue("RUN_FINGERPRINT", 4),)),
+    )
+    healthy.issues = (issue("RUN_FINGERPRINT", 4),)
+    result = invoke(monkeypatch, report=healthy, snapshot=run(status="EMPTY"))
+    # The EMPTY state stops it for its own reason, never for run 4's corruption.
+    assert codes(result) == [RecommendationReadinessIssueCode.MATCHING_NOT_READY]
+
+
+def test_a_profile_state_pointing_at_another_run_stops_the_cohort(monkeypatch):
+    result = invoke(monkeypatch, report=audit(current_run_id=41))
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]
+
+
+def test_a_profile_level_audit_issue_stops_the_cohort(monkeypatch):
+    result = invoke(
+        monkeypatch,
+        report=audit(profile_issues=[issue("STATE_RUN_MISMATCH", None)]),
+    )
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]
+    assert "STATE_RUN_MISMATCH" in result.issues[0].message
+
+
+def test_an_unauditable_matching_persistence_stops_the_cohort(monkeypatch):
+    def explode(*_):
+        raise MatchingPersistenceAuditError("matching persistence query failed")
+
+    monkeypatch.setattr(
+        "services.recommendation.input_assembly.read_current_matching",
+        lambda *_: run(),
+    )
+    monkeypatch.setattr(
+        "services.recommendation.input_assembly.select_matching_opportunity_ids",
+        lambda *_: (1,),
+    )
+    monkeypatch.setattr(
+        "services.recommendation.input_assembly.audit_matching_profile_history", explode
+    )
+    result = assemble_recommendation_inputs(Connection(), PROFILE_ID)
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]

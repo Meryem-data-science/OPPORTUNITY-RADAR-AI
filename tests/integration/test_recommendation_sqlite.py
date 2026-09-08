@@ -39,6 +39,7 @@ from services.collector.qualification.fine_taxonomy import FineCategory
 from services.collector.qualification.persistence import persist_qualifications
 from services.digital_twin.preferences.models import (
     CareerObjectives,
+    ConventionStatus,
     MobilityPreference,
     MobilityScope,
     OpportunityPreferences,
@@ -56,7 +57,10 @@ from services.digital_twin.preferences.service import (
 from services.digital_twin.skills.repository import synchronize_profile_skills
 from services.digital_twin.repository import ensure_user_profile
 from services.geography.service import synchronize_location_resolutions
-from services.eligibility import ELIGIBILITY_ENGINE_VERSION
+from services.collector.matching.skill_signals import SkillSignalKind, SkillSignalSource
+from services.eligibility.models import Dimension, ReasonCode, RuleStatus
+from services.eligibility.repository import read_eligibility, read_rule_results
+from services.eligibility.service import synchronize_eligibility
 from services.recommendation import (
     ComponentStatus,
     DomainFitSource,
@@ -65,6 +69,7 @@ from services.recommendation import (
     RecommendationDisposition,
     RecommendationReadinessIssueCode,
     RecommendationReadinessStatus,
+    RecommendationReasonCode,
     assemble_recommendation_inputs,
     build_recommendation_batch,
 )
@@ -80,42 +85,50 @@ REQUIREMENTS = (
     "<li>SQL</li></ul><h3>Nice to have</h3><ul><li>Airflow</li></ul>"
 )
 
-#: title, description, location, and the eligibility verdict to record.
+#: Two sentences that make Phase 3.6 answer something other than ELIGIBLE, by
+#: giving its rules something real to read. Neither is a fixture verdict: the
+#: eligibility engine runs for itself below and decides.
+GERMAN_REQUIREMENT = (
+    "<h3>Required Qualifications</h3><ul><li>Fluent German required</li></ul>"
+)
+CONVENTION_REQUIREMENT = "Convention de stage obligatoire."
+
+#: name, title, description, location.
 CORPUS = (
     (
         "strong",
         "TEST ONLY Data Scientist Internship",
         "Python, SQL and machine learning models for the data science team.",
         "Casablanca",
-        "ELIGIBLE",
     ),
     (
+        # A language nobody stated a level for: Phase 3.6 answers UNKNOWN, which
+        # is a question and never a soft refusal.
         "unknown_eligibility",
         "TEST ONLY Generative AI Engineer Internship",
-        "Large language models, RAG pipelines and prompt engineering with Python.",
+        "Large language models, RAG pipelines and prompt engineering with Python. "
+        + GERMAN_REQUIREMENT,
         "Rabat",
-        "UNKNOWN",
     ),
     (
         "out_of_target",
         "TEST ONLY Data Scientist Internship in Europe",
         "Python, SQL and machine learning models for the data science team.",
         "Paris, France",
-        "ELIGIBLE",
     ),
     (
+        # The profile below states it cannot obtain a convention, and this
+        # posting demands one: a real VIOLATED hard rule, so a real INELIGIBLE.
         "blocked",
         "TEST ONLY Business Intelligence Analyst Internship",
-        "Power BI dashboards, KPI reporting and SQL.",
+        "Power BI dashboards, KPI reporting and SQL. " + CONVENTION_REQUIREMENT,
         "Casablanca",
-        "INELIGIBLE",
     ),
     (
         "unbridged_fine",
         "TEST ONLY NLP Engineer Internship",
         "Natural language processing, named entity recognition and text classification.",
         "Casablanca",
-        "ELIGIBLE",
     ),
 )
 
@@ -158,35 +171,41 @@ def _insert_opportunity(connection, index, title, description, location):
     )
 
 
-#: Counters `0014` requires to agree with each verdict: an ELIGIBLE decision
-#: violated nothing and left no blocking question, an UNKNOWN one left exactly
-#: the question it is named after, and an INELIGIBLE one contradicted a rule.
-_ELIGIBILITY_COUNTS = {
-    "ELIGIBLE": (1, 0, 0, 0),
-    "UNKNOWN": (0, 0, 1, 1),
-    "INELIGIBLE": (0, 1, 0, 0),
-}
+def _seed_profile_skills(connection, profile_id, *skills):
+    """Accept a SKILL fact per name, then project it the Digital Twin's own way.
+
+    The facts are written directly because this file is not testing the CV
+    review loop; everything downstream of them — normalization, the projection,
+    the evidence — is the real repository's work.
+    """
+    for name in skills:
+        connection.execute(
+            """INSERT INTO profile_facts (profile_id, fact_type, value, status,
+                                          decided_at)
+               VALUES (?, 'SKILL', ?, 'ACCEPTED', '2099-01-01')""",
+            (profile_id, name),
+        )
+    connection.commit()
+    synchronize_profile_skills(connection, profile_id)
 
 
-def _record_eligibility(connection, user_id, opportunity_id, status):
-    satisfied, violated, unknown, blocking = _ELIGIBILITY_COUNTS[status]
-    connection.execute(
-        """INSERT INTO opportunity_eligibilities
-           (user_id, opportunity_id, status, engine_version, input_fingerprint,
-            satisfied_count, violated_count, unknown_count, not_applicable_count,
-            not_evaluated_count, blocking_unknown_count, evaluated_at)
-           VALUES (?,?,?,?,?,?,?,?,0,0,?,'2099-01-01')""",
-        (
-            user_id,
-            opportunity_id,
-            status,
-            ELIGIBILITY_ENGINE_VERSION,
-            f"{opportunity_id:x}".zfill(64),
-            satisfied,
-            violated,
-            unknown,
-            blocking,
-        ),
+def _insert_opportunity(connection, index, title, description, location):
+    return int(
+        connection.execute(
+            """INSERT INTO opportunities (
+                   canonical_title, organization, location, description,
+                   remote_type, discovered_at, first_seen_at, last_seen_at,
+                   source_url, status, is_active
+               ) VALUES (?, 'TEST ONLY Org', ?, ?, 'remote',
+                         '2099-01-01', '2099-01-01', '2099-01-01', ?, 'new', 1)
+               RETURNING id""",
+            (
+                title,
+                location,
+                f"{description} {REQUIREMENTS}",
+                f"https://example.invalid/{index}",
+            ),
+        ).fetchone()[0]
     )
 
 
@@ -202,7 +221,7 @@ def build_corpus(tmp_path, *, eligibility=True, mobility=("Maroc",)):
     connection.commit()
     identity = ensure_user_profile(connection, TEST_ONLY_EMAIL)
     ids = {}
-    for index, (name, title, description, location, _) in enumerate(CORPUS):
+    for index, (name, title, description, location) in enumerate(CORPUS):
         ids[name] = _insert_opportunity(
             connection, index, title, description, location
         )
@@ -220,6 +239,9 @@ def build_corpus(tmp_path, *, eligibility=True, mobility=("Maroc",)):
             opportunity_types=(OpportunityType.INTERNSHIP,),
             work_modes=(WorkMode.REMOTE,),
             preferred_domains=PREFERRED_DOMAINS,
+            # Stated, not inferred, and it is what makes the convention-demanding
+            # posting a real blocker rather than a fixture decision.
+            convention_status=ConventionStatus.NOT_AVAILABLE,
         ),
     )
     set_profile_career_objectives(
@@ -242,9 +264,10 @@ def build_corpus(tmp_path, *, eligibility=True, mobility=("Maroc",)):
     synchronize_location_resolutions(connection)
 
     if eligibility:
-        for name, _, _, _, status in CORPUS:
-            _record_eligibility(connection, identity.user_id, ids[name], status)
-        connection.commit()
+        # Phase 3.6 decides for itself, with its own engine and its own digest.
+        # Nothing here writes a verdict or a fingerprint: a hand-written
+        # decision would be exactly the stale snapshot the assembly now refuses.
+        synchronize_eligibility(connection, identity.user_id, identity.profile_id)
 
     # Matching is synchronized last, so its snapshot describes the preferences
     # and the qualifications that are in the database right now.
@@ -426,6 +449,9 @@ def test_a_stale_matching_snapshot_stops_the_cohort_instead_of_being_repaired(
             opportunity_types=(OpportunityType.INTERNSHIP,),
             work_modes=(WorkMode.REMOTE,),
             preferred_domains=tuple(reversed(PREFERRED_DOMAINS)),
+            # Everything Eligibility reads is left exactly as it was, so the
+            # only thing that went stale is the Matching alignment.
+            convention_status=ConventionStatus.NOT_AVAILABLE,
         ),
     )
     synchronize_profile_preferences(connection, identity.profile_id)
@@ -474,3 +500,384 @@ def test_the_recommendation_never_contradicts_its_own_baseline_provenance(corpus
         assert assessment.baseline_match_quality == snapshot.match_quality
         assert assessment.baseline_evidence_coverage == snapshot.evidence_coverage
         assert assessment.baseline_matching_lane is snapshot.lane
+
+
+# --------------------------------------------------------------------------
+# Eligibility freshness: a stored verdict is only usable while it still
+# describes the inputs it was given about
+# --------------------------------------------------------------------------
+
+
+def _restate_preferences(connection, profile_id, **overrides):
+    """Restate the whole preference row, changing only what is named."""
+    values = dict(
+        opportunity_types=(OpportunityType.INTERNSHIP,),
+        work_modes=(WorkMode.REMOTE,),
+        preferred_domains=PREFERRED_DOMAINS,
+        convention_status=ConventionStatus.NOT_AVAILABLE,
+    )
+    values.update(overrides)
+    set_profile_preferences(connection, profile_id, OpportunityPreferences(**values))
+    synchronize_profile_preferences(connection, profile_id)
+
+
+def test_a_profile_input_change_without_an_eligibility_resync_stops_the_cohort(
+    tmp_path,
+):
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+    # The person says they can obtain a convention after all. Phase 3.6 read
+    # that field to decide, so every stored verdict now answers a question that
+    # was asked about a different profile — including the INELIGIBLE one.
+    _restate_preferences(
+        connection,
+        identity.profile_id,
+        convention_status=ConventionStatus.AVAILABLE,
+    )
+    stale = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert stale.status is RecommendationReadinessStatus.INCOMPLETE
+    assert stale.records == ()
+    assert {issue.code for issue in stale.issues} == {
+        RecommendationReadinessIssueCode.ELIGIBILITY_SNAPSHOT_STALE
+    }
+
+    # Resynchronizing Eligibility — on this temporary database, by the phase
+    # that owns the decision — is what makes it readable again. The assembly
+    # itself repaired nothing.
+    synchronize_eligibility(connection, identity.user_id, identity.profile_id)
+    ready, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert ready.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)
+    # The blocker was a blocker of the old profile, and is gone with it.
+    assert all(
+        item.disposition is not RecommendationDisposition.KNOWN_BLOCKER
+        for item in batch.assessments
+    )
+
+
+def test_an_opportunity_input_change_without_an_eligibility_resync_stops_it_too(
+    tmp_path,
+):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    # A language requirement is read by Phase 3.6 and by nothing in Matching, so
+    # dropping it isolates the eligibility half of the freshness contract.
+    connection.execute(
+        "DELETE FROM opportunity_language_requirements WHERE opportunity_id = ?",
+        (ids["unknown_eligibility"],),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.ELIGIBILITY_SNAPSHOT_STALE
+    ]
+    assert assembly.issues[0].opportunity_id == ids["unknown_eligibility"]
+
+
+def test_a_decision_whose_inputs_can_no_longer_be_assembled_stops_the_cohort(
+    tmp_path,
+):
+    """The Phase 3.5A reading a stored decision was taken from is gone.
+
+    Foreign keys make this state unreachable by an ordinary delete — dropping
+    `opportunity_constraints` cascades into everything Matching read as well,
+    and the skill-fit check would notice first. It is reached here with
+    enforcement off because the guard exists for the database that arrives
+    without it: a restored backup, a hand-repaired row. The old verdict is not
+    evidence about a question nobody can ask any more.
+    """
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute(
+        "DELETE FROM opportunity_constraints WHERE opportunity_id = ?",
+        (ids["strong"],),
+    )
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = ON")
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.ELIGIBILITY_INPUT_INCOMPLETE
+    ]
+    assert assembly.issues[0].opportunity_id == ids["strong"]
+
+
+def test_the_persisted_eligibility_reasons_are_exposed_without_re_evaluation(corpus):
+    connection, _, identity, ids, _ = corpus
+    _, batch = assemble_and_rank(connection, identity.profile_id)
+    results = by_id(batch)
+
+    blocked = results[ids["blocked"]]
+    convention = [
+        item
+        for item in blocked.eligibility_evidence
+        if item.dimension is Dimension.CONVENTION
+    ]
+    assert [item.status for item in convention] == [RuleStatus.VIOLATED]
+    assert convention[0].is_blocking is True
+    assert convention[0].reason_code is ReasonCode.CONVENTION_VIOLATED
+    assert convention[0].explanation.strip()
+
+    uncertain = results[ids["unknown_eligibility"]]
+    language = [
+        item
+        for item in uncertain.eligibility_evidence
+        if item.dimension is Dimension.LANGUAGE
+    ]
+    assert [item.status for item in language] == [RuleStatus.UNKNOWN]
+    assert language[0].reason_code is ReasonCode.LANGUAGE_PROFILE_UNKNOWN
+    # An UNKNOWN rule is a question about the profile, not a violation.
+    assert language[0].status is not RuleStatus.VIOLATED
+
+    # Every exposed row is one Phase 3.6 stored; none was produced here.
+    persisted = read_rule_results(
+        connection,
+        read_eligibility(connection, identity.user_id, ids["blocked"]).id,
+    )
+    assert [item.rule_code for item in blocked.eligibility_evidence] == [
+        item.rule_code for item in persisted
+    ]
+
+
+def test_a_missing_decision_carries_no_reasons_and_no_blocker(tmp_path):
+    connection, _, identity, _, _ = build_corpus(tmp_path, eligibility=False)
+    _, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    for assessment in batch.assessments:
+        assert assessment.eligibility.status is EligibilitySignalStatus.MISSING
+        assert assessment.eligibility_evidence == ()
+        assert assessment.disposition is not RecommendationDisposition.KNOWN_BLOCKER
+
+
+# --------------------------------------------------------------------------
+# Geography freshness: a verdict is never read off a projection of another
+# string, or of another resolver
+# --------------------------------------------------------------------------
+
+
+def test_a_location_edited_without_a_geography_resync_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    # The posting now says Paris. The projection still says Casablanca, and
+    # answering MATCH off it would be answering about a string nobody wrote.
+    connection.execute(
+        "UPDATE opportunity_constraint_locations SET location_text = ? "
+        "WHERE opportunity_id = ?",
+        ("Paris, France", ids["strong"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.GEOGRAPHY_PROJECTION_STALE
+    ]
+    assert assembly.issues[0].opportunity_id == ids["strong"]
+
+
+def test_a_projection_stored_under_another_resolver_version_stops_the_cohort(
+    tmp_path,
+):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE opportunity_location_resolutions SET resolver_version = ? "
+        "WHERE opportunity_id = ?",
+        ("geographic-resolver-v0", ids["out_of_target"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.GEOGRAPHY_PROJECTION_STALE
+    ]
+    # Above all: the posting in France did not reach a result as OUT_OF_TARGET.
+    assert assembly.records == ()
+
+
+def test_an_orphaned_projection_row_stops_the_cohort(tmp_path):
+    """The location row is gone; its segments are not.
+
+    `0024` cascades, so this too is only reachable with enforcement off — and
+    that is exactly the database the check is for. A verdict read off these
+    segments would be read off a location the posting no longer lists.
+    """
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute(
+        "DELETE FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+        (ids["out_of_target"],),
+    )
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys = ON")
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.GEOGRAPHY_PROJECTION_STALE
+    ]
+
+
+def test_a_posting_with_no_location_at_all_is_ready_and_geographically_unknown(
+    tmp_path,
+):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    # Neither a source nor a projection: nothing to be stale about, and the
+    # evaluator's honest answer is UNKNOWN.
+    connection.execute(
+        "DELETE FROM opportunity_location_resolutions WHERE opportunity_id = ?",
+        (ids["out_of_target"],),
+    )
+    connection.execute(
+        "DELETE FROM opportunity_constraint_locations WHERE opportunity_id = ?",
+        (ids["out_of_target"],),
+    )
+    connection.commit()
+    assembly, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.READY
+    silent = by_id(batch)[ids["out_of_target"]]
+    assert silent.geography.state is GeographyState.UNKNOWN
+    assert silent.geography.resolved_countries == ()
+    assert silent.disposition is RecommendationDisposition.UNCERTAIN
+
+
+def test_a_current_projection_carries_its_countries_into_the_explanation(corpus):
+    connection, _, identity, ids, _ = corpus
+    _, batch = assemble_and_rank(connection, identity.profile_id)
+    results = by_id(batch)
+    assert results[ids["strong"]].geography.resolved_countries == ("MA",)
+    assert results[ids["out_of_target"]].geography.resolved_countries == ("FR",)
+
+
+# --------------------------------------------------------------------------
+# Matching persistence integrity
+# --------------------------------------------------------------------------
+
+
+def test_a_corrupted_current_matching_assessment_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, matching = build_corpus(tmp_path)
+    # The stored column and the stored payload now disagree. Phase 4's own
+    # audit is what notices; Phase 9 does not re-derive its rules.
+    connection.execute(
+        "UPDATE matching_assessments SET match_quality = ? "
+        "WHERE run_id = ? AND opportunity_id = ?",
+        (0.123456, matching.run_id, ids["strong"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]
+    assert str(matching.run_id) in assembly.issues[0].message
+
+
+def test_a_tampered_current_assessment_fingerprint_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, matching = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE matching_assessments SET assessment_fingerprint = ? "
+        "WHERE run_id = ? AND opportunity_id = ?",
+        ("0" * 64, matching.run_id, ids["blocked"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
+    ]
+
+
+# --------------------------------------------------------------------------
+# Skill provenance
+# --------------------------------------------------------------------------
+
+
+def test_the_assessment_names_each_skill_and_whether_the_profile_confirms_it(
+    corpus,
+):
+    connection, _, identity, ids, _ = corpus
+    _, batch = assemble_and_rank(connection, identity.profile_id)
+    strong = by_id(batch)[ids["strong"]]
+    by_key = {item.canonical_key: item for item in strong.skill_evidence}
+
+    assert by_key["python"].canonical_name == "Python"
+    assert by_key["python"].kind is SkillSignalKind.REQUIRED
+    assert by_key["python"].confirmed_in_profile is True
+    assert by_key["python"].profile_normalizer_versions == ("skill-normalizer-v1",)
+    assert SkillSignalSource.REQUIREMENTS in by_key["python"].sources
+
+    assert by_key["sql"].confirmed_in_profile is True
+
+    # Signalled by the posting, not confirmed by the profile's facts. That is a
+    # question about the profile, and it is never a confirmed gap.
+    airflow = by_key["apache airflow"]
+    assert airflow.kind is SkillSignalKind.PREFERRED
+    assert airflow.confirmed_in_profile is False
+    assert airflow.profile_normalizer_versions == ()
+    assert strong.confirmed_gaps == ()
+
+    # And the number is still the persisted one, not this recomputation.
+    assert strong.required_skill.matched_count == 2
+    assert strong.required_skill.total_count == 2
+    assert len(strong.required_skill.upstream_fingerprint) == 64
+
+
+def test_a_profile_skill_change_without_a_matching_resync_stops_the_cohort(tmp_path):
+    # No stored eligibility, so nothing else can go stale at the same time and
+    # mask what this test is about.
+    connection, _, identity, _, _ = build_corpus(tmp_path, eligibility=False)
+    # Airflow is signalled by every posting and was not confirmed when Matching
+    # ran; a review has accepted it since. The persisted required-skill
+    # component no longer describes the profile it was computed against.
+    _seed_profile_skills(connection, identity.profile_id, "Apache Airflow")
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert {issue.code for issue in assembly.issues} == {
+        RecommendationReadinessIssueCode.STALE_MATCHING_SKILL_FIT
+    }
+
+
+# --------------------------------------------------------------------------
+# Declared user constraints
+# --------------------------------------------------------------------------
+
+
+def test_declared_constraints_are_shown_read_and_never_interpreted(tmp_path):
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+    _, before = assemble_and_rank(connection, identity.profile_id)
+    baseline = by_id(before)
+
+    _restate_preferences(
+        connection,
+        identity.profile_id,
+        constraints=("TEST ONLY contrainte declaree",),
+    )
+    # Eligibility does not read `constraints`, and neither does Matching, so
+    # nothing upstream went stale by stating one.
+    _, after = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+
+    for assessment in after.assessments:
+        assert assessment.declared_constraints == ("TEST ONLY contrainte declaree",)
+        assert (
+            RecommendationReasonCode.USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED
+            in assessment.unknowns
+        )
+        reference = baseline[assessment.opportunity_id]
+        # Read and shown: not scored, not routed, and not guessed at.
+        assert assessment.recommendation_score == reference.recommendation_score
+        assert (
+            assessment.recommendation_evidence_coverage
+            == reference.recommendation_evidence_coverage
+        )
+        assert assessment.disposition is reference.disposition
+        # But the explanation changed, so the digest has to change with it.
+        assert assessment.assessment_fingerprint != reference.assessment_fingerprint
+    assert after.batch_fingerprint != before.batch_fingerprint

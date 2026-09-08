@@ -11,10 +11,12 @@ from services.collector.matching import (
     AlignmentStatus,
     SemanticSimilarityStatus,
 )
+from services.collector.matching.skill_signals import SkillSignalKind, SkillSignalSource
 from services.collector.qualification.fine_taxonomy import FineCategory
 from services.collector.qualification.taxonomy import Domain, OpportunityType
 from services.digital_twin.preferences.models import MobilityScope
 from services.eligibility import GlobalStatus
+from services.eligibility.models import Dimension, ReasonCode, RuleStatus
 from services.recommendation import (
     DISPOSITION_PRECEDENCE,
     DISPOSITION_RANK,
@@ -37,6 +39,7 @@ from tests.unit.recommendation_fixtures import (
     opportunity,
     preferences,
     recommendation_input,
+    rule_result,
 )
 
 
@@ -516,3 +519,132 @@ def test_legacy_fine_rows_still_assess_through_the_coarse_component():
     result = assess(fine_classification=LEGACY_FINE)
     assert result.domain.source is DomainFitSource.COARSE
     assert result.recommendation_score == 0.81
+
+
+# --------------------------------------------------------------------------
+# machine-readable explanation: skills, eligibility reasons, and constraints
+# --------------------------------------------------------------------------
+
+
+def test_skill_evidence_names_each_skill_without_a_second_taxonomy():
+    result = assess(profile_skills=("Python", "SQL"))
+    by_key = {item.canonical_key: item for item in result.skill_evidence}
+    assert set(by_key) == {"python", "sql", "aws"}
+    assert by_key["python"].canonical_name == "Python"
+    assert by_key["python"].kind is SkillSignalKind.REQUIRED
+    assert by_key["python"].sources == (SkillSignalSource.REQUIREMENTS,)
+    assert by_key["python"].confirmed_in_profile is True
+    assert by_key["python"].profile_normalizer_versions == ("skill-normalizer-v1",)
+    assert by_key["aws"].confirmed_in_profile is False
+    assert by_key["aws"].profile_normalizer_versions == ()
+
+
+def test_an_unconfirmed_skill_is_an_absence_of_evidence_and_never_a_gap():
+    result = assess(profile_skills=("Python",))
+    unconfirmed = [
+        item for item in result.skill_evidence if not item.confirmed_in_profile
+    ]
+    assert {item.canonical_key for item in unconfirmed} == {"sql", "aws"}
+    assert result.confirmed_gaps == ()
+    assert (
+        RecommendationReasonCode.REQUIRED_SKILLS_NOT_ALL_CONFIRMED in result.unknowns
+    )
+
+
+def test_the_score_still_comes_from_the_snapshot_and_not_from_the_detail():
+    """The evidence explains the persisted ratio; it never replaces it."""
+    few = assess(profile_skills=(), required=0.8, required_matched=4, required_total=5)
+    many = assess(
+        profile_skills=("Python", "SQL", "AWS"),
+        required=0.8,
+        required_matched=4,
+        required_total=5,
+    )
+    assert all(
+        not item.confirmed_in_profile for item in few.skill_evidence
+    ) and all(item.confirmed_in_profile for item in many.skill_evidence)
+    assert few.required_skill.score == many.required_skill.score == 0.8
+    assert few.required_skill.matched_count == many.required_skill.matched_count == 4
+    assert few.recommendation_score == many.recommendation_score
+
+
+def test_a_skill_fit_that_no_longer_describes_the_snapshot_is_refused():
+    inputs = recommendation_input()
+    stale = replace(
+        inputs,
+        matching=replace(
+            inputs.matching, required_skill_upstream_fingerprint="d" * 64
+        ),
+    )
+    with pytest.raises(RecommendationInputError, match="recomputed skill fit"):
+        build_recommendation_assessment(stale)
+
+
+def test_eligibility_reasons_are_carried_verbatim_and_never_re_evaluated():
+    violated = rule_result(
+        dimension=Dimension.CONVENTION,
+        status=RuleStatus.VIOLATED,
+        reason_code=ReasonCode.CONVENTION_VIOLATED,
+        rule_code="convention.required",
+        is_blocking=True,
+        requirement_ref="CONVENTION#required",
+        profile_ref="profile_preferences#convention_status",
+    )
+    result = assess(
+        eligible=GlobalStatus.INELIGIBLE, eligibility_results=(violated,)
+    )
+    assert len(result.eligibility_evidence) == 1
+    evidence = result.eligibility_evidence[0]
+    assert evidence.dimension is Dimension.CONVENTION
+    assert evidence.status is RuleStatus.VIOLATED
+    assert evidence.is_blocking is True
+    assert evidence.reason_code is ReasonCode.CONVENTION_VIOLATED
+    assert evidence.explanation == violated.explanation
+    assert evidence.requirement_ref == "CONVENTION#required"
+    assert evidence.profile_ref == "profile_preferences#convention_status"
+    assert result.disposition is RecommendationDisposition.KNOWN_BLOCKER
+
+
+def test_reasons_without_a_stored_decision_are_refused():
+    inputs = recommendation_input(eligible=None)
+    broken = replace(
+        inputs, eligibility=replace(inputs.eligibility, results=(rule_result(),))
+    )
+    with pytest.raises(RecommendationInputError, match="without a stored decision"):
+        build_recommendation_assessment(broken)
+
+
+def test_declared_constraints_are_shown_and_never_acted_on():
+    plain = assess()
+    constrained = assess(declared_constraints=("TEST ONLY pas le weekend",))
+    assert constrained.declared_constraints == ("TEST ONLY pas le weekend",)
+    assert (
+        RecommendationReasonCode.USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED
+        in constrained.unknowns
+    )
+    assert constrained.recommendation_score == plain.recommendation_score
+    assert (
+        constrained.recommendation_evidence_coverage
+        == plain.recommendation_evidence_coverage
+    )
+    assert constrained.disposition is plain.disposition
+    assert constrained.confirmed_gaps == plain.confirmed_gaps
+
+
+def test_no_declared_constraint_says_nothing_at_all():
+    result = assess()
+    assert result.declared_constraints == ()
+    assert (
+        RecommendationReasonCode.USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED
+        not in result.unknowns
+    )
+
+
+def test_the_resolved_countries_are_sorted_content_not_collection_order():
+    result = assess(geo=geography(locations=("Paris, France", "Casablanca")))
+    assert result.geography.resolved_countries == ("FR", "MA")
+    reversed_order = assess(geo=geography(locations=("Casablanca", "Paris, France")))
+    assert reversed_order.geography.resolved_countries == ("FR", "MA")
+    assert (
+        reversed_order.assessment_fingerprint == result.assessment_fingerprint
+    )

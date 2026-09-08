@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from services.collector.matching import (
     MATCHING_ENGINE_VERSION,
+    build_opportunity_skill_signals,
+    build_skill_fit,
+    skill_fit_fingerprint,
     MATCHING_RULES_VERSION,
     SEMANTIC_PERCENTILE_VERSION,
     AlignmentStatus,
@@ -24,7 +27,10 @@ from services.collector.matching.models import (
     MatchingOpportunityInput,
     MatchingPreferences,
     MatchingProfileInput,
+    MatchingProfileSkill,
     MatchingQualification,
+    MatchingRequiredSkill,
+    MatchingRequirements,
 )
 from services.collector.matching.role_domain_preferences_fingerprint import (
     role_domain_preferences_fingerprint,
@@ -33,6 +39,13 @@ from services.collector.qualification.fine_taxonomy import FineCategory
 from services.collector.qualification.taxonomy import Domain, OpportunityType, Qualification
 from services.digital_twin.preferences.models import MobilityScope
 from services.eligibility import ELIGIBILITY_ENGINE_VERSION, GlobalStatus
+from services.eligibility.models import (
+    Dimension,
+    ReasonCode,
+    RequirementKind,
+    RuleResult,
+    RuleStatus,
+)
 from services.geography.models import RESOLVER_VERSION, LocationResolution
 from services.geography.profile_target import resolve_declared_target
 from services.geography.resolver import resolve_location_text
@@ -67,8 +80,26 @@ def preferences(
     )
 
 
-def profile(prefs=None) -> MatchingProfileInput:
-    return MatchingProfileInput(PROFILE_ID, preferences=prefs)
+def profile_skill(name: str) -> MatchingProfileSkill:
+    return MatchingProfileSkill(
+        canonical_key=name.strip().casefold(),
+        canonical_name=name,
+        normalizer_versions=("skill-normalizer-v1",),
+    )
+
+
+def profile(prefs=None, skills=()) -> MatchingProfileInput:
+    return MatchingProfileInput(
+        PROFILE_ID,
+        skills=tuple(profile_skill(name) for name in skills),
+        preferences=prefs,
+    )
+
+
+#: Three catalogue skills the posting demands, so the per-skill evidence has
+#: something concrete to say. `REQUIRED` is the upstream vocabulary, not a
+#: second one.
+REQUIRED_SKILLS = (("python", "Python"), ("sql", "SQL"), ("aws", "AWS"))
 
 
 def opportunity(
@@ -77,6 +108,7 @@ def opportunity(
     opportunity_type=OpportunityType.INTERNSHIP,
     remote_type="remote",
     qualification=Qualification.CORE_TARGET,
+    required_skills=REQUIRED_SKILLS,
 ) -> MatchingOpportunityInput:
     return MatchingOpportunityInput(
         opportunity_id=opportunity_id,
@@ -89,6 +121,13 @@ def opportunity(
             opportunity_type=opportunity_type.value,
             classifier_version=CLASSIFIER_VERSION,
         ),
+        requirements=MatchingRequirements(
+            extractor_version="requirements-extractor-v1",
+            skills=tuple(
+                MatchingRequiredSkill(key, name, "REQUIRED")
+                for key, name in required_skills
+            ),
+        ),
     )
 
 
@@ -96,6 +135,15 @@ def structured(prefs=None, opp=None) -> RoleDomainPreferencesResult:
     """The real Phase 4 alignment, which is what the snapshot below describes."""
     return build_role_domain_preference_signals(
         MatchingInput(profile(prefs), opp or opportunity())
+    )
+
+
+def skill_fit(prefs=None, opp=None, profile_skills=()):
+    """The real Phase 4 skill fit, so its fingerprint is the real one too."""
+    opp = opp or opportunity()
+    return build_skill_fit(
+        MatchingInput(profile(prefs, profile_skills), opp),
+        build_opportunity_skill_signals(opp),
     )
 
 
@@ -113,6 +161,7 @@ def coarse_domain_score(alignment, prefs) -> float | None:
 def snapshot(
     signals,
     prefs,
+    fit,
     *,
     opportunity_id=OPPORTUNITY_ID,
     required=0.8,
@@ -138,6 +187,7 @@ def snapshot(
         required_skill_score=required,
         required_skill_matched_count=required_matched,
         required_skill_total_count=required_total,
+        required_skill_upstream_fingerprint=skill_fit_fingerprint(fit),
         semantic_status=(
             SemanticSimilarityStatus.AVAILABLE
             if semantic is not None
@@ -195,11 +245,43 @@ def geography(
     )
 
 
-def eligibility(status=GlobalStatus.ELIGIBLE) -> RecommendationEligibilityInput:
+#: One persisted Phase 3.6 reason, built through the real `RuleResult` so its
+#: own invariants (only a REQUIRED blocking rule may be VIOLATED, and so on)
+#: are the ones the fixture has to satisfy.
+def rule_result(
+    dimension=Dimension.LANGUAGE,
+    status=RuleStatus.SATISFIED,
+    reason_code=ReasonCode.LANGUAGE_REQUIRED_SATISFIED,
+    rule_code="language.required",
+    is_blocking=False,
+    requirement_kind=RequirementKind.REQUIRED,
+    explanation="TEST ONLY deterministic explanation.",
+    requirement_ref="LANGUAGE#english",
+    profile_ref="profile_languages#english",
+) -> RuleResult:
+    return RuleResult(
+        dimension=dimension,
+        rule_code=rule_code,
+        status=status,
+        reason_code=reason_code,
+        explanation=explanation,
+        is_blocking=is_blocking,
+        requirement_kind=requirement_kind,
+        requirement_ref=requirement_ref,
+        profile_ref=profile_ref,
+    )
+
+
+def eligibility(
+    status=GlobalStatus.ELIGIBLE, results=None
+) -> RecommendationEligibilityInput:
     if status is None:
-        return RecommendationEligibilityInput(None, None, None)
+        return RecommendationEligibilityInput(None, None, None, ())
     return RecommendationEligibilityInput(
-        status, "e" * 64, ELIGIBILITY_ENGINE_VERSION
+        status,
+        "e" * 64,
+        ELIGIBILITY_ENGINE_VERSION,
+        (rule_result(),) if results is None else tuple(results),
     )
 
 
@@ -210,21 +292,27 @@ def recommendation_input(
     fine_classification=None,
     geo=None,
     eligible=GlobalStatus.ELIGIBLE,
+    eligibility_results=None,
+    profile_skills=(),
+    declared_constraints=(),
     **snapshot_overrides,
 ) -> RecommendationInput:
     """One fully coherent input; every keyword reaches exactly one upstream."""
     prefs = preferences() if prefs is DEFAULT else prefs
     opp = opportunity() if opp is None else opp
     signals = structured(prefs, opp)
+    fit = skill_fit(prefs, opp, profile_skills)
     return RecommendationInput(
         matching=snapshot(
-            signals, prefs, opportunity_id=opp.opportunity_id, **snapshot_overrides
+            signals, prefs, fit, opportunity_id=opp.opportunity_id, **snapshot_overrides
         ),
         preferences=prefs,
         structured=signals,
+        skill_fit=fit,
         fine=fine() if fine_classification is None else fine_classification,
         geography=(
             geography(opportunity_id=opp.opportunity_id) if geo is None else geo
         ),
-        eligibility=eligibility(eligible),
+        eligibility=eligibility(eligible, eligibility_results),
+        declared_constraints=tuple(declared_constraints),
     )

@@ -56,9 +56,14 @@ from services.collector.matching import (
 from services.collector.matching.role_domain_preferences_fingerprint import (
     role_domain_preferences_fingerprint,
 )
+from services.collector.matching.skill_fit_fingerprint import skill_fit_fingerprint
 from services.eligibility import GlobalStatus
 from services.geography.evaluator import evaluate_target
-from services.geography.models import RESOLVER_VERSION, TargetVerdict
+from services.geography.models import (
+    RESOLVER_VERSION,
+    ResolutionStatus,
+    TargetVerdict,
+)
 from services.geography.profile_target import MOBILITY_OPEN_RULE
 
 from .fine_domain import (
@@ -85,10 +90,12 @@ from .models import (
     RecommendationAssessment,
     RecommendationBatchResult,
     RecommendationDisposition,
+    RecommendationEligibilityEvidence,
     RecommendationGeographyInput,
     RecommendationInput,
     RecommendationInputError,
     RecommendationReasonCode,
+    RecommendationSkillEvidence,
     RequiredSkillComponent,
     SemanticComponent,
     WorkModeSignal,
@@ -96,9 +103,11 @@ from .models import (
 
 __all__ = [
     "build_domain_component",
+    "build_eligibility_evidence",
     "build_geography_signal",
     "build_recommendation_assessment",
     "build_recommendation_batch",
+    "build_skill_evidence",
     "eligibility_signal_status",
     "rank_recommendation_assessments",
     "recommendation_disposition",
@@ -179,6 +188,16 @@ def build_geography_signal(
             raise RecommendationInputError(
                 "location resolutions belong to another opportunity"
             )
+    countries = tuple(
+        sorted(
+            {
+                item.country_code
+                for item in geography.resolutions
+                if item.status is ResolutionStatus.RESOLVED
+                and item.country_code is not None
+            }
+        )
+    )
     verdict = evaluate_target(target.country_code, geography.resolutions)
     if target.rule_id == MOBILITY_OPEN_RULE:
         # The counters are facts about the posting and stay; the verdict does
@@ -192,6 +211,7 @@ def build_geography_signal(
             segments=verdict.segments,
             resolved_segments=verdict.resolved_segments,
             matching_segments=0,
+            resolved_countries=countries,
         )
     state = {
         TargetVerdict.MATCH: GeographyState.MATCH,
@@ -206,6 +226,39 @@ def build_geography_signal(
         segments=verdict.segments,
         resolved_segments=verdict.resolved_segments,
         matching_segments=verdict.matching_segments,
+        resolved_countries=countries,
+    )
+
+
+def build_skill_evidence(
+    skill_fit,
+) -> tuple[RecommendationSkillEvidence, ...]:
+    """Project the Phase 4 per-skill evaluations into the explanation contract.
+
+    Order is the upstream's, which is deterministic; `kind` and `sources` are
+    the upstream enums. `matched` becomes `confirmed_in_profile`, renamed
+    because the two words say different things to a reader: a skill that is not
+    confirmed is a question about the profile, not a statement about the person.
+    """
+    return tuple(
+        RecommendationSkillEvidence(
+            canonical_key=item.canonical_key,
+            canonical_name=item.canonical_name,
+            kind=item.kind,
+            sources=item.sources,
+            confirmed_in_profile=item.matched,
+            profile_normalizer_versions=item.profile_normalizer_versions,
+        )
+        for item in skill_fit.evaluations
+    )
+
+
+def build_eligibility_evidence(
+    eligibility,
+) -> tuple[RecommendationEligibilityEvidence, ...]:
+    """Project the persisted Phase 3.6 rule results. Nothing is re-evaluated."""
+    return tuple(
+        RecommendationEligibilityEvidence.of(result) for result in eligibility.results
     )
 
 
@@ -320,6 +373,7 @@ def _validate(inputs: RecommendationInput) -> None:
     matching = inputs.matching
     expected = (matching.profile_id, matching.opportunity_id)
     structured = inputs.structured
+    eligibility = inputs.eligibility
     if (structured.profile_id, structured.opportunity_id) != expected:
         raise RecommendationInputError("structured signals identity mismatch")
     if inputs.geography.profile_target.profile_id != matching.profile_id:
@@ -345,6 +399,21 @@ def _validate(inputs: RecommendationInput) -> None:
         raise RecommendationInputError(
             "recomputed role/domain/preference signals disagree with the "
             "matching snapshot; synchronize Matching first"
+        )
+    skill_fit = inputs.skill_fit
+    if (skill_fit.profile_id, skill_fit.opportunity_id) != expected:
+        raise RecommendationInputError("skill fit identity mismatch")
+    # The per-skill detail explains the persisted ratio, so it has to be the
+    # detail of *that* ratio. The recomputed fit is used for the explanation
+    # only; the number always comes from the snapshot.
+    if skill_fit_fingerprint(skill_fit) != matching.required_skill_upstream_fingerprint:
+        raise RecommendationInputError(
+            "recomputed skill fit disagrees with the matching snapshot; "
+            "synchronize Matching first"
+        )
+    if eligibility.results and eligibility.status is None:
+        raise RecommendationInputError(
+            "eligibility rule results without a stored decision"
         )
 
 
@@ -405,6 +474,7 @@ def build_recommendation_assessment(
         REQUIRED_SKILL_WEIGHT,
         matching.required_skill_matched_count,
         matching.required_skill_total_count,
+        matching.required_skill_upstream_fingerprint,
     )
     semantic = SemanticComponent(
         _component_status(semantic_score),
@@ -440,6 +510,12 @@ def build_recommendation_assessment(
         codes.append(geography_code)
     if semantic.status is ComponentStatus.MISSING:
         codes.append(RecommendationReasonCode.SEMANTIC_EVIDENCE_UNAVAILABLE)
+    if inputs.declared_constraints:
+        # Read and shown, never interpreted. No parser, no heuristic, no weight
+        # and no routing: the person is told this engine did not check them.
+        codes.append(
+            RecommendationReasonCode.USER_CONSTRAINTS_NOT_AUTOMATICALLY_EVALUATED
+        )
     if score is None:
         codes.append(RecommendationReasonCode.NO_NUMERIC_EVIDENCE)
 
@@ -471,6 +547,9 @@ def build_recommendation_assessment(
             for code in codes
             if code not in STRENGTH_CODES and code not in CONFIRMED_GAP_CODES
         ),
+        skill_evidence=build_skill_evidence(inputs.skill_fit),
+        eligibility_evidence=build_eligibility_evidence(inputs.eligibility),
+        declared_constraints=inputs.declared_constraints,
         matching_engine_version=matching.matching_engine_version,
         matching_rules_version=matching.matching_rules_version,
         semantic_percentile_version=matching.semantic_percentile_version,

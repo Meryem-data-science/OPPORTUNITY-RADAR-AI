@@ -1,36 +1,59 @@
-"""Read-only assembly and full-cohort preflight for Phase 9A inputs.
+"""Read-only assembly, freshness preflight and readiness for Phase 9A inputs.
 
 Six persisted sources are read here and **nothing is written, classified,
-geocoded or repaired**:
+geocoded, evaluated or repaired**:
 
     1. the profile and the user that owns it        `profiles`
     2. the current Matching snapshot                Phase 4, `read_current_matching`
     3. the profile's declared preferences           Phase 3, via Matching's loader
     4. the persisted fine classification            Phase 8, decoded as written
     5. the persisted location resolutions           Phase 7, plus the profile target
-    6. the stored eligibility decision              Phase 3.6
+    6. the stored eligibility decision              Phase 3.6, plus its reasons
+
+A recommendation is only as honest as the age of what it reads, so each upstream
+is checked against the evidence *it* defines as current, using that phase's own
+primitives — never a rule invented here:
+
+    Matching persistence   `audit_matching_profile_history`, restricted to the
+                           run the profile currently points at. A corrupt
+                           historical run is somebody else's problem; a corrupt
+                           current run is this one's.
+    Matching structured    the recomputed `role-domain-preferences-v2` result
+                           must fingerprint to the snapshot's own
+                           `domain.upstream_fingerprint`.
+    Matching skill fit     the recomputed `skill-fit-v1` result must fingerprint
+                           to the snapshot's `required_skill.upstream_fingerprint`.
+    Geography              every current `opportunity_constraint_locations` row
+                           of the posting must already be projected under
+                           `(location_fingerprint(text), RESOLVER_VERSION)`, and
+                           the projection must cover exactly those rows.
+    Eligibility            the stored decision's `(engine_version,
+                           input_fingerprint)` must equal what the **current**
+                           inputs digest to, computed with Phase 3.6's own
+                           `eligibility_fingerprint`. No verdict is recomputed.
+
+Any of those failing makes the cohort `INCOMPLETE` with **no records at all**.
+That is deliberate on both counts: a stale `INELIGIBLE` must never be published
+as a `KNOWN_BLOCKER`, a stale projection must never be published as
+`OUT_OF_TARGET`, and a half-assembled cohort would rank an opportunity against a
+corpus missing its competitors. Nothing is resynchronized to fix it — an
+operator runs the phase that owns the data.
 
 The shape follows `services/priority/input_assembly.py` — a readiness status, a
-list of explicit issues, a stable order, and no partial output — because an
-operator who understands that preflight should understand this one. Two of its
-rules are deliberately different, and both come from Phase 9's own contract:
+list of explicit issues, a stable order, no partial output. Two of its rules are
+deliberately different, and both come from Phase 9's own contract:
 
 * **a missing eligibility decision is not an issue.** Priority refuses to
   prioritize a pair it has no decision for; recommendation carries the absence
   through as `EligibilitySignalStatus.MISSING`, which routes the opportunity to
   UNCERTAIN. Refusing the whole cohort because one posting was never evaluated
   would hide the other ninety-nine, and turning the absence into a verdict is
-  exactly what Phase 3.6 forbids. A *stale* decision is still an issue: reading
-  another engine's verdict as if it were this one's is not an absence;
+  exactly what Phase 3.6 forbids. A decision that exists but no longer describes
+  the current inputs is the opposite case, and it stops the cohort;
 * **a legacy fine classification is not an issue either.** A row migration
   `0025` reached and the fine classifier never did is a documented state, and it
   routes to the coarse domain component. What *is* refused is a row whose
-  persisted fine half contradicts its coarse half — that is a real inconsistency
-  and it must not be papered over with an invented category.
-
-When any issue is found the result is `INCOMPLETE` and carries **no records at
-all**: a half-assembled cohort would rank an opportunity against a corpus that
-is missing its competitors.
+  persisted fine half contradicts its coarse half.
 """
 
 from __future__ import annotations
@@ -40,12 +63,8 @@ import numbers
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from services.api.fine_classification import (
-    FineClassificationDecodeError,
-    decode_fine_classification,
-)
 from services.collector.matching import (
     MATCHING_ENGINE_VERSION,
     MATCHING_PERSISTENCE_VERSION,
@@ -59,22 +78,50 @@ from services.collector.matching import (
     MatchingReadError,
     MatchLane,
     SemanticSimilarityStatus,
+    MatchingPersistenceAuditError,
+    audit_matching_profile_history,
+    build_opportunity_skill_signals,
     build_role_domain_preference_signals,
+    build_skill_fit,
     load_opportunity_matching_input,
     load_profile_matching_input,
     read_current_matching,
     select_matching_opportunity_ids,
+    skill_fit_fingerprint,
 )
+from services.collector.matching.skill_fit import SkillFitInputError
 from services.collector.matching.role_domain_preferences import (
     RoleDomainPreferencesInputError,
 )
 from services.collector.matching.role_domain_preferences_fingerprint import (
     role_domain_preferences_fingerprint,
 )
-from services.eligibility import ELIGIBILITY_ENGINE_VERSION
-from services.eligibility.repository import read_eligibility
+from services.collector.qualification.fine_read_model import (
+    FineClassificationDecodeError,
+    decode_fine_classification,
+)
+from services.digital_twin.preferences.models import OpportunityPreferences
+from services.digital_twin.preferences.repository import get_profile_preferences
+from services.eligibility.fingerprint import eligibility_fingerprint
+from services.eligibility.inputs import (
+    EligibilityInputError,
+    load_opportunity_input,
+    load_profile_input,
+)
+from services.eligibility.models import EligibilityInput
+from services.eligibility.repository import read_eligibility, read_rule_results
+from services.geography.models import (
+    RESOLVER_VERSION,
+    LocationResolution,
+    LocationSource,
+)
 from services.geography.profile_target import resolve_profile_target
-from services.geography.repository import read_opportunity_resolutions
+from services.geography.repository import (
+    read_opportunity_resolutions,
+    stored_signature,
+)
+from services.geography.resolver import location_fingerprint
+from services.geography.service import load_location_sources
 
 from .models import (
     RecommendationEligibilityInput,
@@ -89,6 +136,7 @@ RECOMMENDATION_INPUT_ASSEMBLY_VERSION = "recommendation-input-assembly-v1"
 __all__ = [
     "RECOMMENDATION_INPUT_ASSEMBLY_VERSION",
     "RecommendationInputAssemblyResult",
+    "current_location_signature",
     "RecommendationInputRecord",
     "RecommendationOpportunityContext",
     "RecommendationReadinessIssue",
@@ -109,11 +157,27 @@ class RecommendationReadinessIssueCode(StrEnum):
     MATCHING_NOT_READY = "MATCHING_NOT_READY"
     MATCHING_VERSION_STALE = "MATCHING_VERSION_STALE"
     STALE_MATCHING_COHORT = "STALE_MATCHING_COHORT"
+    #: The current Matching run does not survive Phase 4's own persistence
+    #: audit: a payload, a fingerprint or a version disagrees with itself.
+    MATCHING_PERSISTENCE_INVALID = "MATCHING_PERSISTENCE_INVALID"
+    #: The recomputed role/domain/preference alignment no longer fingerprints to
+    #: the one the snapshot was built from.
     STALE_MATCHING_SNAPSHOT = "STALE_MATCHING_SNAPSHOT"
+    #: The recomputed skill fit no longer fingerprints to the one the snapshot's
+    #: required-skill ratio was computed from.
+    STALE_MATCHING_SKILL_FIT = "STALE_MATCHING_SKILL_FIT"
     OPPORTUNITY_MISSING = "OPPORTUNITY_MISSING"
     INVALID_MATCHING_PAYLOAD = "INVALID_MATCHING_PAYLOAD"
     FINE_CLASSIFICATION_INVALID = "FINE_CLASSIFICATION_INVALID"
-    ELIGIBILITY_VERSION_STALE = "ELIGIBILITY_VERSION_STALE"
+    #: A Phase 7 projection that no longer reads the posting's current location
+    #: rows, or reads them under another resolver version.
+    GEOGRAPHY_PROJECTION_STALE = "GEOGRAPHY_PROJECTION_STALE"
+    #: A stored Eligibility decision whose engine version or input fingerprint
+    #: no longer matches what the current inputs produce.
+    ELIGIBILITY_SNAPSHOT_STALE = "ELIGIBILITY_SNAPSHOT_STALE"
+    #: A stored Eligibility decision exists, but the inputs needed to prove it
+    #: is still current can no longer be assembled.
+    ELIGIBILITY_INPUT_INCOMPLETE = "ELIGIBILITY_INPUT_INCOMPLETE"
     INVALID_UPSTREAM_VALUE = "INVALID_UPSTREAM_VALUE"
 
 
@@ -236,6 +300,10 @@ def _snapshot(
         raise ValueError("persisted assessment fingerprint is not a SHA-256 digest")
     if not _is_sha256(domain.get("upstream_fingerprint")):
         raise ValueError("persisted domain upstream fingerprint is not a SHA-256 digest")
+    if not _is_sha256(required.get("upstream_fingerprint")):
+        raise ValueError(
+            "persisted required-skill upstream fingerprint is not a SHA-256 digest"
+        )
     coverage = _ratio(assessment.evidence_coverage, optional=False)
     quality = _ratio(assessment.match_quality)
     if (coverage == 0.0) != (quality is None):
@@ -256,6 +324,7 @@ def _snapshot(
         required_skill_score=_ratio(required.get("normalized_score")),
         required_skill_matched_count=_count(required.get("matched_count")),
         required_skill_total_count=_count(required.get("total_count")),
+        required_skill_upstream_fingerprint=str(required.get("upstream_fingerprint")),
         semantic_status=semantic_status,
         semantic_percentile=percentile,
         domain_status=AlignmentStatus(domain.get("status")),
@@ -278,12 +347,13 @@ def _snapshot(
 def _fine_classification(
     connection: sqlite3.Connection, opportunity_id: int
 ) -> RecommendationFineClassification:
-    """Decode the persisted Phase 8 half with the API's own strict decoder.
+    """Decode the persisted Phase 8 half with the qualification's own reader.
 
-    Only two of its five public values are read. The other three are decoded all
-    the same, because the decoder's coherence rules — `OTHER` is never evidenced,
-    an unqualified row carries no category, a qualified one carries exactly one —
-    are what makes reading the two safe.
+    Only two of its five values are read. The other three are decoded all the
+    same, because the reader's coherence rules — `OTHER` is never evidenced, an
+    unqualified row carries no category, a qualified one carries exactly one —
+    are what makes reading the two safe. That reader lives beside the classifier
+    it reads, so this domain does not import the HTTP layer to reach it.
     """
     row = connection.execute(
         """SELECT q.qualification, q.fine_primary_category,
@@ -301,6 +371,83 @@ def _fine_classification(
         primary_category=decoded.primary_category,
         classifier_version=decoded.classifier_version,
     )
+
+
+def current_location_signature(location_text: str) -> tuple[str, str]:
+    """The `(fingerprint, version)` a current Phase 7 projection must carry.
+
+    Phase 7's own idempotence key, restated by calling Phase 7's own function.
+    A projection stored under any other pair was read from another string, or by
+    another resolver, and is therefore not a reading of what the posting says
+    now.
+    """
+    return location_fingerprint(location_text), RESOLVER_VERSION
+
+
+def _geography_is_current(
+    connection: sqlite3.Connection,
+    opportunity_id: int,
+    sources: Sequence[LocationSource],
+    resolutions: Sequence[LocationResolution],
+) -> str | None:
+    """Return why the projection is stale, or None when it is current.
+
+    Three ways it can be stale, and none of them is repaired here:
+
+    * a current source row carries no stored signature at all — never projected,
+      or projected into rows that disagree with each other;
+    * a current source row is projected under another text or another resolver
+      version — `stored_signature` says which pair it holds;
+    * the projection covers a set of source rows other than the current one, so
+      a segment survives from a location the posting no longer lists.
+
+    A posting with no location rows at all is **not** stale: it has nothing to
+    project, and the evaluator answers UNKNOWN about it, which is correct.
+    """
+    for source in sources:
+        stored = stored_signature(connection, source.source_location_id)
+        if stored is None:
+            return (
+                f"location row {source.source_location_id} has no coherent stored "
+                f"resolution"
+            )
+        expected = current_location_signature(source.location_text)
+        if stored != expected:
+            return (
+                f"location row {source.source_location_id} is projected under "
+                f"{stored[1]} for another string or version"
+            )
+    projected = {item.source_location_id for item in resolutions}
+    current = {source.source_location_id for source in sources}
+    if projected != current:
+        return (
+            f"the projection of opportunity {opportunity_id} covers "
+            f"{sorted(projected)} and its current location rows are {sorted(current)}"
+        )
+    return None
+
+
+def _current_eligibility_signature(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    opportunity_id: int,
+    profile_input,
+) -> tuple[str, str] | None:
+    """The `(engine_version, fingerprint)` a decision must carry to be current.
+
+    Phase 3.6's own digest over Phase 3.6's own current inputs. **No verdict is
+    computed**: `evaluate_eligibility` is not called and could not be, because
+    the answer is not the question here — the question is whether the stored
+    answer was given about what the database says today.
+
+    `None` means the current inputs can no longer be assembled at all, which is
+    reported separately: an unanswerable question is not a matching answer.
+    """
+    opportunity_input = load_opportunity_input(connection, opportunity_id)
+    if opportunity_input is None:
+        return None
+    current = EligibilityInput(opportunity_input, profile_input)
+    return current.engine_version, eligibility_fingerprint(current)
 
 
 def assemble_recommendation_inputs(
@@ -388,6 +535,53 @@ def assemble_recommendation_inputs(
             user_id,
             run.run_id,
         )
+    # Phase 4 owns what a coherent persisted run is, so its own audit answers.
+    # Only the run the profile currently points at is judged: an older run that
+    # rotted is a real problem, and not this cohort's.
+    try:
+        audit = audit_matching_profile_history(connection, profile_id)
+    except MatchingPersistenceAuditError as error:
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID,
+                    f"matching persistence cannot be audited: {error}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
+    current = next(
+        (item for item in audit.runs if item.run_id == run.run_id), None
+    )
+    profile_level = [item for item in audit.issues if item.run_id is None]
+    if (
+        audit.current_run_id != run.run_id
+        or current is None
+        or not current.ok
+        or profile_level
+    ):
+        detail = (
+            "current matching run is missing from the audit"
+            if current is None
+            else ", ".join(
+                sorted({item.code for item in (*current.issues, *profile_level)})
+            )
+            or "profile state does not reference the current run"
+        )
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID,
+                    f"current matching run {run.run_id} failed its persistence "
+                    f"audit: {detail}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
     persisted_ids = tuple(item.opportunity_id for item in run.assessments)
     if persisted_ids != select_matching_opportunity_ids(connection):
         return _incomplete(
@@ -416,6 +610,46 @@ def assemble_recommendation_inputs(
             run.run_id,
         )
     profile_target = resolve_profile_target(connection, profile_id)
+    # The free-text constraints live on the preferences row and are not part of
+    # `MatchingPreferences`, so they are read from the Digital Twin's own
+    # repository. They are carried verbatim and never parsed.
+    declared_constraints: tuple[str, ...] = ()
+    preference_row = get_profile_preferences(connection, profile_id)
+    if preference_row is not None:
+        value = preference_row.value
+        if not isinstance(value, OpportunityPreferences):
+            return _incomplete(
+                profile_id,
+                [
+                    _issue(
+                        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
+                        "profile preferences projection has an invalid value",
+                    )
+                ],
+                user_id,
+                run.run_id,
+            )
+        declared_constraints = tuple(value.constraints)
+    # One read for the whole profile side of every eligibility digest below.
+    try:
+        eligibility_profile = load_profile_input(connection, profile_id)
+    except EligibilityInputError as error:
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.ELIGIBILITY_INPUT_INCOMPLETE,
+                    f"eligibility profile inputs are not readable: {error}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
+    # One read for the whole corpus, indexed by posting: the projection is
+    # judged against the location rows that exist right now.
+    sources_by_opportunity: dict[int, list[LocationSource]] = {}
+    for source in load_location_sources(connection):
+        sources_by_opportunity.setdefault(source.opportunity_id, []).append(source)
 
     issues: list[RecommendationReadinessIssue] = []
     records: list[RecommendationInputRecord] = []
@@ -451,10 +685,19 @@ def assemble_recommendation_inputs(
             opportunity_input = load_opportunity_matching_input(
                 connection, opportunity_id
             )
-            structured = build_role_domain_preference_signals(
-                MatchingInput(profile_input, opportunity_input)
+            matching_input = MatchingInput(profile_input, opportunity_input)
+            structured = build_role_domain_preference_signals(matching_input)
+            # Recomputed for its per-skill detail only. The ratio that reaches
+            # the score is always the persisted one; this fit has to prove it
+            # describes that same ratio, which the fingerprint below does.
+            skill_fit = build_skill_fit(
+                matching_input, build_opportunity_skill_signals(opportunity_input)
             )
-        except (MatchingInputError, RoleDomainPreferencesInputError) as error:
+        except (
+            MatchingInputError,
+            RoleDomainPreferencesInputError,
+            SkillFitInputError,
+        ) as error:
             issues.append(
                 _issue(
                     RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
@@ -482,6 +725,20 @@ def assemble_recommendation_inputs(
                 )
             )
             continue
+        if (
+            skill_fit_fingerprint(skill_fit)
+            != snapshot.required_skill_upstream_fingerprint
+        ):
+            issues.append(
+                _issue(
+                    RecommendationReadinessIssueCode.STALE_MATCHING_SKILL_FIT,
+                    f"opportunity {opportunity_id} has a skill fit that no longer "
+                    f"matches its persisted required-skill component; synchronize "
+                    f"Matching first",
+                    opportunity_id,
+                )
+            )
+            continue
         try:
             fine = _fine_classification(connection, opportunity_id)
         except FineClassificationDecodeError as error:
@@ -490,6 +747,23 @@ def assemble_recommendation_inputs(
                     RecommendationReadinessIssueCode.FINE_CLASSIFICATION_INVALID,
                     f"opportunity {opportunity_id} has an unreadable fine "
                     f"classification: {error}",
+                    opportunity_id,
+                )
+            )
+            continue
+        resolutions = read_opportunity_resolutions(connection, opportunity_id)
+        stale_geography = _geography_is_current(
+            connection,
+            opportunity_id,
+            sources_by_opportunity.get(opportunity_id, ()),
+            resolutions,
+        )
+        if stale_geography is not None:
+            issues.append(
+                _issue(
+                    RecommendationReadinessIssueCode.GEOGRAPHY_PROJECTION_STALE,
+                    f"opportunity {opportunity_id} has a stale geographic "
+                    f"projection: {stale_geography}; synchronize Geography first",
                     opportunity_id,
                 )
             )
@@ -506,31 +780,65 @@ def assemble_recommendation_inputs(
                 )
             )
             continue
-        if stored is not None and (
-            stored.engine_version != ELIGIBILITY_ENGINE_VERSION
-            or not _is_sha256(stored.input_fingerprint)
-        ):
-            issues.append(
-                _issue(
-                    RecommendationReadinessIssueCode.ELIGIBILITY_VERSION_STALE,
-                    f"opportunity {opportunity_id} has a stale or unusable "
-                    f"eligibility decision",
-                    opportunity_id,
+        rule_results = ()
+        if stored is not None:
+            if not _is_sha256(stored.input_fingerprint) or not stored.engine_version:
+                issues.append(
+                    _issue(
+                        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
+                        f"opportunity {opportunity_id} has invalid eligibility "
+                        f"provenance",
+                        opportunity_id,
+                    )
                 )
-            )
-            continue
+                continue
+            try:
+                signature = _current_eligibility_signature(
+                    connection, profile_id, opportunity_id, eligibility_profile
+                )
+            except EligibilityInputError as error:
+                signature = None
+                message = str(error)
+            else:
+                message = "the posting's Phase 3.5 requirement reading is gone"
+            if signature is None:
+                # A decision exists and its question can no longer be asked. The
+                # old verdict is not evidence about inputs nobody can read.
+                issues.append(
+                    _issue(
+                        RecommendationReadinessIssueCode.ELIGIBILITY_INPUT_INCOMPLETE,
+                        f"opportunity {opportunity_id} has a stored eligibility "
+                        f"decision whose current inputs cannot be assembled: "
+                        f"{message}",
+                        opportunity_id,
+                    )
+                )
+                continue
+            if (stored.engine_version, stored.input_fingerprint) != signature:
+                # The decision was taken about other inputs. Publishing it now —
+                # an INELIGIBLE above all — would be a blocker nobody decided.
+                issues.append(
+                    _issue(
+                        RecommendationReadinessIssueCode.ELIGIBILITY_SNAPSHOT_STALE,
+                        f"opportunity {opportunity_id} has an eligibility decision "
+                        f"that no longer describes its current inputs; "
+                        f"synchronize Eligibility first",
+                        opportunity_id,
+                    )
+                )
+                continue
+            rule_results = read_rule_results(connection, stored.id)
         records.append(
             RecommendationInputRecord(
                 RecommendationInput(
                     matching=snapshot,
                     preferences=profile_input.preferences,
                     structured=structured,
+                    skill_fit=skill_fit,
                     fine=fine,
                     geography=RecommendationGeographyInput(
                         profile_target=profile_target,
-                        resolutions=read_opportunity_resolutions(
-                            connection, opportunity_id
-                        ),
+                        resolutions=resolutions,
                     ),
                     eligibility=RecommendationEligibilityInput(
                         status=None if stored is None else stored.status,
@@ -540,7 +848,9 @@ def assemble_recommendation_inputs(
                         engine_version=(
                             None if stored is None else stored.engine_version
                         ),
+                        results=rule_results,
                     ),
+                    declared_constraints=declared_constraints,
                 ),
                 RecommendationOpportunityContext(opportunity_id, *row),
             )

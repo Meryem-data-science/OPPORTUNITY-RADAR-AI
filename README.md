@@ -289,8 +289,13 @@ stale.
   Phase 7 geography and the Phase 3.6 eligibility. It keeps Matching's audited
   50/30/20 weights and spends the domain weight exactly once, on the fine
   reading when it can be bridged honestly and on the persisted coarse one
-  otherwise. It classifies nothing, recomputes no upstream, and persists
-  nothing: no table, no migration, no route.
+  otherwise. Every upstream it reads is first checked against that phase's own
+  freshness evidence — Matching's persistence audit and component fingerprints,
+  Phase 7's `(location fingerprint, resolver version)` pair, Phase 3.6's input
+  digest — so a stale `INELIGIBLE` is never published as a blocker and a stale
+  projection never as `OUT_OF_TARGET`. It classifies nothing, recomputes no
+  verdict, repairs nothing, and persists nothing: no table, no migration, no
+  route.
 - `evaluation/`: the Phase 7C.1 coverage-evaluation foundation — the declared,
   versioned universe of Morocco PFE/stage sources we want to be measured
   against, and a gold benchmark of real opportunities observed on them. Nothing

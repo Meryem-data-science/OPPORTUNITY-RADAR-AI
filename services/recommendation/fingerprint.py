@@ -11,6 +11,15 @@ because their partition, not their emission order, is the statement. The
 ranking, by contrast, *is* a product of this phase, so the batch payload keeps
 the ranked fingerprints in rank order — and because the ranking is a pure
 function of content, shuffling the batch's input still yields the same digest.
+
+The explanation is part of the result, so everything a reader would be shown is
+in here: the per-skill evidence, the persisted eligibility rule results, the
+constraints the person declared, and the upstream fingerprints actually
+consumed. Two recommendations that would be explained differently cannot share a
+digest. The collections whose order carries meaning — the skills as the
+extractor signalled them, the rules as the engine produced them, the constraints
+as the person wrote them — keep it; the ones whose order is incidental are
+sorted.
 """
 
 from __future__ import annotations
@@ -56,6 +65,22 @@ def canonical_recommendation_assessment_payload(
             "score": assessment.required_skill.score,
             "matched_count": assessment.required_skill.matched_count,
             "total_count": assessment.required_skill.total_count,
+            "upstream_fingerprint": assessment.required_skill.upstream_fingerprint,
+            # Upstream's order, which is deterministic and is the order an
+            # explanation would list them in.
+            "evidence": [
+                {
+                    "canonical_key": item.canonical_key,
+                    "canonical_name": item.canonical_name,
+                    "kind": item.kind.value,
+                    "sources": [source.value for source in item.sources],
+                    "confirmed_in_profile": item.confirmed_in_profile,
+                    "profile_normalizer_versions": sorted(
+                        item.profile_normalizer_versions
+                    ),
+                }
+                for item in assessment.skill_evidence
+            ],
         },
         "semantic": {
             "status": assessment.semantic.status.value,
@@ -93,12 +118,35 @@ def canonical_recommendation_assessment_payload(
             "segments": assessment.geography.segments,
             "resolved_segments": assessment.geography.resolved_segments,
             "matching_segments": assessment.geography.matching_segments,
+            "resolved_countries": sorted(assessment.geography.resolved_countries),
         },
         "eligibility": {
             "status": assessment.eligibility.status.value,
             "upstream_fingerprint": assessment.eligibility.upstream_fingerprint,
             "engine_version": assessment.eligibility.engine_version,
+            # The engine's own order, which is how the reasons are read back.
+            "evidence": [
+                {
+                    "dimension": item.dimension.value,
+                    "rule_code": item.rule_code,
+                    "status": item.status.value,
+                    "is_blocking": item.is_blocking,
+                    "requirement_kind": (
+                        None
+                        if item.requirement_kind is None
+                        else item.requirement_kind.value
+                    ),
+                    "reason_code": item.reason_code.value,
+                    "explanation": item.explanation,
+                    "requirement_ref": item.requirement_ref,
+                    "profile_ref": item.profile_ref,
+                }
+                for item in assessment.eligibility_evidence
+            ],
         },
+        # Verbatim and in the person's own order: an edit to a constraint
+        # changes what they are shown, so it changes the digest.
+        "declared_constraints": list(assessment.declared_constraints),
         "baseline": {
             "match_quality": assessment.baseline_match_quality,
             "evidence_coverage": assessment.baseline_evidence_coverage,
