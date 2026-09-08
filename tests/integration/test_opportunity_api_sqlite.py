@@ -114,4 +114,14 @@ def test_real_sqlite_listing_is_filtered_ordered_counted_and_read_only(
     assert all(item["status"] == "visible" for item in payload["items"])
     assert all("description" not in item for item in payload["items"])
     assert payload["items"][0]["description_length"] > 0
+    # Phase 8C is additive: nothing above changed, and these opportunities have
+    # no `opportunity_qualifications` row at all. The LEFT JOIN keeps them in the
+    # listing and in `total`, with the five public fine fields in the explicit
+    # never-classified state rather than a fabricated category.
+    for item in payload["items"]:
+        assert item["fine_primary_category"] is None
+        assert item["fine_secondary_categories"] is None
+        assert item["fine_category_evidence"] is None
+        assert item["fine_reasons"] is None
+        assert item["fine_classifier_version"] is None
     assert before == after == 4

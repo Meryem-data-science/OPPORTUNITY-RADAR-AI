@@ -38,6 +38,15 @@ def _response(count: int) -> OpportunityListResponse:
             last_seen_at="2026-01-02T00:00:00+00:00",
             status="visible",
             description_length=42,
+            # This fixture says nothing about classification, so it uses the
+            # honest never-classified state rather than a default: the five
+            # fine fields are required, so no construction site can omit them
+            # and accidentally publish "not classified" for a classified row.
+            fine_primary_category=None,
+            fine_secondary_categories=None,
+            fine_category_evidence=None,
+            fine_reasons=None,
+            fine_classifier_version=None,
         )
         for index in range(count)
     ]
@@ -105,6 +114,17 @@ class _ReadOnlyConnection:
                     "2026-01-02T00:00:00+00:00",
                     "visible",
                     37,
+                    # The persisted coarse qualification, read only to validate
+                    # the fine values against it, then the five fine columns
+                    # migration 0025 adds, in the order the read model selects
+                    # them.
+                    "CORE_TARGET",
+                    "MLOPS",
+                    '["MACHINE_LEARNING"]',
+                    '[{"category":"MLOPS","field":"TITLE","kind":"ROLE_PHRASE",'
+                    '"signal":"mlops engineer"}]',
+                    '["fine categories evidenced by the title take precedence"]',
+                    "fine-data-ai-rules-v2",
                 )
             ]
         )
@@ -152,6 +172,20 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
         service_logger.handlers.clear()
 
     assert response.status_code == 200
+    # The persisted fine classification is decoded and returned, and none of it
+    # reaches the log line asserted below.
+    item = response.json()["items"][0]
+    assert item["fine_primary_category"] == "MLOPS"
+    assert item["fine_secondary_categories"] == ["MACHINE_LEARNING"]
+    assert item["fine_category_evidence"] == [
+        {
+            "category": "MLOPS",
+            "field": "TITLE",
+            "kind": "ROLE_PHRASE",
+            "signal": "mlops engineer",
+        }
+    ]
+    assert item["fine_classifier_version"] == "fine-data-ai-rules-v2"
     succeeded = next(
         record
         for record in records

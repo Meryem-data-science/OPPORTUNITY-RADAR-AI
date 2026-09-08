@@ -191,6 +191,22 @@ curl "http://127.0.0.1:8000/api/opportunities?limit=5"
 `original_url`, not the stored full description. It accepts limits from 1 to
 100.
 
+Each item also carries the persisted fine Data/AI classification —
+`fine_primary_category`, `fine_secondary_categories`, `fine_category_evidence`,
+`fine_reasons` and `fine_classifier_version` — read from
+`opportunity_qualifications` exactly as persistence wrote it. The API classifies
+nothing: to change these values, reconcile the qualifications, do not call the
+endpoint again. All five are `null` together for a row that was never
+fine-classified (`fine_classifier_version` is `null`) and for an opportunity with
+no qualification row at all; those opportunities are still listed and still
+counted in `total`. A row that *was* classified always answers with arrays,
+possibly empty, and a `null` `fine_primary_category` there means the classifier
+assigned no sub-domain — which is not `OTHER`. A persisted row whose coarse and
+fine halves contradict each other — an `UNCERTAIN` opportunity carrying a
+category, a `CORE_TARGET` one classified into nothing — answers the same public
+`503` as any other unreadable data rather than being published or repaired. See
+[`docs/database.md`](database.md#the-fine-classification-is-read-never-derived).
+
 Inspect source health, which takes no parameter:
 
 ```bash
