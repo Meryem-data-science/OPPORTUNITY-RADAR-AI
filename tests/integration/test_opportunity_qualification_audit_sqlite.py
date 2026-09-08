@@ -197,9 +197,19 @@ def test_the_fine_audit_serializes_without_touching_persistence(tmp_path: Path) 
     assert json.loads(json.dumps(payload, default=str))
     connection = sqlite3.connect(path)
     try:
-        # Phase 8A.1 is read-only: no fine-category column, table or migration.
+        # The audit is read-only. Phase 8B.1 added the fine columns to the
+        # existing qualification row, so their existence is no longer the proof;
+        # what the audit must never do is write one. Auditing this database ran
+        # the fine classifier over every opportunity and left every fine column
+        # exactly as migration 0025 created it: NULL, never fine-classified.
         columns = {row[1] for row in connection.execute("PRAGMA table_info(opportunity_qualifications)")}
-        assert not {name for name in columns if "fine" in name or "category" in name}
+        assert {
+            "fine_primary_category", "fine_secondary_categories_json",
+            "fine_category_evidence_json", "fine_reasons_json", "fine_classifier_version",
+        } <= columns
+        assert connection.execute(
+            "SELECT COUNT(*) FROM opportunity_qualifications WHERE fine_classifier_version IS NOT NULL"
+        ).fetchone() == (0,)
         tables = {
             row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }

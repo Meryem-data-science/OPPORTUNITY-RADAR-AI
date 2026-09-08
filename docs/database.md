@@ -72,10 +72,14 @@ auditable and reversible instead of destructive.
 
 Migration `0004` stores one current derived result per eligible opportunity,
 including explanatory signals, classifier version, a SHA-256 input fingerprint,
-and timestamps. The current classifier version is `qualification-rules-v2`.
-Reconciliation leaves a row unchanged when both its input fingerprint and
-classifier version match; otherwise it inserts or updates atomically. Merged,
-inactive duplicates are excluded. `RadarAgent` runs this global reconciliation
+and timestamps. Migration `0025` adds the fine Data/AI classification to that
+same row (below). The current classifier versions are `qualification-rules-v2`
+for the coarse rules and `fine-data-ai-rules-v2` for the fine ones; they are
+independent rule systems and move independently. Reconciliation leaves a row
+unchanged only when its input fingerprint, its `classifier_version` and its
+`fine_classifier_version` all match the run; otherwise it inserts or updates
+atomically, writing both halves together. Merged, inactive duplicates are
+excluded. `RadarAgent` runs this global reconciliation
 once after its source loop; the standalone CLI remains available for audit or
 maintenance.
 
@@ -92,6 +96,48 @@ Closed taxonomy values are:
   `UNKNOWN`.
 - **Listing quality:** `NORMAL_LISTING`, `POSSIBLE_NON_JOB_PAGE`,
   `INSUFFICIENT_CONTENT`.
+
+### Fine classification columns (migration `0025`)
+
+`0025` adds five nullable columns to `opportunity_qualifications` and creates no
+table. There is no second fine table and no history table: one current derived
+row per opportunity remains the design.
+
+- `fine_primary_category`: `NULL`, or one of `DATA_SCIENCE`, `DATA_ANALYTICS`,
+  `DATA_ENGINEERING`, `MACHINE_LEARNING`, `ARTIFICIAL_INTELLIGENCE`,
+  `GENERATIVE_AI`, `NLP`, `COMPUTER_VISION`, `BUSINESS_INTELLIGENCE`, `MLOPS`,
+  `OTHER`, enforced by a `CHECK`;
+- `fine_secondary_categories_json`: compact JSON array of category strings in
+  classifier order;
+- `fine_category_evidence_json`: compact JSON array of
+  `{"category","field","kind","signal"}` objects in classifier order;
+- `fine_reasons_json`: compact JSON array of the deciding fine reasons;
+- `fine_classifier_version`: the fine rule version that produced the four
+  columns above.
+
+JSON is stored as `TEXT`, as everywhere else in this schema; there is no JSON1
+or `json_valid()` dependency.
+
+**`NULL` has two distinct meanings, and a `CHECK` keeps them apart.**
+
+- `fine_classifier_version IS NULL` — the migration was applied and fine
+  classification has never run for this row. All five columns are `NULL`, and
+  `0025` writes no values into pre-existing rows: backfilling a version would
+  record a classification that never happened.
+- `fine_classifier_version IS NOT NULL` with `fine_primary_category IS NULL` —
+  the classifier ran and deliberately assigned no category, which is what an
+  `OUT_OF_SCOPE` or `UNCERTAIN` opportunity receives. Secondaries and evidence
+  are `[]` and the reasons hold the explicit not-qualified reason.
+
+`OTHER` is neither of those: it states that the opportunity *is* demonstrably
+Data/AI and that no supported fine sub-domain can be asserted.
+
+Persistence refuses to start when the table or these columns are missing,
+naming migration `0004` or `0025` rather than failing on a raw missing column,
+and it never applies a migration itself. Applying `0025` to an operational
+database and reconciling its rows is a separate, explicit Phase 8B.2 step;
+nothing in Phase 8B.1 migrates or writes operational data, and no reader
+consumes the new columns yet.
 
 These classifications do not implement personalized matching or ranking.
 

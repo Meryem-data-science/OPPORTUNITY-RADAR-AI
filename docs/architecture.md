@@ -1528,6 +1528,72 @@ consuming it unchanged. The audit gained two read-time breakdowns —
 decided each outcome — so the calibration can be re-read locally without writing
 anything.
 
+## Fine classification persistence (Phase 8B.1)
+
+The fine categories stop being read-only here, and they are stored in the row
+that already holds the coarse result. Migration `0025` adds five columns to
+`opportunity_qualifications` — `fine_primary_category`,
+`fine_secondary_categories_json`, `fine_category_evidence_json`,
+`fine_reasons_json` and `fine_classifier_version` — and creates no table. Coarse
+and fine are one derived understanding of one opportunity, computed from the
+same inputs over the same eligible row set (`is_active = 1` and
+`status != 'merged_duplicate'`), so a second table would only invite the two
+halves to disagree. There is still **no history table**: one current row per
+opportunity, with the fingerprint and the two versions saying when it must be
+recomputed.
+
+**Persistence computes the coarse result first and passes only its
+qualification on.** `classify_fine_categories(title, description,
+qualification=coarse.qualification)` receives nothing else — no organization, no
+location, no source, no profile and no CV — so the structural neutrality of the
+classifier survives being called from persistence.
+
+**Two versions, compared together.** A row is left unchanged only when its
+input fingerprint, its `classifier_version` *and* its `fine_classifier_version`
+all match the run:
+
+```text
+before 8B.1   (input_fingerprint, classifier_version)
+after  8B.1   (input_fingerprint, classifier_version, fine_classifier_version)
+```
+
+So a fine recalibration alone reconciles every row without pretending the coarse
+rules moved, and a row whose `fine_classifier_version` is `NULL` — migration
+applied, fine classification never run — is always reconciled. The two versions
+are injected independently, exactly as they are versioned independently.
+
+**`NULL` means two different things, and the schema keeps them apart.** A row
+with `fine_classifier_version IS NULL` has never been fine-classified: all five
+columns are NULL and nothing is known. A row that carries a version but no
+primary category *was* classified and deliberately assigned no category, which
+is what an `OUT_OF_SCOPE` or `UNCERTAIN` opportunity receives: `[]` secondaries,
+`[]` evidence, and the explicit not-qualified reason. `OTHER` is neither: it is
+a value, and it states that the opportunity is demonstrably Data/AI and that no
+supported sub-domain is evidenced. A `CHECK` on the last column refuses every
+mixture of the two states, so a half-written row cannot exist even if something
+writes without going through persistence.
+
+**Serialization is deterministic and semantic.** Secondaries and reasons are
+compact JSON arrays of strings in classifier order; evidence is a compact JSON
+array of `{"category","field","kind","signal"}` objects in classifier order,
+holding enum values rather than dataclass reprs. Nothing is ordered by a set or
+a dict.
+
+**One transaction, one record.** Both halves of a row are written by the same
+statement inside the existing batch transaction, so no row can end up with a new
+coarse result beside a stale fine one; any classifier or SQL failure rolls the
+whole batch back. Before the batch begins, persistence checks that the table and
+the five columns exist and raises `QualificationPersistenceError` naming
+migration `0004` or `0025` — a missing migration is an instruction, not a raw
+`no such column` traceback. Persistence never applies a migration itself.
+
+**Phase 8B.1 is the contract, not the rollout.** No operational database is
+migrated or reconciled by this phase, remote Turso qualification writes stay
+disabled, and nothing reads the new columns: matching, ranking, notifications,
+the API and the frontend are untouched. Controlled operational reconciliation is
+Phase 8B.2, and read exposure is Phase 8C.
+
+
 ## Data-processing boundaries
 
 - Opportunity persistence provides repeat-observation idempotence for a source.
