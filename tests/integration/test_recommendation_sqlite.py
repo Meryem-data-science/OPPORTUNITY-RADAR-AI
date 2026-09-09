@@ -412,21 +412,40 @@ def test_the_batch_is_reproducible_from_the_same_database(corpus):
     ]
 
 
-def test_the_whole_phase_writes_nothing_at_all(tmp_path):
+def test_assembling_and_ranking_writes_nothing_at_all(tmp_path):
+    """The engine half of Phase 9 is pure, and stays pure now that 9B.1 exists.
+
+    Migration 0026 gives a recommendation *somewhere* to be stored, which is a
+    different statement from storing one: assembling the inputs and ranking the
+    cohort still touches no byte of the database and leaves every recommendation
+    table empty. Only `store_recommendation_batch`, which nothing here calls,
+    may write — and it is covered on its own database in
+    `test_recommendation_persistence.py`.
+    """
     connection, path, identity, _, _ = build_corpus(tmp_path)
     connection.close()
     before = hashlib.sha256(path.read_bytes()).hexdigest()
     with connect_readonly_database(path) as readonly:
         assembly, batch = assemble_and_rank(readonly, identity.profile_id)
-        tables = {
+        tables = sorted(
             row[0]
             for row in readonly.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
+            if row[0].startswith("recommendation")
+        )
+        stored = {
+            table: readonly.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in tables
         }
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
     assert batch.assessment_count == len(CORPUS)
-    assert not any(name.startswith("recommendation") for name in tables)
+    assert tables == [
+        "recommendation_assessments",
+        "recommendation_profile_state",
+        "recommendation_runs",
+    ]
+    assert set(stored.values()) == {0}
     assert assembly.status is RecommendationReadinessStatus.READY
 
 

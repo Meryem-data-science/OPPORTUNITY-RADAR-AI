@@ -1192,6 +1192,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0023_application_tracking.sql",
         "0024_opportunity_location_resolutions.sql",
         "0025_opportunity_fine_classification.sql",
+        "0026_recommendation_persistence.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications

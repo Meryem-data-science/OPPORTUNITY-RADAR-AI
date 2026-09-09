@@ -164,7 +164,10 @@ def test_0025_changes_no_existing_value_and_writes_no_fine_classification(
         before = coarse_values(connection)
         assert before and before[0][1] == "CORE_TARGET"
 
-        assert apply_migrations(connection) == ["0025"]
+        # Everything still pending is applied here. `0025` is the one under
+        # test, and it is the first to arrive; later slices ride along behind
+        # it without touching the coarse row either.
+        assert apply_migrations(connection)[0] == "0025"
 
         assert coarse_values(connection) == before
         # No backfill, and above all no invented fine version: the row has not
