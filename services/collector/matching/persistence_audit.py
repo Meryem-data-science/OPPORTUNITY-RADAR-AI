@@ -11,6 +11,7 @@ from typing import Any
 from .fingerprint import canonical_json
 from .persistence_audit_fingerprint import matching_persistence_audit_fingerprint
 from .persistence_fingerprint import matching_run_fingerprint
+from .tfidf_fingerprint import SEMANTIC_BINDING_VERSION
 
 MATCHING_PERSISTENCE_AUDIT_VERSION = "matching-persistence-audit-v1"
 
@@ -159,6 +160,53 @@ def _assessment_issues(row: tuple, run: tuple) -> list[MatchingPersistenceAuditI
     return issues
 
 
+def _binding_issues(
+    run_id: int, version: object, fingerprint: object
+) -> list[MatchingPersistenceAuditIssue]:
+    """Judge the optional binding provenance of one stored batch payload.
+
+    Absent is legal and is the legacy shape: a run persisted before this
+    provenance existed is a valid historical run, and declaring the whole
+    Matching history corrupt to introduce a new field would be worse than the
+    gap it closes. Present means present in full, under a version this code
+    knows, as a lowercase SHA-256.
+    """
+    if version is None and fingerprint is None:
+        return []
+    if version is None or fingerprint is None:
+        return [
+            _issue(
+                "SEMANTIC_BINDING_PARTIAL",
+                run_id,
+                None,
+                "batch payload carries half a semantic binding provenance",
+            )
+        ]
+    if version != SEMANTIC_BINDING_VERSION:
+        return [
+            _issue(
+                "SEMANTIC_BINDING_VERSION_UNSUPPORTED",
+                run_id,
+                None,
+                f"unsupported semantic binding version: {version!r}",
+            )
+        ]
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+    ):
+        return [
+            _issue(
+                "SEMANTIC_BINDING_FINGERPRINT_INVALID",
+                run_id,
+                None,
+                "semantic binding fingerprint is not a SHA-256 digest",
+            )
+        ]
+    return []
+
+
 def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditResult:
     run_id = run[0]
     rows = connection.execute(
@@ -191,6 +239,7 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
                 "batch payload is invalid JSON",
             )
         )
+    binding_version = binding_fingerprint = None
     if isinstance(batch, dict):
         if canonical_json(batch) != run[12]:
             issues.append(
@@ -201,6 +250,21 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
                     "batch payload is not canonical JSON",
                 )
             )
+        # The stored payload is the content payload plus, for a run that has
+        # it, the identity-aware binding. They are separated here because the
+        # batch fingerprint is a digest of the content half **only**: it is a
+        # content identity and adding an opportunity id to it would change what
+        # it means. The binding is verified through the run fingerprint below.
+        content = dict(batch)
+        binding_version = content.pop("semantic_binding_version", None)
+        binding_fingerprint = content.pop("semantic_binding_fingerprint", None)
+        binding_issues = _binding_issues(run_id, binding_version, binding_fingerprint)
+        issues.extend(binding_issues)
+        if binding_issues:
+            # Unusable provenance: the run fingerprint below cannot be
+            # reproduced from it, and reporting a second mismatch for the same
+            # cause would only obscure the first.
+            binding_version = binding_fingerprint = None
         expected = {
             "matching_engine_version": run[4],
             "matching_rules_version": run[5],
@@ -210,7 +274,7 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
             "assessment_count": run[11],
             "assessment_fingerprints": sorted(row[4] for row in rows),
         }
-        if batch != expected:
+        if content != expected:
             issues.append(
                 _issue(
                     "BATCH_CONTENT_MISMATCH",
@@ -219,7 +283,7 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
                     "batch payload differs from run and assessment rows",
                 )
             )
-        if _digest(batch) != run[9]:
+        if _digest(content) != run[9]:
             issues.append(
                 _issue(
                     "BATCH_FINGERPRINT_MISMATCH",
@@ -238,6 +302,9 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
             )
         )
     assessments = tuple((row[0], row[4]) for row in rows)
+    # A legacy run passes both binding values as None and therefore digests
+    # exactly as it always did; a run carrying the provenance digests with it,
+    # so exchanging two postings' documents changes this identity.
     calculated_run = matching_run_fingerprint(
         profile_id=run[1],
         persistence_version=run[2],
@@ -249,6 +316,8 @@ def _audit_run(connection: sqlite3.Connection, run: tuple) -> MatchingRunAuditRe
         tfidf_model_fingerprint=run[8],
         batch_fingerprint=run[9],
         assessments=assessments,
+        semantic_binding_version=binding_version,
+        semantic_binding_fingerprint=binding_fingerprint,
     )
     if calculated_run != run[10]:
         issues.append(

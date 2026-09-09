@@ -71,6 +71,7 @@ from .persistence_audit import (
 )
 from .read_model import (
     MatchingAssessmentReadModel,
+    read_semantic_binding,
     MatchingProfileReadModel,
     MatchingReadError,
     MatchingRunReadModel,
@@ -132,8 +133,11 @@ from .skill_fit import (
 )
 from .skill_fit_fingerprint import canonical_skill_fit_payload, skill_fit_fingerprint
 from .tfidf_fingerprint import (
+    SEMANTIC_BINDING_VERSION,
+    canonical_semantic_binding_payload,
     canonical_semantic_corpus_payload,
     canonical_semantic_similarity_payload,
+    semantic_binding_fingerprint,
     semantic_corpus_fingerprint,
     semantic_similarity_fingerprint,
     tfidf_model_fingerprint,
@@ -169,6 +173,7 @@ __all__ = [
     "audit_matching_profile_history",
     "list_matching_runs",
     "read_current_matching",
+    "read_semantic_binding",
     "read_matching_run",
     "MATCHING_SELECTION_VERSION",
     "MatchingSyncError",
@@ -268,8 +273,11 @@ __all__ = [
     "fit_tfidf_corpus",
     "score_matching_input_semantic_similarity",
     "score_profile_against_tfidf_corpus",
+    "SEMANTIC_BINDING_VERSION",
+    "canonical_semantic_binding_payload",
     "canonical_semantic_corpus_payload",
     "canonical_semantic_similarity_payload",
+    "semantic_binding_fingerprint",
     "semantic_corpus_fingerprint",
     "semantic_similarity_fingerprint",
     "tfidf_model_fingerprint",

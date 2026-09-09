@@ -38,6 +38,30 @@ class MatchingAssessmentReadModel:
     assessment_payload: Mapping[str, Any]
 
 
+def read_semantic_binding(
+    batch_payload: Mapping[str, Any],
+) -> tuple[str | None, str | None]:
+    """Decode the optional binding provenance of one stored batch payload.
+
+    `(None, None)` is the legacy run — persisted before this provenance existed
+    — and is a legitimate historical state, not an error. Anything half-written
+    or of the wrong type is refused, so a reader never sees a version without
+    its fingerprint. Whether a *legacy* run is fresh enough to recommend on is a
+    different question, and it belongs to the caller, not here.
+    """
+    version = batch_payload.get("semantic_binding_version")
+    fingerprint = batch_payload.get("semantic_binding_fingerprint")
+    if version is None and fingerprint is None:
+        return None, None
+    if version is None or fingerprint is None:
+        raise MatchingReadError(
+            "stored batch payload carries half a semantic binding provenance"
+        )
+    if not isinstance(version, str) or not isinstance(fingerprint, str):
+        raise MatchingReadError("semantic binding provenance is not text")
+    return version, fingerprint
+
+
 @dataclass(frozen=True)
 class MatchingRunReadModel:
     run_id: int
@@ -55,6 +79,16 @@ class MatchingRunReadModel:
     created_at: str
     batch_payload: Mapping[str, Any]
     assessments: tuple[MatchingAssessmentReadModel, ...]
+
+    @property
+    def semantic_binding_version(self) -> str | None:
+        """The binding contract this run was persisted under, or None if legacy."""
+        return read_semantic_binding(self.batch_payload)[0]
+
+    @property
+    def semantic_binding_fingerprint(self) -> str | None:
+        """Which document belonged to which posting, or None if legacy."""
+        return read_semantic_binding(self.batch_payload)[1]
 
 
 @dataclass(frozen=True)
