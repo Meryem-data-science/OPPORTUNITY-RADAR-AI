@@ -65,8 +65,11 @@ from services.targeting.opportunity_type.service import (
 PACKAGE = Path("services/targeting/opportunity_type")
 MIGRATIONS = Path("migrations")
 
-#: The last migration this slice runs against. Phase 7B.1 adds none of its own:
-#: the verdict depends on a profile, so there is nothing to store.
+#: The last migration that existed when this slice was written. Phase 7B.1 adds
+#: none of its own: the verdict depends on a profile, so there is nothing to
+#: store. Later slices add their own migrations after it, so what is asserted
+#: below is that none of them belongs to *this* subject — not that the
+#: repository stopped here.
 LAST_MIGRATION_BEFORE_THIS_SLICE = "0025"
 
 #: Tables nobody may create for a derived verdict or a derived preference.
@@ -429,12 +432,19 @@ def test_the_package_contains_no_write_statement() -> None:
 
 def test_this_slice_adds_no_migration() -> None:
     """The verdict depends on a profile, so there is nothing to store."""
-    versions = sorted(
-        migration.version
+    names = sorted(
+        migration.path.name
         for migration in discover_migrations(DEFAULT_MIGRATIONS_DIRECTORY)
     )
-    assert versions[-1] == LAST_MIGRATION_BEFORE_THIS_SLICE
-    assert not list(MIGRATIONS.glob("0026_*.sql"))
+    assert LAST_MIGRATION_BEFORE_THIS_SLICE in {name[:4] for name in names}
+    # Whatever later slices added, none of it stores a targeting verdict or a
+    # targeting preference.
+    assert not [
+        name
+        for name in names
+        if name[:4] > LAST_MIGRATION_BEFORE_THIS_SLICE
+        and ("target" in name or "opportunity_type" in name)
+    ]
 
 
 def test_no_targeting_table_exists(migrated) -> None:

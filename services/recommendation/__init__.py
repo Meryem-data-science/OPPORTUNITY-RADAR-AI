@@ -1,4 +1,4 @@
-"""Phase 9A — the personalized recommendation engine, v1.
+"""Phase 9 — the personalized recommendation engine, and its storage layer.
 
 Phase 8 answers *what is this opportunity*. This package answers the other half:
 
@@ -33,8 +33,27 @@ document, and refitting TF-IDF merely to discover one is not something this phas
 may do. That one gap is documented rather than papered over, and closing it
 belongs with Matching, not here.
 
-What 9A deliberately does **not** do: **this package** persists nothing,
-migrates nothing, exposes no HTTP route and changes no page.
+What 9A deliberately does **not** do: **the engine** persists nothing, reads
+nothing it was not handed, and depends on no clock.
+
+Phase 9B.1 adds a storage layer beside it, and the boundary between the two is
+the point of the split:
+
+    engine 9A       pure, deterministic, read-only, id-free in its digests
+    persistence 9B  additive, append-only, and the only part that writes
+
+`persistence.py` receives a batch the engine already produced and never re-opens
+it: no score, no disposition, no reason and no ranking is recomputed there. What
+it adds is an **operational identity** — `recommendation_run_fingerprint`, in
+`persistence_fingerprint.py` — that carries the profile, the source matching run
+and the ranked opportunity ids that `recommendation_batch_fingerprint`
+deliberately excludes. The content digest of 9A is untouched and must stay that
+way; the two answer different questions and neither may stand in for the other.
+
+Still absent, and belonging to later sub-phases: the public read model and the
+persistence audit (9B.2), the freshness → compute → persist orchestration and the
+INCOMPLETE state (9B.3). This package still exposes no HTTP route and changes no
+page.
 
 **Matching v1's scoring contract is untouched**, which is what makes the
 recommendation a controlled evolution of that baseline rather than a second
@@ -58,6 +77,9 @@ recommendation score. Runs persisted before it stay readable and auditable.
     engine.py          the score, the disposition, the ranking, pure
     fingerprint.py     canonical payloads and their SHA-256 digests
     input_assembly.py  read-only assembly out of SQLite, and its readiness
+
+    persistence_fingerprint.py  the operational identity of a stored run
+    persistence.py              atomic, append-only, idempotent storage
 """
 
 from services.recommendation.engine import (
@@ -135,6 +157,16 @@ from services.recommendation.models import (
     SemanticComponent,
     WorkModeSignal,
 )
+from services.recommendation.persistence import (
+    RecommendationPersistenceError,
+    RecommendationStoreResult,
+    store_recommendation_batch,
+)
+from services.recommendation.persistence_fingerprint import (
+    RECOMMENDATION_PERSISTENCE_VERSION,
+    canonical_recommendation_run_payload,
+    recommendation_run_fingerprint,
+)
 
 __all__ = [
     "CONFIRMED_GAP_CODES",
@@ -145,6 +177,7 @@ __all__ = [
     "FINE_DOMAIN_BRIDGE_VERSION",
     "RECOMMENDATION_ENGINE_VERSION",
     "RECOMMENDATION_INPUT_ASSEMBLY_VERSION",
+    "RECOMMENDATION_PERSISTENCE_VERSION",
     "RECOMMENDATION_RULES_VERSION",
     "REQUIRED_SKILL_WEIGHT",
     "SEMANTIC_WEIGHT",
@@ -175,11 +208,13 @@ __all__ = [
     "RecommendationInputRecord",
     "RecommendationMatchingSnapshot",
     "RecommendationOpportunityContext",
+    "RecommendationPersistenceError",
     "RecommendationReadinessIssue",
     "RecommendationReadinessIssueCode",
     "RecommendationReadinessStatus",
     "RecommendationReasonCode",
     "RecommendationSkillEvidence",
+    "RecommendationStoreResult",
     "RequiredSkillComponent",
     "SemanticComponent",
     "WorkModeSignal",
@@ -193,6 +228,7 @@ __all__ = [
     "build_skill_evidence",
     "canonical_recommendation_assessment_payload",
     "canonical_recommendation_batch_payload",
+    "canonical_recommendation_run_payload",
     "current_location_signature",
     "current_semantic_binding_fingerprint",
     "current_semantic_corpus_fingerprint",
@@ -202,4 +238,6 @@ __all__ = [
     "recommendation_assessment_fingerprint",
     "recommendation_batch_fingerprint",
     "recommendation_disposition",
+    "recommendation_run_fingerprint",
+    "store_recommendation_batch",
 ]

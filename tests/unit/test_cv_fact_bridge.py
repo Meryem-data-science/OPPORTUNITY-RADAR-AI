@@ -324,6 +324,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0023_application_tracking.sql",
         "0024_opportunity_location_resolutions.sql",
         "0025_opportunity_fine_classification.sql",
+        "0026_recommendation_persistence.sql",
     ]
 
 
