@@ -290,12 +290,18 @@ stale.
   50/30/20 weights and spends the domain weight exactly once, on the fine
   reading when it can be bridged honestly and on the persisted coarse one
   otherwise. Every upstream it reads is first checked against that phase's own
-  freshness evidence — Matching's persistence audit and component fingerprints,
-  Phase 7's `(location fingerprint, resolver version)` pair, Phase 3.6's input
-  digest — so a stale `INELIGIBLE` is never published as a blocker and a stale
-  projection never as `OUT_OF_TARGET`. It classifies nothing, recomputes no
-  verdict, repairs nothing, and persists nothing: no table, no migration, no
-  route.
+  freshness evidence — Matching's persistence audit, its component fingerprints
+  and its semantic corpus digest, Phase 8's `(input fingerprint, classifier
+  version, fine classifier version)` triple, Phase 7's `(location fingerprint,
+  resolver version)` pair, Phase 3.6's input digest — so a stale `INELIGIBLE` is
+  never published as a blocker, a stale projection never as `OUT_OF_TARGET`, and
+  a domain is never read off a classification of text the posting no longer
+  carries. One freshness question is deliberately still open and documented:
+  opportunity-side semantic drift is now caught by the corpus digest, but
+  profile-side semantic-document drift is not, because Matching v1 persists no
+  standalone fingerprint of it and refitting TF-IDF to find out is not this
+  phase's job. It classifies nothing, recomputes no verdict, repairs nothing,
+  and persists nothing: no table, no migration, no route.
 - `evaluation/`: the Phase 7C.1 coverage-evaluation foundation — the declared,
   versioned universe of Morocco PFE/stage sources we want to be measured
   against, and a gold benchmark of real opportunities observed on them. Nothing

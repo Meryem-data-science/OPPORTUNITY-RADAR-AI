@@ -5,6 +5,9 @@ The per-opportunity branches are exercised against a real SQLite database in
 whole-cohort refusals, which short-circuit before any row is read.
 """
 
+import ast
+import pathlib
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +26,9 @@ from services.recommendation import (
     RecommendationReadinessIssueCode,
     RecommendationReadinessStatus,
     assemble_recommendation_inputs,
+    current_semantic_corpus_fingerprint,
 )
+from tests.unit.recommendation_fixtures import opportunity
 
 PROFILE_ID = 7
 
@@ -215,3 +220,112 @@ def test_an_unauditable_matching_persistence_stops_the_cohort(monkeypatch):
     assert codes(result) == [
         RecommendationReadinessIssueCode.MATCHING_PERSISTENCE_INVALID
     ]
+
+
+# --------------------------------------------------------------------------
+# the two cohort-wide freshness proofs, as pure functions
+# --------------------------------------------------------------------------
+
+
+def test_the_corpus_fingerprint_sees_content_and_not_the_cohort_membership():
+    """Identical ids over edited documents must not fingerprint identically."""
+    cohort = (opportunity(opportunity_id=1), opportunity(opportunity_id=2))
+    edited = (
+        opportunity(opportunity_id=1),
+        replace(opportunity(opportunity_id=2), description="something else entirely"),
+    )
+    assert [item.opportunity_id for item in cohort] == [
+        item.opportunity_id for item in edited
+    ]
+    assert current_semantic_corpus_fingerprint(
+        cohort
+    ) != current_semantic_corpus_fingerprint(edited)
+
+
+def test_the_corpus_fingerprint_ignores_the_order_the_cohort_was_read_in():
+    cohort = (opportunity(opportunity_id=1), opportunity(opportunity_id=2))
+    assert current_semantic_corpus_fingerprint(
+        cohort
+    ) == current_semantic_corpus_fingerprint(tuple(reversed(cohort)))
+
+
+def test_the_corpus_fingerprint_is_a_sha256_and_repeats_exactly():
+    cohort = (opportunity(opportunity_id=1),)
+    first = current_semantic_corpus_fingerprint(cohort)
+    assert first == current_semantic_corpus_fingerprint(cohort)
+    assert len(first) == 64 and set(first) <= set("0123456789abcdef")
+
+
+def _referenced_names(module: str) -> set[str]:
+    """Every identifier the module's **code** uses, prose excluded.
+
+    Parsed rather than grepped on purpose: these files explain in their
+    docstrings exactly which functions they refuse to call, and a substring
+    search cannot tell an explanation from a call.
+    """
+    tree = ast.parse(pathlib.Path(module).read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def test_the_assembly_never_calls_a_tfidf_entry_point():
+    """A static counterpart to the monkeypatched integration test.
+
+    The corpus proof is a canonical document digest. Nothing in this package may
+    fit a vectorizer, score a similarity, or reach for sklearn at all.
+    """
+    for name in ("input_assembly", "engine", "models", "fine_domain", "fingerprint"):
+        referenced = _referenced_names(f"services/recommendation/{name}.py")
+        for forbidden in (
+            "fit_tfidf_corpus",
+            "score_profile_against_tfidf_corpus",
+            "score_matching_input_semantic_similarity",
+            "fit_transform",
+            "TfidfVectorizer",
+        ):
+            assert forbidden not in referenced, f"{name}.py uses {forbidden}"
+        assert not any(item.startswith("sklearn") for item in referenced), name
+
+
+def test_the_phase_8_provenance_check_reuses_persistence_and_runs_no_classifier():
+    """The check must mirror `persist_qualifications`, not restate it.
+
+    Phase 8 leaves a row alone exactly when its stored triple equals this one, so
+    the assembly imports that function and those two constants rather than
+    hashing the same five fields a second way.
+    """
+    referenced = _referenced_names("services/recommendation/input_assembly.py")
+    assert {
+        "services.collector.qualification.persistence",
+        "input_fingerprint",
+        "CLASSIFIER_VERSION",
+        "FINE_CLASSIFIER_VERSION",
+    } <= referenced
+    # Read-only: neither classifier, nor the persistence that writes their rows.
+    for forbidden in (
+        "persist_qualifications",
+        "persist_configured_qualifications",
+        "classify_opportunity",
+        "classify_fine_categories",
+    ):
+        assert forbidden not in referenced
+
+
+def test_the_provenance_check_compares_exactly_the_persisted_triple():
+    """The three columns compared are the three `0025` reconciles on."""
+    source = pathlib.Path("services/recommendation/input_assembly.py").read_text(
+        encoding="utf-8"
+    )
+    query = source[source.index("SELECT input_fingerprint, classifier_version") :]
+    assert "fine_classifier_version" in query.split("FROM")[0]
+    assert "opportunity_qualifications" in query.split("WHERE")[0]

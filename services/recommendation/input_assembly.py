@@ -18,6 +18,16 @@ primitives — never a rule invented here:
                            run the profile currently points at. A corrupt
                            historical run is somebody else's problem; a corrupt
                            current run is this one's.
+    Qualification          the persisted Phase 8 row's `(input_fingerprint,
+                           classifier_version, fine_classifier_version)` must
+                           equal what `persist_qualifications` would leave
+                           alone: Phase 8's own `input_fingerprint` over the
+                           posting's fields today, plus the two rule versions
+                           running now. No classifier runs.
+    Matching semantic      the current postings must still produce the corpus
+                           the run was fitted over — `semantic_corpus_fingerprint`
+                           of their current documents against the persisted
+                           `run.corpus_fingerprint`. No TF-IDF is fitted.
     Matching structured    the recomputed `role-domain-preferences-v2` result
                            must fingerprint to the snapshot's own
                            `domain.upstream_fingerprint`.
@@ -35,9 +45,19 @@ primitives — never a rule invented here:
 Any of those failing makes the cohort `INCOMPLETE` with **no records at all**.
 That is deliberate on both counts: a stale `INELIGIBLE` must never be published
 as a `KNOWN_BLOCKER`, a stale projection must never be published as
-`OUT_OF_TARGET`, and a half-assembled cohort would rank an opportunity against a
-corpus missing its competitors. Nothing is resynchronized to fix it — an
-operator runs the phase that owns the data.
+`OUT_OF_TARGET`, a domain must never be read off a classification of text the
+posting no longer carries, and a half-assembled cohort would rank an opportunity
+against a corpus missing its competitors. Nothing is resynchronized to fix it —
+an operator runs the phase that owns the data.
+
+Two of the checks are cohort-wide and run before any assessment is assembled:
+qualification provenance, then the semantic corpus it lets us believe. The rest
+are per-posting. Note that the qualification check is stricter than the *public*
+read model on purpose: `fine_read_model` still reports a NULL fine classifier
+version as the documented legacy state, because that is a true statement about a
+row, and `/api/opportunities` is unchanged. A row nothing has fine-classified is
+simply not a *current* Phase 8 projection, and recommending a domain off it would
+be using Phase 8 as though it had run.
 
 The shape follows `services/priority/input_assembly.py` — a readiness status, a
 list of explicit issues, a stable order, no partial output. Two of its rules are
@@ -85,8 +105,10 @@ from services.collector.matching import (
     build_skill_fit,
     load_opportunity_matching_input,
     load_profile_matching_input,
+    build_opportunity_semantic_document,
     read_current_matching,
     select_matching_opportunity_ids,
+    semantic_corpus_fingerprint,
     skill_fit_fingerprint,
 )
 from services.collector.matching.skill_fit import SkillFitInputError
@@ -96,10 +118,14 @@ from services.collector.matching.role_domain_preferences import (
 from services.collector.matching.role_domain_preferences_fingerprint import (
     role_domain_preferences_fingerprint,
 )
+from services.collector.matching.models import MatchingOpportunityInput
+from services.collector.qualification.classifier import CLASSIFIER_VERSION
+from services.collector.qualification.fine_classifier import FINE_CLASSIFIER_VERSION
 from services.collector.qualification.fine_read_model import (
     FineClassificationDecodeError,
     decode_fine_classification,
 )
+from services.collector.qualification.persistence import input_fingerprint
 from services.digital_twin.preferences.models import OpportunityPreferences
 from services.digital_twin.preferences.repository import get_profile_preferences
 from services.eligibility.fingerprint import eligibility_fingerprint
@@ -137,6 +163,7 @@ __all__ = [
     "RECOMMENDATION_INPUT_ASSEMBLY_VERSION",
     "RecommendationInputAssemblyResult",
     "current_location_signature",
+    "current_semantic_corpus_fingerprint",
     "RecommendationInputRecord",
     "RecommendationOpportunityContext",
     "RecommendationReadinessIssue",
@@ -162,6 +189,9 @@ class RecommendationReadinessIssueCode(StrEnum):
     MATCHING_PERSISTENCE_INVALID = "MATCHING_PERSISTENCE_INVALID"
     #: The recomputed role/domain/preference alignment no longer fingerprints to
     #: the one the snapshot was built from.
+    #: The persisted semantic corpus was fitted over documents the current
+    #: postings no longer produce, even though the cohort's ids did not move.
+    STALE_MATCHING_SEMANTIC_CORPUS = "STALE_MATCHING_SEMANTIC_CORPUS"
     STALE_MATCHING_SNAPSHOT = "STALE_MATCHING_SNAPSHOT"
     #: The recomputed skill fit no longer fingerprints to the one the snapshot's
     #: required-skill ratio was computed from.
@@ -169,6 +199,9 @@ class RecommendationReadinessIssueCode(StrEnum):
     OPPORTUNITY_MISSING = "OPPORTUNITY_MISSING"
     INVALID_MATCHING_PAYLOAD = "INVALID_MATCHING_PAYLOAD"
     FINE_CLASSIFICATION_INVALID = "FINE_CLASSIFICATION_INVALID"
+    #: The persisted Phase 8 row was derived from other opportunity fields, or
+    #: by another coarse or fine rule system, than the ones running now.
+    QUALIFICATION_PROJECTION_STALE = "QUALIFICATION_PROJECTION_STALE"
     #: A Phase 7 projection that no longer reads the posting's current location
     #: rows, or reads them under another resolver version.
     GEOGRAPHY_PROJECTION_STALE = "GEOGRAPHY_PROJECTION_STALE"
@@ -450,6 +483,79 @@ def _current_eligibility_signature(
     return current.engine_version, eligibility_fingerprint(current)
 
 
+def _qualification_is_current(
+    connection: sqlite3.Connection, opportunity_id: int
+) -> str | None:
+    """Return why the Phase 8 row is stale, or None when it is current.
+
+    Phase 8's persistence defines what "current" means, in one line of
+    `persist_qualifications`: a row is left alone exactly when its stored
+    `(input_fingerprint, classifier_version, fine_classifier_version)` equals the
+    fingerprint of the posting's fields today plus the two versions running now.
+    That triple is restated here by **calling Phase 8's own**
+    `input_fingerprint` and importing its two version constants, so this check
+    cannot drift from the reconciliation it mirrors.
+
+    Nothing is classified and nothing is written: `persist_qualifications` is not
+    called, and a stale row is reported rather than refreshed.
+    """
+    row = connection.execute(
+        """SELECT canonical_title, description, source_url, application_url,
+                  canonical_url FROM opportunities WHERE id = ?""",
+        (opportunity_id,),
+    ).fetchone()
+    if row is None:
+        return "the opportunity no longer exists"
+    expected = (input_fingerprint(*row), CLASSIFIER_VERSION, FINE_CLASSIFIER_VERSION)
+    stored = connection.execute(
+        """SELECT input_fingerprint, classifier_version, fine_classifier_version
+             FROM opportunity_qualifications WHERE opportunity_id = ?""",
+        (opportunity_id,),
+    ).fetchone()
+    if stored is None:
+        return "it has no qualification row"
+    stored = tuple(stored)
+    if stored == expected:
+        return None
+    if stored[1] != CLASSIFIER_VERSION:
+        return (
+            f"it was classified by {stored[1]!r}, and {CLASSIFIER_VERSION!r} is "
+            f"running"
+        )
+    if stored[2] != FINE_CLASSIFIER_VERSION:
+        # NULL is the documented legacy state, and it is still a valid *public*
+        # read — see `fine_read_model`. It is not a current projection, which is
+        # a stricter question and the only one asked here.
+        return (
+            "its fine classification is not recorded"
+            if stored[2] is None
+            else f"it was fine-classified by {stored[2]!r}, and "
+            f"{FINE_CLASSIFIER_VERSION!r} is running"
+        )
+    return "it was classified from other opportunity fields"
+
+
+def current_semantic_corpus_fingerprint(
+    opportunities: Sequence[MatchingOpportunityInput],
+) -> str:
+    """The corpus fingerprint the current postings would produce, read-only.
+
+    `fit_tfidf_corpus` computes exactly this, with exactly this function, before
+    it fits anything — so comparing it to the persisted `run.corpus_fingerprint`
+    proves the stored percentiles were ranked against the documents the postings
+    produce **today**, without fitting a vectorizer, touching sklearn, or scoring
+    a single similarity.
+
+    The payload is an order-insensitive multiset of document hashes carrying no
+    opportunity id, which is the point: an unchanged cohort whose titles or
+    descriptions moved produces a different fingerprint, and that is the drift
+    the cohort-id check cannot see.
+    """
+    return semantic_corpus_fingerprint(
+        tuple(build_opportunity_semantic_document(item) for item in opportunities)
+    )
+
+
 def assemble_recommendation_inputs(
     connection: sqlite3.Connection, profile_id: int
 ) -> RecommendationInputAssemblyResult:
@@ -651,6 +757,67 @@ def assemble_recommendation_inputs(
     for source in load_location_sources(connection):
         sources_by_opportunity.setdefault(source.opportunity_id, []).append(source)
 
+    # Two cohort-wide preflights, in this order, before a single assessment is
+    # assembled. Both are all-or-nothing: the second reads the whole corpus, and
+    # the first decides whether that corpus may be believed at all.
+    #
+    # The opportunity inputs are loaded once here and reused by the loop below,
+    # so proving the corpus costs no extra read.
+    opportunity_inputs: dict[int, MatchingOpportunityInput] = {}
+    qualification_issues: list[RecommendationReadinessIssue] = []
+    for opportunity_id in persisted_ids:
+        stale_qualification = _qualification_is_current(connection, opportunity_id)
+        if stale_qualification is not None:
+            qualification_issues.append(
+                _issue(
+                    RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE,
+                    f"opportunity {opportunity_id} has a stale Phase 8 "
+                    f"classification: {stale_qualification}; synchronize "
+                    f"Qualification first",
+                    opportunity_id,
+                )
+            )
+            continue
+        try:
+            opportunity_inputs[opportunity_id] = load_opportunity_matching_input(
+                connection, opportunity_id
+            )
+        except MatchingInputError as error:
+            qualification_issues.append(
+                _issue(
+                    RecommendationReadinessIssueCode.OPPORTUNITY_MISSING,
+                    f"opportunity {opportunity_id} was not found: {error}",
+                    opportunity_id,
+                )
+            )
+    if qualification_issues:
+        return _incomplete(profile_id, qualification_issues, user_id, run.run_id)
+
+    # The cohort's ids can be identical while a posting's title or description
+    # has moved, and the persisted percentiles were then ranked against a corpus
+    # nobody would produce now. This compares the fingerprint Matching itself
+    # computes before fitting; nothing is fitted, scored or refreshed here.
+    # A READY run always carries at least one assessment — `build_matching_assessments`
+    # refuses an empty corpus — so the guard is for a database that contradicts
+    # that: it answers with a readiness issue rather than a bare ValueError.
+    if not opportunity_inputs or (
+        current_semantic_corpus_fingerprint(tuple(opportunity_inputs.values()))
+        != run.corpus_fingerprint
+    ):
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_CORPUS,
+                    "the current postings no longer produce the semantic corpus "
+                    "the persisted percentiles were ranked against; synchronize "
+                    "Matching first",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
+
     issues: list[RecommendationReadinessIssue] = []
     records: list[RecommendationInputRecord] = []
     for assessment in run.assessments:
@@ -682,9 +849,7 @@ def assemble_recommendation_inputs(
             )
             continue
         try:
-            opportunity_input = load_opportunity_matching_input(
-                connection, opportunity_id
-            )
+            opportunity_input = opportunity_inputs[opportunity_id]
             matching_input = MatchingInput(profile_input, opportunity_input)
             structured = build_role_domain_preference_signals(matching_input)
             # Recomputed for its per-skill detail only. The ratio that reaches

@@ -22,6 +22,7 @@ The flow under test is:
 import hashlib
 
 import pytest
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 from services.collector.database.connection import (
     connect_database,
@@ -34,7 +35,18 @@ from services.collector.extractors.opportunity_constraints.requirements.service 
 from services.collector.extractors.opportunity_constraints.service import (
     synchronize_opportunity_constraints,
 )
-from services.collector.matching import sync_matching
+from services.collector.matching import (
+    load_opportunity_matching_input,
+    read_current_matching,
+    select_matching_opportunity_ids,
+    sync_matching,
+)
+from services.collector.qualification.classifier import CLASSIFIER_VERSION
+from services.collector.qualification.fine_classifier import FINE_CLASSIFIER_VERSION
+from services.collector.qualification.fine_read_model import (
+    UNCLASSIFIED,
+    decode_fine_classification,
+)
 from services.collector.qualification.fine_taxonomy import FineCategory
 from services.collector.qualification.persistence import persist_qualifications
 from services.digital_twin.preferences.models import (
@@ -71,6 +83,7 @@ from services.recommendation import (
     RecommendationReadinessStatus,
     RecommendationReasonCode,
     assemble_recommendation_inputs,
+    current_semantic_corpus_fingerprint,
     build_recommendation_batch,
 )
 
@@ -881,3 +894,235 @@ def test_declared_constraints_are_shown_read_and_never_interpreted(tmp_path):
         # But the explanation changed, so the digest has to change with it.
         assert assessment.assessment_fingerprint != reference.assessment_fingerprint
     assert after.batch_fingerprint != before.batch_fingerprint
+
+
+# --------------------------------------------------------------------------
+# Phase 8 qualification freshness: a domain is never read off a classification
+# of text the posting no longer carries
+# --------------------------------------------------------------------------
+
+
+def test_an_edited_posting_without_a_qualification_resync_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    # A Phase 8 input moved. The stored row still says CORE_TARGET / DATA_SCIENCE
+    # about a description nobody would classify that way now, and the domain
+    # component would be read straight off it.
+    connection.execute(
+        "UPDATE opportunities SET description = ? WHERE id = ?",
+        ("A completely different posting about warehouse logistics.", ids["strong"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+    assert assembly.issues[0].opportunity_id == ids["strong"]
+    assert "other opportunity fields" in assembly.issues[0].message
+
+
+@pytest.mark.parametrize(
+    "title_change", [True, False], ids=["canonical_title", "description"]
+)
+def test_any_phase_8_input_field_moving_is_enough_to_stop_the_cohort(
+    tmp_path, title_change
+):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    column = "canonical_title" if title_change else "description"
+    connection.execute(
+        f"UPDATE opportunities SET {column} = {column} || ? WHERE id = ?",
+        (" (updated)", ids["unknown_eligibility"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+
+
+def test_a_stale_coarse_classifier_version_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE opportunity_qualifications SET classifier_version = ? "
+        "WHERE opportunity_id = ?",
+        ("qualification-rules-v1", ids["blocked"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+    assert CLASSIFIER_VERSION in assembly.issues[0].message
+
+
+def test_a_stale_fine_classifier_version_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE opportunity_qualifications SET fine_classifier_version = ? "
+        "WHERE opportunity_id = ?",
+        ("fine-data-ai-rules-v1", ids["strong"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+    assert FINE_CLASSIFIER_VERSION in assembly.issues[0].message
+
+
+def test_the_legacy_null_fine_version_is_a_valid_public_read_and_a_stale_input(
+    tmp_path,
+):
+    """The two questions are different, and this pins both answers on one row.
+
+    `fine_read_model` reports a NULL fine classifier version as the documented
+    "never fine-classified" state, because that is a true statement about the
+    row and the public contract depends on it. Recommendation readiness asks a
+    stricter question — *is this a current Phase 8 projection* — and a row
+    nothing has fine-classified is not one.
+    """
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        """UPDATE opportunity_qualifications
+              SET fine_primary_category = NULL,
+                  fine_secondary_categories_json = NULL,
+                  fine_category_evidence_json = NULL,
+                  fine_reasons_json = NULL,
+                  fine_classifier_version = NULL
+            WHERE opportunity_id = ?""",
+        (ids["strong"],),
+    )
+    connection.commit()
+
+    # The public read model still answers, exactly as Phase 8C documents.
+    row = connection.execute(
+        """SELECT qualification, fine_primary_category,
+                  fine_secondary_categories_json, fine_category_evidence_json,
+                  fine_reasons_json, fine_classifier_version
+             FROM opportunity_qualifications WHERE opportunity_id = ?""",
+        (ids["strong"],),
+    ).fetchone()
+    assert decode_fine_classification(*row) is UNCLASSIFIED
+
+    # Recommendation does not, and says why.
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+    assert "not recorded" in assembly.issues[0].message
+
+
+def test_a_valid_unbridgeable_fine_category_still_uses_the_coarse_fallback(corpus):
+    """Stale provenance is refused; the fine-or-coarse fallback is untouched."""
+    connection, _, identity, ids, _ = corpus
+    assembly, batch = assemble_and_rank(connection, identity.profile_id)
+    result = by_id(batch)[ids["unbridged_fine"]]
+    assert assembly.status is RecommendationReadinessStatus.READY
+    assert result.domain.fine_primary_category is FineCategory.NLP
+    assert result.domain.fine_classifier_version == FINE_CLASSIFIER_VERSION
+    assert result.domain.source is DomainFitSource.COARSE
+
+
+# --------------------------------------------------------------------------
+# Matching semantic corpus freshness: the same ids over different documents
+# --------------------------------------------------------------------------
+
+#: Prose carrying no catalogue skill, no requirement heading and no Data/AI
+#: signal, so it moves the semantic document and nothing else.
+NEUTRAL_SENTENCE = " Cette annonce a ete relue par notre equipe interne."
+
+
+def test_a_content_edit_the_cohort_ids_cannot_see_stops_the_cohort(tmp_path):
+    connection, _, identity, ids, matching = build_corpus(tmp_path)
+    before = set(select_matching_opportunity_ids(connection))
+
+    connection.execute(
+        "UPDATE opportunities SET description = description || ? WHERE id = ?",
+        (NEUTRAL_SENTENCE, ids["strong"]),
+    )
+    connection.commit()
+    # Phase 8 is brought back to current, so its freshness check passes and this
+    # test is about the semantic corpus alone.
+    persist_qualifications(connection)
+    # Matching is deliberately NOT resynchronized.
+
+    assert set(select_matching_opportunity_ids(connection)) == before
+    stale = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert stale.status is RecommendationReadinessStatus.INCOMPLETE
+    assert stale.records == ()
+    assert [issue.code for issue in stale.issues] == [
+        RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_CORPUS
+    ]
+
+    # Resynchronizing Matching — on this temporary database, by the phase that
+    # owns the corpus — is what makes it readable again.
+    resynced = sync_matching(connection, identity.profile_id)
+    ready, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert resynced.run_id != matching.run_id
+    assert ready.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)
+
+
+def test_the_qualification_and_corpus_edits_are_independent_signals(tmp_path):
+    """Without the Phase 8 resync, the same edit is caught one step earlier."""
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE opportunities SET description = description || ? WHERE id = ?",
+        (NEUTRAL_SENTENCE, ids["strong"]),
+    )
+    connection.commit()
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+    ]
+
+
+def test_the_assembly_fits_no_tfidf_and_scores_no_similarity(tmp_path, monkeypatch):
+    """The corpus proof is a document digest, not a model.
+
+    Every entry point that would fit a vectorizer or score a similarity is
+    replaced by something that fails loudly, and the whole assembly still runs
+    to READY — including the new corpus fingerprint check.
+    """
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("recommendation assembly must not fit or score TF-IDF")
+
+    for target in (
+        "services.collector.matching.tfidf_similarity.fit_tfidf_corpus",
+        "services.collector.matching.tfidf_similarity.score_profile_against_tfidf_corpus",
+        "services.collector.matching.tfidf_similarity.score_matching_input_semantic_similarity",
+    ):
+        monkeypatch.setattr(target, forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "fit", forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "fit_transform", forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "transform", forbidden)
+
+    assembly, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)
+
+
+def test_the_corpus_fingerprint_is_the_one_matching_persisted(corpus):
+    connection, _, identity, ids, matching = corpus
+    inputs = tuple(
+        load_opportunity_matching_input(connection, opportunity_id)
+        for opportunity_id in select_matching_opportunity_ids(connection)
+    )
+    run = read_current_matching(connection, identity.profile_id).current_run
+    assert current_semantic_corpus_fingerprint(inputs) == run.corpus_fingerprint
+    assert run.corpus_fingerprint == matching.corpus_fingerprint
