@@ -33,11 +33,25 @@ document, and refitting TF-IDF merely to discover one is not something this phas
 may do. That one gap is documented rather than papered over, and closing it
 belongs with Matching, not here.
 
-What 9A deliberately does **not** do: it persists nothing, migrates nothing,
-exposes no HTTP route and changes no page. It also leaves Matching v1 exactly as
-it was — same weights, same versions, same snapshots — because the recommendation
-is a controlled evolution of that baseline rather than a second layer of bonuses
-stacked on top of `match_quality`.
+What 9A deliberately does **not** do: **this package** persists nothing,
+migrates nothing, exposes no HTTP route and changes no page.
+
+**Matching v1's scoring contract is untouched**, which is what makes the
+recommendation a controlled evolution of that baseline rather than a second
+layer of bonuses stacked on top of `match_quality`: the same 50/30/20 weights,
+the same `MATCHING_ENGINE_VERSION`, `MATCHING_RULES_VERSION`,
+`SEMANTIC_PERCENTILE_VERSION`, `MATCHING_SELECTION_VERSION` and
+`MATCHING_PERSISTENCE_VERSION`, the same TF-IDF configuration, and the same
+percentile and scoring behaviour.
+
+Matching did gain one **additive provenance** field, and it is not honest to
+call it unchanged. `SEMANTIC_BINDING_VERSION = "semantic-binding-v1"` and its
+`semantic_binding_fingerprint` are carried on a batch, stored inside the
+existing `matching_runs.batch_payload_json` envelope, and protected by the run
+fingerprint. No schema migration, no new column, no new table, and no value any
+score depends on: it exists so this package can prove each semantic document is
+still attached to the same posting, and it changes no Matching score and no
+recommendation score. Runs persisted before it stay readable and auditable.
 
     models.py          the vocabulary: versions, enums, immutable values
     fine_domain.py     the fine -> canonical-family bridge, and the fit
