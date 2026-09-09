@@ -42,12 +42,23 @@ CREATE TABLE recommendation_runs (
     -- `matching_runs` already carries `UNIQUE (id, profile_id)`, so the pair can
     -- be required and the database refuses the cross-profile row outright.
     --
-    -- RESTRICT, not CASCADE, and for the same reason Phase 6 gives its own
-    -- upstream references: a matching run that a recommendation cites is part
-    -- of that recommendation's provenance, and deleting it would silently
-    -- remove recommendation history that nobody asked to delete. Retiring a
-    -- profile still works — `profiles` cascades to both sides at once.
-    FOREIGN KEY (source_matching_run_id, profile_id) REFERENCES matching_runs(id, profile_id) ON DELETE RESTRICT
+    -- Not CASCADE, and for the same reason Phase 6 protects its own upstream
+    -- references: a matching run that a recommendation cites is part of that
+    -- recommendation's provenance, and deleting it would silently remove
+    -- recommendation history that nobody asked to delete. Deleting a cited
+    -- matching run directly is therefore refused.
+    --
+    -- NO ACTION rather than RESTRICT, and the difference is not cosmetic.
+    -- SQLite evaluates RESTRICT *immediately*, as soon as the parent row is
+    -- touched, while NO ACTION is evaluated once the whole statement has
+    -- settled. Retiring a profile deletes `matching_runs` and
+    -- `recommendation_runs` through two separate cascades from `profiles`, and
+    -- under RESTRICT that statement only survives because the recommendation
+    -- side happens to be cascaded first. Nothing in SQLite promises that
+    -- ordering. NO ACTION states the same refusal without depending on it: at
+    -- the end of the statement either an orphan exists — refused — or the
+    -- cascades removed both sides together, in whichever order they ran.
+    FOREIGN KEY (source_matching_run_id, profile_id) REFERENCES matching_runs(id, profile_id) ON DELETE NO ACTION
 );
 
 CREATE TABLE recommendation_assessments (

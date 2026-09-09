@@ -103,10 +103,10 @@ def make_batch(profile_id: int, opportunity_ids, scores=None):
 def resealed(batch):
     """Re-digest a mutated batch so it is coherent *as a batch*.
 
-    Some mutations below target a check that lives past the batch-fingerprint
-    gate. Leaving the old digest in place would trip that gate first and the
-    test would prove nothing about the check it names, so the content digest is
-    recomputed and the deeper refusal is the one under test.
+    Without this the mutant would also carry a stale content digest, and a test
+    could pass because some other gate tripped rather than the check it names.
+    Re-sealing makes the batch self-consistent everywhere except the one defect
+    under test, so the refusal is provably that defect's.
     """
     return replace(batch, batch_fingerprint=recommendation_batch_fingerprint(batch))
 
@@ -482,7 +482,7 @@ def test_a_ranking_the_engine_would_not_have_produced_is_refused(ready):
         ),
         (
             "an assessment with no posting",
-            "operational ID mismatch",
+            "assessment opportunity_id must be a positive integer",
             lambda batch: replace(
                 batch,
                 assessments=(replace(batch.assessments[0], opportunity_id=0),)
@@ -513,6 +513,127 @@ def test_a_batch_that_contradicts_itself_is_refused_before_any_write(
         assert (
             ready.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         )
+
+
+# --------------------------------------------------------------------------
+# The validation boundary: structure and operational types come first
+# --------------------------------------------------------------------------
+#
+# `store_recommendation_batch` claims to trust no dataclass it is handed. Two
+# things could quietly break that claim, and each has a test below.
+#
+# First, every canonical payload and every recomputed digest walks the batch and
+# reads its assessments. Run one of those before proving the objects *are*
+# assessments and a malformed batch escapes as an `AttributeError` from inside
+# Phase 9A rather than as a refusal from this boundary.
+#
+# Second, `True` is an `int` in Python and `True == 1`. A profile whose id is 1 —
+# which the fixture's profile is, and the tests assert it — would then accept a
+# batch whose `profile_id` is `True`, and a one-assessment batch would accept
+# `assessment_count=True`. Both are equality passing for a type check.
+
+
+def test_the_fixture_profile_is_the_one_that_makes_the_boolean_tests_bite(ready):
+    """`True == 1`, so these tests only prove anything against profile id 1."""
+    assert ready.profile_id == 1
+
+
+def assert_nothing_was_written(connection):
+    for table in (
+        "recommendation_runs",
+        "recommendation_assessments",
+        "recommendation_profile_state",
+    ):
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_an_item_that_is_not_an_assessment_is_refused_not_crashed_on(ready):
+    """The refusal must be this layer's, not an AttributeError from 9A."""
+    batch = ready.batch()
+    smuggled = replace(batch, assessments=(object(),), assessment_count=1)
+
+    with pytest.raises(RecommendationPersistenceError, match="RecommendationAssessment"):
+        ready.store(smuggled)
+    assert_nothing_was_written(ready.connection)
+
+
+def test_an_item_that_is_not_an_assessment_never_reaches_a_payload_builder(ready):
+    """No digest is recomputed over a batch whose items are unproven.
+
+    An object with no assessment attributes at all would raise `AttributeError`
+    the moment `recommendation_batch_fingerprint` walked it, so reaching the
+    contract error at all is the evidence that no payload builder ran first.
+    """
+
+    class NotAnAssessment:
+        def __getattr__(self, name):  # pragma: no cover - must never be called
+            raise AssertionError(f"the boundary read {name!r} before type-checking")
+
+    batch = ready.batch()
+    smuggled = replace(batch, assessments=(NotAnAssessment(),), assessment_count=1)
+
+    with pytest.raises(RecommendationPersistenceError, match="RecommendationAssessment"):
+        ready.store(smuggled)
+    assert_nothing_was_written(ready.connection)
+
+
+def test_a_boolean_batch_profile_id_is_refused_even_though_it_equals_one(ready):
+    batch = ready.batch()
+    assert batch.profile_id == ready.profile_id == 1
+    lying = replace(batch, profile_id=True)
+    # Python would let this through on equality alone.
+    assert lying.profile_id == ready.profile_id
+
+    with pytest.raises(
+        RecommendationPersistenceError, match="batch profile_id must be a positive integer"
+    ):
+        ready.store(lying)
+    assert_nothing_was_written(ready.connection)
+
+
+def test_a_boolean_assessment_profile_id_is_refused_even_though_it_equals_one(ready):
+    batch = ready.batch()
+    lying = replace(
+        batch,
+        assessments=(replace(batch.assessments[0], profile_id=True),)
+        + batch.assessments[1:],
+    )
+    assert lying.assessments[0].profile_id == ready.profile_id
+
+    with pytest.raises(
+        RecommendationPersistenceError,
+        match="assessment profile_id must be a positive integer",
+    ):
+        ready.store(lying)
+    assert_nothing_was_written(ready.connection)
+
+
+def test_a_boolean_assessment_count_is_refused_even_when_the_digest_agrees(ready):
+    """A count of `True` equals the one assessment, and is still not a count.
+
+    The batch is re-sealed so its content digest genuinely covers the malformed
+    value: the refusal cannot be blamed on a stale fingerprint, only on `True`
+    not being a business integer.
+    """
+    single = ready.batch(ready.opportunity_ids[:1])
+    lying = resealed(replace(single, assessment_count=True))
+    assert lying.assessment_count == len(lying.assessments) == 1
+    assert recommendation_batch_fingerprint(lying) == lying.batch_fingerprint
+
+    with pytest.raises(
+        RecommendationPersistenceError,
+        match="batch assessment_count must be a positive integer",
+    ):
+        ready.store(lying)
+    assert_nothing_was_written(ready.connection)
+
+
+def test_assessments_must_arrive_as_a_tuple(ready):
+    batch = ready.batch()
+
+    with pytest.raises(RecommendationPersistenceError, match="non-empty tuple"):
+        ready.store(replace(batch, assessments=list(batch.assessments)))
+    assert_nothing_was_written(ready.connection)
 
 
 @pytest.mark.parametrize(

@@ -104,7 +104,26 @@ def _prepare(
     source_matching_run_fingerprint: str,
     input_assembly_version: str,
 ) -> tuple[list[tuple[RecommendationAssessment, str]], str, str]:
-    """Validate everything decidable without the database, and digest the run."""
+    """Validate everything decidable without the database, and digest the run.
+
+    The order below is part of the contract, not a matter of taste. Every
+    canonical payload and every digest recomputed here walks the batch and reads
+    its assessments' attributes, so each one *assumes* a valid structure. They
+    therefore run last: the structural and type checks come first, and a
+    malformed object is rejected as a `RecommendationPersistenceError` rather
+    than reaching a payload builder and surfacing as an `AttributeError` or a
+    `TypeError` from somewhere inside Phase 9A.
+
+        1. the arguments
+        2. the structure and the operational types, batch and assessments alike
+        3. the business content, which may now assume that structure
+
+    `True` is an `int` in Python and compares equal to `1`, so every operational
+    integer is checked with `_positive_int`, which refuses `bool` outright. A
+    profile whose id happens to be `1` must not be able to accept a batch whose
+    `profile_id` is `True` merely because the two compare equal.
+    """
+    # -- 1. the arguments ---------------------------------------------------
     if not _positive_int(profile_id):
         raise RecommendationPersistenceError("profile_id must be a positive integer")
     if not _positive_int(source_matching_run_id):
@@ -123,41 +142,62 @@ def _prepare(
         raise RecommendationPersistenceError(
             f"unexpected input assembly version: {input_assembly_version!r}"
         )
+
+    # -- 2. the structure, before anything reads the content ----------------
     if not isinstance(batch, RecommendationBatchResult):
         raise RecommendationPersistenceError(
             "batch must be a RecommendationBatchResult"
         )
+    if not _positive_int(batch.profile_id):
+        raise RecommendationPersistenceError(
+            "batch profile_id must be a positive integer"
+        )
     if batch.profile_id != profile_id:
         raise RecommendationPersistenceError("batch belongs to another profile")
-    if not batch.assessments or batch.assessment_count != len(batch.assessments):
+    if not isinstance(batch.assessments, tuple) or not batch.assessments:
         raise RecommendationPersistenceError(
-            "batch must be non-empty with an exact assessment_count"
+            "batch must hold a non-empty tuple of assessments"
         )
+    if not _positive_int(batch.assessment_count):
+        raise RecommendationPersistenceError(
+            "batch assessment_count must be a positive integer"
+        )
+    if batch.assessment_count != len(batch.assessments):
+        raise RecommendationPersistenceError(
+            "batch assessment_count does not match the assessments it carries"
+        )
+    for item in batch.assessments:
+        # Nothing below this line may read a business attribute of an item that
+        # has not been proven to be an assessment first.
+        if not isinstance(item, RecommendationAssessment):
+            raise RecommendationPersistenceError(
+                "batch must hold RecommendationAssessment values"
+            )
+        if not _positive_int(item.profile_id):
+            raise RecommendationPersistenceError(
+                "assessment profile_id must be a positive integer"
+            )
+        if not _positive_int(item.opportunity_id):
+            raise RecommendationPersistenceError(
+                "assessment opportunity_id must be a positive integer"
+            )
+        if item.profile_id != profile_id:
+            raise RecommendationPersistenceError("assessment operational ID mismatch")
+
+    # -- 3. the content, which may now assume the structure above -----------
+    identifiers = [item.opportunity_id for item in batch.assessments]
+    if len(identifiers) != len(set(identifiers)):
+        raise RecommendationPersistenceError("duplicate opportunity IDs")
+
     expected_versions = (RECOMMENDATION_ENGINE_VERSION, RECOMMENDATION_RULES_VERSION)
     if (
         batch.recommendation_engine_version,
         batch.recommendation_rules_version,
     ) != expected_versions:
         raise RecommendationPersistenceError("unexpected recommendation batch versions")
-    if not _valid_fingerprint(batch.batch_fingerprint):
-        raise RecommendationPersistenceError("malformed batch fingerprint")
-    if recommendation_batch_fingerprint(batch) != batch.batch_fingerprint:
-        raise RecommendationPersistenceError(
-            "batch fingerprint does not match canonical payload"
-        )
-
-    identifiers = [item.opportunity_id for item in batch.assessments]
-    if len(identifiers) != len(set(identifiers)):
-        raise RecommendationPersistenceError("duplicate opportunity IDs")
 
     prepared: list[tuple[RecommendationAssessment, str]] = []
     for item in batch.assessments:
-        if not isinstance(item, RecommendationAssessment):
-            raise RecommendationPersistenceError(
-                "batch must hold RecommendationAssessment values"
-            )
-        if item.profile_id != profile_id or not _positive_int(item.opportunity_id):
-            raise RecommendationPersistenceError("assessment operational ID mismatch")
         if (
             item.recommendation_engine_version,
             item.recommendation_rules_version,
@@ -189,6 +229,13 @@ def _prepare(
             )
         prepared.append(
             (item, canonical_json(canonical_recommendation_assessment_payload(item)))
+        )
+
+    if not _valid_fingerprint(batch.batch_fingerprint):
+        raise RecommendationPersistenceError("malformed batch fingerprint")
+    if recommendation_batch_fingerprint(batch) != batch.batch_fingerprint:
+        raise RecommendationPersistenceError(
+            "batch fingerprint does not match canonical payload"
         )
 
     # The order the batch arrives in *is* the ranking, and this layer must not

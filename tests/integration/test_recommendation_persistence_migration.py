@@ -258,14 +258,22 @@ def test_the_indexes_this_phase_reads_through_exist(migrated):
     assert any("USING INDEX sqlite_autoindex" in str(row[3]) for row in ranked)
 
 
-def test_the_matching_source_reference_is_composite_and_restricting(migrated):
+def test_the_matching_source_reference_is_composite_and_takes_no_action(migrated):
+    """Composite, so the pair is required; NO ACTION, so nothing is cascaded.
+
+    NO ACTION rather than RESTRICT is deliberate: both refuse the deletion of a
+    cited matching run, but RESTRICT is evaluated the instant the parent row is
+    touched, which would make retiring a profile depend on the order SQLite
+    happens to run two independent cascades in. The two behaviours that matter
+    are asserted directly below this test, on real rows.
+    """
     keys = {
         (row[2], row[3], row[4], row[6])
         for row in migrated.execute("PRAGMA foreign_key_list(recommendation_runs)")
     }
 
-    assert ("matching_runs", "source_matching_run_id", "id", "RESTRICT") in keys
-    assert ("matching_runs", "profile_id", "profile_id", "RESTRICT") in keys
+    assert ("matching_runs", "source_matching_run_id", "id", "NO ACTION") in keys
+    assert ("matching_runs", "profile_id", "profile_id", "NO ACTION") in keys
     assert ("profiles", "profile_id", "id", "CASCADE") in keys
 
 
