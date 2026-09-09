@@ -94,6 +94,14 @@ def canonical_recommendation_assessment_payload(
             "fit_status": assessment.domain.fit_status.value,
             "fit_reason": assessment.domain.fit_reason,
             "preferred_rank": assessment.domain.preferred_rank,
+            # The canonical family the fine reading was compared through. Two
+            # persisted categories can reach one family, so the category alone
+            # does not say which comparison produced the score.
+            "bridged_domain": (
+                None
+                if assessment.domain.bridged_domain is None
+                else assessment.domain.bridged_domain.value
+            ),
             "fine_primary_category": (
                 None
                 if assessment.domain.fine_primary_category is None

@@ -21,6 +21,7 @@ The flow under test is:
 
 import hashlib
 import json
+from unittest import mock
 
 import pytest
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -79,6 +80,7 @@ from services.collector.matching.skill_signals import SkillSignalKind, SkillSign
 from services.eligibility.models import Dimension, ReasonCode, RuleStatus
 from services.eligibility.repository import read_eligibility, read_rule_results
 from services.eligibility.service import synchronize_eligibility
+from services.recommendation import input_assembly
 from services.recommendation import (
     ComponentStatus,
     DomainFitSource,
@@ -1351,3 +1353,185 @@ def test_the_binding_proof_still_fits_no_tfidf_and_scores_no_similarity(
     connection.close()
     assert assembly.status is RecommendationReadinessStatus.READY
     assert batch.assessment_count == len(CORPUS)
+
+
+# --------------------------------------------------------------------------
+# One SQLite snapshot for the whole assembly: transaction ownership, and the
+# race it closes
+# --------------------------------------------------------------------------
+
+
+def test_recommendation_releases_the_snapshot_it_opened(corpus):
+    connection, _, identity, _, _ = corpus
+    assert connection.in_transaction is False
+
+    ready = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert ready.status is RecommendationReadinessStatus.READY
+    assert connection.in_transaction is False
+
+    # An early INCOMPLETE returns through the same `finally`.
+    incomplete = assemble_recommendation_inputs(connection, 9_999_999)
+    assert incomplete.status is RecommendationReadinessStatus.INCOMPLETE
+    assert incomplete.issues[0].code is (
+        RecommendationReadinessIssueCode.PROFILE_NOT_FOUND
+    )
+    assert connection.in_transaction is False
+
+
+def test_a_caller_owned_transaction_is_neither_committed_nor_rolled_back(corpus):
+    """Somebody else's snapshot is read within, never ended."""
+    connection, _, identity, _, _ = corpus
+    connection.execute("BEGIN")
+    assert connection.in_transaction is True
+
+    result = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert result.status is RecommendationReadinessStatus.READY
+    assert connection.in_transaction is True
+
+    connection.rollback()
+    assert connection.in_transaction is False
+
+
+def test_the_snapshot_is_released_even_when_the_assembly_raises(corpus, monkeypatch):
+    connection, _, identity, _, _ = corpus
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("TEST ONLY failure inside the assembly")
+
+    monkeypatch.setattr(
+        "services.recommendation.input_assembly.read_current_matching", explode
+    )
+    with pytest.raises(RuntimeError, match="TEST ONLY failure"):
+        assemble_recommendation_inputs(connection, identity.profile_id)
+    assert connection.in_transaction is False
+
+
+def test_the_assembly_still_works_through_a_read_only_connection(tmp_path):
+    """An explicit deferred BEGIN/ROLLBACK is legal on `mode=ro`."""
+    connection, path, identity, _, _ = build_corpus(tmp_path)
+    connection.close()
+    before = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with connect_readonly_database(path) as readonly:
+        assert readonly.in_transaction is False
+        assembly, batch = assemble_and_rank(readonly, identity.profile_id)
+        assert readonly.in_transaction is False
+
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+    assert assembly.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)
+
+
+def test_the_assembly_cannot_mix_pre_edit_freshness_with_post_edit_content(tmp_path):
+    """The race the snapshot closes, reproduced deterministically.
+
+    Two connections to one WAL database. Connection A begins an assembly and
+    passes every freshness check — qualification, semantic corpus, semantic
+    binding — against the world as it is. Connection B then commits a posting
+    edit that would make that same evidence stale. A carries on with its later
+    context and per-posting reads.
+
+    Because A holds one snapshot from its first read, it must observe the
+    pre-edit world for the whole call and return a coherent READY over it. It
+    must not return a cohort assembled from pre-edit freshness evidence and
+    post-edit content.
+
+    B's commit is not lost: the *next* call takes a fresh snapshot, sees it, and
+    the existing freshness checks refuse it. The commit belongs to that call.
+    """
+    connection, path, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute("PRAGMA journal_mode = WAL").fetchone()
+    connection.commit()
+    connection.close()
+
+    reader = connect_database(path)
+    writer = connect_database(path)
+    edited = ids["strong"]
+    committed: list[str] = []
+
+    original = input_assembly._binding_is_current
+
+    def commit_between_the_checks(run, opportunities):
+        """Let B commit at the exact moment A has finished its freshness proofs.
+
+        The seam is the last cohort-wide check: everything before it has read
+        the old world, everything after it is the per-posting pass. No
+        production test hook — the real helper is called and its answer
+        returned unchanged.
+        """
+        verdict = original(run, opportunities)
+        if not committed:
+            writer.execute(
+                "UPDATE opportunities SET canonical_title = ?, description = ? "
+                "WHERE id = ?",
+                (
+                    "TEST ONLY Warehouse Logistics Coordinator",
+                    "Pallet routing and stock rotation. " + REQUIREMENTS,
+                    edited,
+                ),
+            )
+            writer.commit()
+            committed.append("done")
+        return verdict
+
+    try:
+        with mock.patch.object(
+            input_assembly, "_binding_is_current", commit_between_the_checks
+        ):
+            first = assemble_recommendation_inputs(reader, identity.profile_id)
+        assert committed == ["done"]
+
+        # A saw one world for the whole call: the pre-edit one.
+        assert first.status is RecommendationReadinessStatus.READY
+        assert len(first.records) == len(CORPUS)
+        context = {
+            record.context.opportunity_id: record.context.canonical_title
+            for record in first.records
+        }
+        assert context[edited] == "TEST ONLY Data Scientist Internship"
+        assert "Warehouse" not in context[edited]
+        assert reader.in_transaction is False
+
+        # B's commit is visible to the next snapshot, and refused there.
+        second = assemble_recommendation_inputs(reader, identity.profile_id)
+        assert second.status is RecommendationReadinessStatus.INCOMPLETE
+        assert second.records == ()
+        assert [issue.code for issue in second.issues] == [
+            RecommendationReadinessIssueCode.QUALIFICATION_PROJECTION_STALE
+        ]
+        assert second.issues[0].opportunity_id == edited
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_the_snapshot_does_not_block_a_concurrent_writer(tmp_path):
+    """A deferred read transaction, not IMMEDIATE: writers keep going."""
+    connection, path, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute("PRAGMA journal_mode = WAL").fetchone()
+    connection.commit()
+    connection.close()
+
+    reader = connect_database(path)
+    writer = connect_database(path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM opportunities").fetchone()
+        # The write completes while the read snapshot is held.
+        writer.execute(
+            "UPDATE opportunities SET organization = ? WHERE id = ?",
+            ("TEST ONLY Renamed Org", ids["strong"]),
+        )
+        writer.commit()
+        held = reader.execute(
+            "SELECT organization FROM opportunities WHERE id = ?", (ids["strong"],)
+        ).fetchone()[0]
+        reader.rollback()
+        fresh = reader.execute(
+            "SELECT organization FROM opportunities WHERE id = ?", (ids["strong"],)
+        ).fetchone()[0]
+    finally:
+        reader.close()
+        writer.close()
+    assert held == "TEST ONLY Org"
+    assert fresh == "TEST ONLY Renamed Org"

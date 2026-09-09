@@ -7,6 +7,7 @@ whole-cohort refusals, which short-circuit before any row is read.
 
 import ast
 import pathlib
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -35,15 +36,37 @@ PROFILE_ID = 7
 
 
 class Connection:
-    """Answers only the one query the short-circuit branches actually reach."""
+    """Answers the one query the short-circuit branches reach, and holds a
+    snapshot the way SQLite does.
+
+    `in_transaction`, `BEGIN` and `rollback` are modelled rather than stubbed
+    away, because the assembly's ownership contract is part of what these tests
+    exercise: it opens a transaction when the caller has none and releases it on
+    every return path.
+    """
 
     def __init__(self, owner=(41,)):
         self.owner = owner
+        self.in_transaction = False
+        self.began = 0
+        self.rolled_back = 0
 
     def execute(self, sql, parameters=()):
+        if sql.strip().upper() == "BEGIN":
+            assert not self.in_transaction, "nested transaction"
+            self.in_transaction = True
+            self.began += 1
+            return SimpleNamespace(fetchone=lambda: None)
         if "FROM profiles" in sql:
             return SimpleNamespace(fetchone=lambda: self.owner)
         raise AssertionError(f"unexpected query: {sql}")
+
+    def rollback(self):
+        self.in_transaction = False
+        self.rolled_back += 1
+
+    def commit(self):  # pragma: no cover - the assembly must never call this
+        raise AssertionError("the assembly must not commit")
 
 
 def run(*assessments, status="READY", selected=(1,), **overrides):
@@ -96,9 +119,13 @@ def codes(result):
 
 
 def test_an_unknown_profile_is_incomplete_and_yields_nothing(monkeypatch):
-    result = invoke(monkeypatch, connection=Connection(owner=None))
+    connection = Connection(owner=None)
+    result = invoke(monkeypatch, connection=connection)
     assert result.status is RecommendationReadinessStatus.INCOMPLETE
     assert codes(result) == [RecommendationReadinessIssueCode.PROFILE_NOT_FOUND]
+    # Opened once before the first read, released on this early return.
+    assert (connection.began, connection.rolled_back) == (1, 1)
+    assert connection.in_transaction is False
     assert result.records == ()
     assert result.assembly_version == RECOMMENDATION_INPUT_ASSEMBLY_VERSION
     assert result.user_id is None
@@ -151,10 +178,25 @@ def test_any_stale_matching_version_stops_the_cohort(monkeypatch, field):
 
 
 def test_a_cohort_that_drifted_from_the_current_selection_is_refused(monkeypatch):
+    connection = Connection()
     snapshot = run(SimpleNamespace(opportunity_id=1))
-    result = invoke(monkeypatch, snapshot=snapshot, selected=(1, 2))
+    result = invoke(
+        monkeypatch, connection=connection, snapshot=snapshot, selected=(1, 2)
+    )
     assert codes(result) == [RecommendationReadinessIssueCode.STALE_MATCHING_COHORT]
     assert result.records == ()
+    assert (connection.began, connection.rolled_back) == (1, 1)
+
+
+def test_a_caller_owned_transaction_is_left_exactly_as_it_was(monkeypatch):
+    """The assembly reads within somebody else's snapshot and never ends it."""
+    connection = Connection()
+    connection.execute("BEGIN")
+    result = invoke(monkeypatch, connection=connection)
+    assert result.status is RecommendationReadinessStatus.READY or result.issues
+    assert connection.in_transaction is True
+    # One BEGIN, the caller's; no nested begin and no rollback of it.
+    assert (connection.began, connection.rolled_back) == (1, 0)
 
 
 def test_a_current_run_failing_its_own_persistence_audit_stops_the_cohort(
@@ -382,4 +424,38 @@ def test_the_binding_helper_delegates_to_the_matching_owned_primitive():
     assert "SEMANTIC_BINDING_VERSION" in referenced
     # No second digest implementation inside Recommendation.
     for forbidden in ("sha256", "hashlib", "canonical_semantic_binding_payload"):
+        assert forbidden not in referenced
+
+
+def test_the_snapshot_transaction_is_not_permission_to_write():
+    """Holding a transaction is how the reads stay coherent, nothing more.
+
+    The byte-for-byte read-only integration test is the real proof; this is the
+    cheap static one, and it also pins the deferred `BEGIN` — an `IMMEDIATE` or
+    `EXCLUSIVE` one would take a write lock and stall the collectors this phase
+    is supposed to run alongside.
+    """
+    source = pathlib.Path("services/recommendation/input_assembly.py").read_text(
+        encoding="utf-8"
+    )
+    statements = re.findall(r'"""(?:.|\n)*?"""|"[^"\n]*"', source)
+    sql = " ".join(
+        item.upper()
+        for item in statements
+        if not item.startswith('"""')
+    )
+    for verb in ("INSERT ", "UPDATE ", "DELETE ", "CREATE ", "DROP ", "ALTER "):
+        assert verb not in sql, f"assembly SQL contains {verb.strip()}"
+    assert "BEGIN IMMEDIATE" not in sql and "BEGIN EXCLUSIVE" not in sql
+
+    referenced = _referenced_names("services/recommendation/input_assembly.py")
+    # Released, never committed: this function has nothing of its own to commit.
+    assert "rollback" in referenced and "commit" not in referenced
+    # And it never drives an upstream synchronization.
+    for forbidden in (
+        "sync_matching",
+        "persist_qualifications",
+        "synchronize_eligibility",
+        "synchronize_location_resolutions",
+    ):
         assert forbidden not in referenced

@@ -641,10 +641,52 @@ def current_semantic_binding_fingerprint(
 def assemble_recommendation_inputs(
     connection: sqlite3.Connection, profile_id: int
 ) -> RecommendationInputAssemblyResult:
+    """Assemble one cohort from a single, stable SQLite read snapshot.
+
+    Every freshness check below compares persisted evidence against what the
+    database says *now*, and "now" has to mean one instant for the whole call.
+    Without a transaction these are dozens of independent autocommit reads: a
+    collector committing a posting edit between the corpus check and the later
+    context reads would let this function return READY over a cohort that mixed
+    pre-edit freshness evidence with post-edit content. The all-or-nothing
+    contract would hold over a world that never existed.
+
+    So the reads run inside one deferred read transaction, and **ownership is
+    explicit**. A caller already inside a transaction keeps it: this function
+    does not nest, commit or roll back somebody else's snapshot, it simply reads
+    within it. A caller that is not gets one opened here, before the first
+    `SELECT`, and always released on the way out — READY, every early
+    INCOMPLETE, and every exception alike.
+
+    The release is a ROLLBACK, never a COMMIT. This function is contractually
+    read-only and issues no `INSERT`, `UPDATE` or `DELETE`, so there is nothing
+    of its own to commit; rolling back also guarantees it can never commit an
+    unrelated write that happened to be pending. `BEGIN` is deferred rather than
+    `IMMEDIATE` or `EXCLUSIVE`, so under WAL a writer stays free to proceed
+    while this snapshot is held — a modification committed after it simply
+    belongs to the next call, where these same checks will see it.
+    """
+    owns_snapshot = not connection.in_transaction
+    if owns_snapshot:
+        # Deferred: the snapshot is taken by the first read below and held for
+        # the rest of the call.
+        connection.execute("BEGIN")
+    try:
+        return _assemble_from_snapshot(connection, profile_id)
+    finally:
+        if owns_snapshot:
+            connection.rollback()
+
+
+def _assemble_from_snapshot(
+    connection: sqlite3.Connection, profile_id: int
+) -> RecommendationInputAssemblyResult:
     """Read and validate the complete current Matching cohort without scoring it.
 
     Read-only from beginning to end: every statement below is a `SELECT`, and
-    every upstream is consulted through the package that owns it.
+    every upstream is consulted through the package that owns it. The caller
+    above owns the snapshot these reads observe, so nothing here begins, commits
+    or rolls back a transaction on any of its return paths.
     """
     owner = connection.execute(
         "SELECT user_id FROM profiles WHERE id = ?", (profile_id,)

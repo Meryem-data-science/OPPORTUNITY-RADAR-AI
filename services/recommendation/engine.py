@@ -135,14 +135,23 @@ def build_domain_component(
     """Return the one domain component, from the fine half or the coarse half.
 
     The choice is total and exclusive. When the fine reading is `AVAILABLE` it
-    supplies the status, the rank and the score, and the coarse values are
-    ignored entirely; when it is not, the coarse component of the matching
-    snapshot is used exactly as persisted — Phase 9 does not recompute it.
+    supplies the status, the rank, the score and the canonical family it was
+    compared through, and the coarse values are ignored entirely; when it is
+    not, the coarse component of the matching snapshot is used exactly as
+    persisted — Phase 9 does not recompute it.
     """
     if fine.availability is FineDomainAvailability.AVAILABLE:
         if fine.status is None:
             raise RecommendationInputError(
                 "an available fine domain fit must carry an alignment status"
+            )
+        if fine.bridged_domain is None:
+            # An AVAILABLE fit is one that reached a canonical family; without
+            # it the score cannot be attributed to any comparison. Refused
+            # rather than published with the provenance quietly dropped.
+            raise RecommendationInputError(
+                "an available fine domain fit must carry the bridged domain it "
+                "was compared through"
             )
         return DomainComponent(
             status=_component_status(fine.normalized_score),
@@ -155,6 +164,7 @@ def build_domain_component(
             fine_primary_category=fine.fine_primary_category,
             fine_classifier_version=fine_classifier_version,
             fine_domain_bridge_version=fine.fine_domain_bridge_version,
+            bridged_domain=fine.bridged_domain,
         )
     return DomainComponent(
         status=_component_status(snapshot_score),
@@ -167,6 +177,8 @@ def build_domain_component(
         fine_primary_category=fine.fine_primary_category,
         fine_classifier_version=fine_classifier_version,
         fine_domain_bridge_version=None,
+        # No family was bridged, so none is claimed.
+        bridged_domain=None,
     )
 
 

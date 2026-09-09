@@ -1,5 +1,7 @@
 """The fine-domain bridge, the coarse fallback, and the single domain component."""
 
+from dataclasses import replace
+
 import pytest
 
 from services.collector.matching import DOMAIN_WEIGHT, AlignmentStatus
@@ -16,6 +18,7 @@ from services.recommendation import (
     RecommendationFineClassification,
     RecommendationInputError,
     RecommendationReasonCode,
+    build_domain_component,
     build_fine_domain_fit,
     build_recommendation_assessment,
     preferred_rank_score,
@@ -312,3 +315,79 @@ def test_absent_preferences_reach_the_assessment_as_an_unknown_component():
     assert result.domain.score is None
     assert result.recommendation_evidence_coverage == 0.8
     assert RecommendationReasonCode.DOMAIN_FIT_UNKNOWN in result.unknowns
+
+
+# --------------------------------------------------------------------------
+# the canonical family the fine reading was compared through
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("category", "family"),
+    [
+        (FineCategory.DATA_SCIENCE, Domain.DATA_SCIENCE),
+        (FineCategory.ARTIFICIAL_INTELLIGENCE, Domain.MACHINE_LEARNING_AI),
+        (FineCategory.MACHINE_LEARNING, Domain.MACHINE_LEARNING_AI),
+        (FineCategory.GENERATIVE_AI, Domain.GENAI_LLM),
+    ],
+)
+def test_the_assessment_states_which_family_produced_the_fine_alignment(
+    category, family
+):
+    """The persisted category and the compared family are two different facts.
+
+    `MACHINE_LEARNING` and `ARTIFICIAL_INTELLIGENCE` are two persisted
+    categories reaching one canonical family, so the category alone cannot say
+    which comparison produced the score. Both are on the component.
+    """
+    result = assess(fine_classification=fine(category))
+    assert result.domain.source is DomainFitSource.FINE
+    assert result.domain.fine_primary_category is category
+    assert result.domain.bridged_domain is family
+
+
+def test_two_fine_categories_share_one_family_and_stay_distinguishable():
+    machine_learning = assess(fine_classification=fine(FineCategory.MACHINE_LEARNING))
+    artificial = assess(
+        fine_classification=fine(FineCategory.ARTIFICIAL_INTELLIGENCE)
+    )
+    assert (
+        machine_learning.domain.bridged_domain
+        is artificial.domain.bridged_domain
+        is Domain.MACHINE_LEARNING_AI
+    )
+    assert (
+        machine_learning.domain.fine_primary_category
+        is not artificial.domain.fine_primary_category
+    )
+
+
+@pytest.mark.parametrize(
+    "category", [FineCategory.NLP, FineCategory.COMPUTER_VISION, FineCategory.OTHER]
+)
+def test_the_coarse_fallback_claims_no_bridged_family(category):
+    """A coarse component compared no fine family, so it names none."""
+    result = assess(fine_classification=fine(category))
+    assert result.domain.source is DomainFitSource.COARSE
+    assert result.domain.bridged_domain is None
+
+
+def test_a_legacy_row_falls_back_and_claims_no_bridged_family():
+    result = assess(fine_classification=LEGACY_FINE)
+    assert result.domain.source is DomainFitSource.COARSE
+    assert result.domain.bridged_domain is None
+
+
+def test_an_available_fine_fit_without_a_bridged_family_is_refused():
+    """Provenance is not silently dropped to publish a score."""
+    usable = fit(FineCategory.DATA_SCIENCE)
+    incoherent = replace(usable, bridged_domain=None)
+    with pytest.raises(RecommendationInputError, match="bridged domain"):
+        build_domain_component(
+            AlignmentStatus.UNKNOWN,
+            "DOMAIN_PREFERENCE_MATCHED",
+            None,
+            None,
+            incoherent,
+            FINE_CLASSIFIER_VERSION,
+        )

@@ -211,3 +211,53 @@ def test_the_same_explanation_in_a_different_upstream_order_is_the_same_digest()
     first = assess(profile_skills=("Python", "SQL"))
     second = assess(profile_skills=("SQL", "Python"))
     assert first.assessment_fingerprint == second.assessment_fingerprint
+
+
+# --------------------------------------------------------------------------
+# the bridged family is provenance, and provenance is in the digest
+# --------------------------------------------------------------------------
+
+
+def test_the_canonical_payload_carries_the_bridged_family():
+    payload = canonical_recommendation_assessment_payload(
+        assess(fine_classification=fine(FineCategory.GENERATIVE_AI))
+    )
+    assert payload["domain"]["bridged_domain"] == Domain.GENAI_LLM.value
+    assert payload["domain"]["fine_primary_category"] == FineCategory.GENERATIVE_AI.value
+
+
+def test_a_coarse_assessment_serializes_a_null_bridged_family():
+    payload = canonical_recommendation_assessment_payload(
+        assess(fine_classification=LEGACY_FINE)
+    )
+    assert payload["domain"]["source"] == "COARSE"
+    assert payload["domain"]["bridged_domain"] is None
+
+
+def test_changing_only_the_bridged_family_changes_the_fingerprint():
+    """Pins the provenance into the audit digest and nothing else.
+
+    Two assessments identical in every scored value, differing only in which
+    canonical family the fine reading was compared through, must not share a
+    fingerprint — otherwise the digest could not attest to the comparison that
+    produced the score.
+    """
+    result = assess()
+    rebridged = replace(
+        result,
+        domain=replace(result.domain, bridged_domain=Domain.MACHINE_LEARNING_AI),
+        assessment_fingerprint="",
+    )
+    assert result.domain.bridged_domain is Domain.DATA_SCIENCE
+    assert result.domain.score == rebridged.domain.score
+    assert (
+        recommendation_assessment_fingerprint(rebridged)
+        != result.assessment_fingerprint
+    )
+
+
+def test_two_fine_categories_sharing_a_family_differ_only_by_the_category():
+    """Both provenance values are digested, so neither can be inferred away."""
+    machine_learning = digest(fine_classification=fine(FineCategory.MACHINE_LEARNING))
+    artificial = digest(fine_classification=fine(FineCategory.ARTIFICIAL_INTELLIGENCE))
+    assert machine_learning != artificial

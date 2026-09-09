@@ -47,6 +47,7 @@ from services.collector.matching.models import MatchingPreferences
 from services.collector.matching.skill_fit import SkillFitResult
 from services.collector.matching.skill_signals import SkillSignalKind, SkillSignalSource
 from services.collector.qualification.fine_taxonomy import FineCategory
+from services.collector.qualification.taxonomy import Domain
 from services.eligibility import GlobalStatus, ReasonCode, RuleStatus
 from services.eligibility.models import Dimension, RequirementKind, RuleResult
 from services.geography.models import LocationResolution, ProfileTarget
@@ -414,6 +415,16 @@ class DomainComponent:
     fine_primary_category: FineCategory | None
     fine_classifier_version: str | None
     fine_domain_bridge_version: str | None
+    #: The canonical `Domain` family the fine category was bridged to, and
+    #: therefore the value that was actually compared against the person's
+    #: preferred domains. It is not the fine category: `MACHINE_LEARNING` and
+    #: `ARTIFICIAL_INTELLIGENCE` are two persisted categories reaching one
+    #: family, and only this field says which comparison produced the score.
+    #:
+    #: `None` exactly when `source` is `COARSE` — a coarse component compared no
+    #: bridged family, and inventing one here would attribute the score to a
+    #: reading that never happened. Provenance only: no weight, no routing.
+    bridged_domain: Domain | None = None
 
 
 @dataclass(frozen=True)
