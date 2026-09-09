@@ -70,10 +70,21 @@ deliberately different, and both come from Phase 9's own contract:
   would hide the other ninety-nine, and turning the absence into a verdict is
   exactly what Phase 3.6 forbids. A decision that exists but no longer describes
   the current inputs is the opposite case, and it stops the cohort;
-* **a legacy fine classification is not an issue either.** A row migration
-  `0025` reached and the fine classifier never did is a documented state, and it
-  routes to the coarse domain component. What *is* refused is a row whose
-  persisted fine half contradicts its coarse half.
+* **a legacy fine classification is not a current Phase 8 projection.** A row
+  migration `0025` reached and the fine classifier never did — a NULL
+  `fine_classifier_version` — is a documented persisted state and stays a valid
+  *public* read: `fine_read_model` reports it as "never fine-classified" and
+  `/api/opportunities` publishes it unchanged, because that is a true statement
+  about the row. Recommendation asks a stricter question, *is this the reading
+  the classifier running now would leave alone*, and a row nothing has
+  fine-classified is not one. It therefore stops the cohort with
+  `QUALIFICATION_PROJECTION_STALE` rather than recommending a domain off Phase 8
+  as though Phase 8 had run.
+
+  This is about stale provenance and not about the fine-or-coarse algorithm: a
+  **current** fine category that simply has no honest canonical family —
+  `NLP`, `COMPUTER_VISION`, `OTHER` — is not stale, and still takes the approved
+  coarse-domain fallback.
 """
 
 from __future__ import annotations
