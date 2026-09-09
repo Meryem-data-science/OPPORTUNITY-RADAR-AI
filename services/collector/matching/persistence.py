@@ -20,6 +20,7 @@ from .engine_fingerprint import (
     matching_batch_fingerprint,
 )
 from .fingerprint import canonical_json
+from .tfidf_fingerprint import SEMANTIC_BINDING_VERSION
 from .persistence_fingerprint import (
     MATCHING_PERSISTENCE_VERSION,
     canonical_matching_run_payload,
@@ -133,11 +134,19 @@ def _prepare(profile_id: int, batch: MatchingBatchResult, selection_version: str
                 "assessment fingerprint does not match canonical payload"
             )
         prepared.append((item, payload))
-    batch_payload = canonical_json(canonical_matching_batch_payload(batch))
+    content_payload = canonical_matching_batch_payload(batch)
     if matching_batch_fingerprint(batch) != batch.batch_fingerprint:
         raise MatchingPersistenceError(
             "batch fingerprint does not match canonical payload"
         )
+    binding = _validated_binding(batch)
+    # The stored payload is the content payload plus, for a run that has it, the
+    # identity-aware binding provenance. The batch *fingerprint* stays the digest
+    # of the content half alone — the binding is protected by the run
+    # fingerprint below, which is the layer that owns operational ids. Storing
+    # it in the existing column keeps `matching_runs` unchanged: no migration,
+    # no new table, and every legacy row still reads.
+    batch_payload = canonical_json({**content_payload, **binding})
     operational_assessments = tuple(
         (item.opportunity_id, item.assessment_fingerprint) for item, _ in prepared
     )
@@ -151,6 +160,7 @@ def _prepare(profile_id: int, batch: MatchingBatchResult, selection_version: str
         tfidf_model_fingerprint=batch.tfidf_model_fingerprint,
         batch_fingerprint=batch.batch_fingerprint,
         assessments=operational_assessments,
+        **binding,
     )
     run_payload = canonical_matching_run_payload(**run_values)
     run_fingerprint = matching_run_fingerprint(**run_values)
@@ -159,6 +169,33 @@ def _prepare(profile_id: int, batch: MatchingBatchResult, selection_version: str
     ):
         raise MatchingPersistenceError("run payload is incoherent")
     return prepared, batch_payload, run_fingerprint
+
+
+def _validated_binding(batch: MatchingBatchResult) -> dict[str, str]:
+    """Return the binding keys to persist, or an empty dict for a legacy batch.
+
+    Both or neither: a batch carrying half a provenance is refused here rather
+    than stored, because the run fingerprint below could not then be reproduced
+    from what was written.
+    """
+    version = batch.semantic_binding_version
+    fingerprint = batch.semantic_binding_fingerprint
+    if version is None and fingerprint is None:
+        return {}
+    if version is None or fingerprint is None:
+        raise MatchingPersistenceError(
+            "semantic binding provenance needs both a version and a fingerprint"
+        )
+    if version != SEMANTIC_BINDING_VERSION:
+        raise MatchingPersistenceError(
+            f"unsupported semantic binding version: {version!r}"
+        )
+    if not _valid_fingerprint(fingerprint):
+        raise MatchingPersistenceError("invalid semantic binding fingerprint")
+    return {
+        "semantic_binding_version": version,
+        "semantic_binding_fingerprint": fingerprint,
+    }
 
 
 def _upsert_state(

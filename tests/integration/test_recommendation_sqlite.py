@@ -20,6 +20,7 @@ The flow under test is:
 """
 
 import hashlib
+import json
 
 import pytest
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -36,11 +37,16 @@ from services.collector.extractors.opportunity_constraints.service import (
     synchronize_opportunity_constraints,
 )
 from services.collector.matching import (
+    MATCHING_SELECTION_VERSION,
+    SEMANTIC_BINDING_VERSION,
+    audit_matching_profile_history,
     load_opportunity_matching_input,
+    matching_run_fingerprint,
     read_current_matching,
     select_matching_opportunity_ids,
     sync_matching,
 )
+from services.collector.matching.fingerprint import canonical_json
 from services.collector.qualification.classifier import CLASSIFIER_VERSION
 from services.collector.qualification.fine_classifier import FINE_CLASSIFIER_VERSION
 from services.collector.qualification.fine_read_model import (
@@ -83,8 +89,9 @@ from services.recommendation import (
     RecommendationReadinessStatus,
     RecommendationReasonCode,
     assemble_recommendation_inputs,
-    current_semantic_corpus_fingerprint,
     build_recommendation_batch,
+    current_semantic_binding_fingerprint,
+    current_semantic_corpus_fingerprint,
 )
 
 # TEST ONLY values, invented for these tests.
@@ -1126,3 +1133,221 @@ def test_the_corpus_fingerprint_is_the_one_matching_persisted(corpus):
     run = read_current_matching(connection, identity.profile_id).current_run
     assert current_semantic_corpus_fingerprint(inputs) == run.corpus_fingerprint
     assert run.corpus_fingerprint == matching.corpus_fingerprint
+
+
+# --------------------------------------------------------------------------
+# Semantic identity binding: same cohort, same corpus content, swapped
+# documents. The case an ID-free content digest cannot see.
+# --------------------------------------------------------------------------
+
+
+def _semantic_text(connection, opportunity_id):
+    return connection.execute(
+        "SELECT canonical_title, description FROM opportunities WHERE id = ?",
+        (opportunity_id,),
+    ).fetchone()
+
+
+def _swap_semantic_text(connection, first, second):
+    """Exchange two postings' title and description, and nothing else.
+
+    Every other column stays put, so the corpus is the same multiset of
+    documents and the cohort is the same set of ids — only the assignment
+    between them moves.
+    """
+    left, right = _semantic_text(connection, first), _semantic_text(connection, second)
+    for opportunity_id, (title, description) in (
+        (first, right),
+        (second, left),
+    ):
+        connection.execute(
+            "UPDATE opportunities SET canonical_title = ?, description = ? WHERE id = ?",
+            (title, description, opportunity_id),
+        )
+    connection.commit()
+
+
+def _current_documents(connection):
+    return tuple(
+        load_opportunity_matching_input(connection, opportunity_id)
+        for opportunity_id in select_matching_opportunity_ids(connection)
+    )
+
+
+def test_two_postings_swapping_their_documents_stops_the_cohort(tmp_path):
+    """The exact case an ID-free corpus digest is blind to, end to end.
+
+    A and B exchange their titles and descriptions. The cohort ids do not move,
+    the corpus is the same multiset and therefore fingerprints identically, and
+    Phase 8 is resynchronized so its provenance is current — yet every persisted
+    percentile now describes the other posting. Only the identity binding sees
+    it.
+    """
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    first, second = ids["strong"], ids["unbridged_fine"]
+
+    ready, before = assemble_and_rank(connection, identity.profile_id)
+    assert ready.status is RecommendationReadinessStatus.READY
+    run = read_current_matching(connection, identity.profile_id).current_run
+    cohort_before = select_matching_opportunity_ids(connection)
+    corpus_before = run.corpus_fingerprint
+    binding_before = run.semantic_binding_fingerprint
+    scores_before = {
+        item.opportunity_id: item.semantic.score for item in before.assessments
+    }
+    assert run.semantic_binding_version == SEMANTIC_BINDING_VERSION
+    assert scores_before[first] != scores_before[second]
+
+    _swap_semantic_text(connection, first, second)
+    # Phase 8 is brought back to current so its freshness is not the reason.
+    persist_qualifications(connection)
+    # Matching is deliberately NOT resynchronized.
+
+    documents = _current_documents(connection)
+    assert select_matching_opportunity_ids(connection) == cohort_before
+    assert current_semantic_corpus_fingerprint(documents) == corpus_before
+    assert current_semantic_binding_fingerprint(documents) != binding_before
+
+    stale = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert stale.status is RecommendationReadinessStatus.INCOMPLETE
+    assert stale.records == ()
+    assert [issue.code for issue in stale.issues] == [
+        RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_BINDING
+    ]
+    assert "no longer carry the semantic documents" in stale.issues[0].message
+
+    resynced = sync_matching(connection, identity.profile_id)
+    after_ready, after = assemble_and_rank(connection, identity.profile_id)
+    scores_after = {
+        item.opportunity_id: item.semantic.score for item in after.assessments
+    }
+    connection.close()
+    assert after_ready.status is RecommendationReadinessStatus.READY
+    assert resynced.run_id is not None
+    # The semantic values followed the documents to their new postings.
+    assert scores_after[first] == scores_before[second]
+    assert scores_after[second] == scores_before[first]
+
+
+def test_a_matching_run_without_binding_provenance_is_not_fresh_enough(tmp_path):
+    """A legacy run is valid history and still not a basis for recommending.
+
+    Matching's own read model and its own persistence audit both accept it —
+    asserted here — because it is a real run that was persisted before this
+    provenance existed. Recommendation refuses it, because nothing in it proves
+    the percentiles still belong to these postings, and it repairs nothing: the
+    operator runs `sync_matching`.
+    """
+    connection, _, identity, _, matching = build_corpus(tmp_path)
+    payload = json.loads(
+        connection.execute(
+            "SELECT batch_payload_json FROM matching_runs WHERE id=?",
+            (matching.run_id,),
+        ).fetchone()[0]
+    )
+    content = {
+        key: value
+        for key, value in payload.items()
+        if not key.startswith("semantic_binding_")
+    }
+    legacy_run_fingerprint = matching_run_fingerprint(
+        profile_id=identity.profile_id,
+        selection_version=MATCHING_SELECTION_VERSION,
+        matching_engine_version=content["matching_engine_version"],
+        matching_rules_version=content["matching_rules_version"],
+        semantic_percentile_version=content["semantic_percentile_version"],
+        corpus_fingerprint=content["corpus_fingerprint"],
+        tfidf_model_fingerprint=content["tfidf_model_fingerprint"],
+        batch_fingerprint=connection.execute(
+            "SELECT batch_fingerprint FROM matching_runs WHERE id=?",
+            (matching.run_id,),
+        ).fetchone()[0],
+        assessments=tuple(
+            connection.execute(
+                "SELECT opportunity_id, assessment_fingerprint FROM "
+                "matching_assessments WHERE run_id=?",
+                (matching.run_id,),
+            ).fetchall()
+        ),
+    )
+    connection.execute(
+        "UPDATE matching_runs SET batch_payload_json=?, run_fingerprint=? WHERE id=?",
+        (canonical_json(content), legacy_run_fingerprint, matching.run_id),
+    )
+    connection.commit()
+
+    # Matching itself is content with this run.
+    run = read_current_matching(connection, identity.profile_id).current_run
+    assert run.semantic_binding_version is None
+    assert run.semantic_binding_fingerprint is None
+    assert audit_matching_profile_history(connection, identity.profile_id).ok is True
+
+    # Recommendation is not.
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert assembly.status is RecommendationReadinessStatus.INCOMPLETE
+    assert assembly.records == ()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_BINDING
+    ]
+    assert "predates semantic binding provenance" in assembly.issues[0].message
+
+    # The old run was not mutated or upgraded to get past it.
+    assert (
+        json.loads(
+            connection.execute(
+                "SELECT batch_payload_json FROM matching_runs WHERE id=?",
+                (matching.run_id,),
+            ).fetchone()[0]
+        )
+        == content
+    )
+
+    sync_matching(connection, identity.profile_id)
+    ready, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert ready.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)
+
+
+def test_an_ordinary_text_edit_still_reports_the_corpus_code_not_the_binding(
+    tmp_path,
+):
+    """Ordering matters: content drift is the more specific answer."""
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE opportunities SET description = description || ? WHERE id = ?",
+        (NEUTRAL_SENTENCE, ids["strong"]),
+    )
+    connection.commit()
+    persist_qualifications(connection)
+    assembly = assemble_recommendation_inputs(connection, identity.profile_id)
+    connection.close()
+    assert [issue.code for issue in assembly.issues] == [
+        RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_CORPUS
+    ]
+
+
+def test_the_binding_proof_still_fits_no_tfidf_and_scores_no_similarity(
+    tmp_path, monkeypatch
+):
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("recommendation assembly must not fit or score TF-IDF")
+
+    for target in (
+        "services.collector.matching.tfidf_similarity.fit_tfidf_corpus",
+        "services.collector.matching.tfidf_similarity.score_profile_against_tfidf_corpus",
+        "services.collector.matching.tfidf_similarity.score_matching_input_semantic_similarity",
+    ):
+        monkeypatch.setattr(target, forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "fit", forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "fit_transform", forbidden)
+    monkeypatch.setattr(TfidfVectorizer, "transform", forbidden)
+
+    documents = _current_documents(connection)
+    assert len(current_semantic_binding_fingerprint(documents)) == 64
+    assembly, batch = assemble_and_rank(connection, identity.profile_id)
+    connection.close()
+    assert assembly.status is RecommendationReadinessStatus.READY
+    assert batch.assessment_count == len(CORPUS)

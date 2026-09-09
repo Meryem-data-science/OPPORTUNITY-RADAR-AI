@@ -26,6 +26,7 @@ from services.recommendation import (
     RecommendationReadinessIssueCode,
     RecommendationReadinessStatus,
     assemble_recommendation_inputs,
+    current_semantic_binding_fingerprint,
     current_semantic_corpus_fingerprint,
 )
 from tests.unit.recommendation_fixtures import opportunity
@@ -329,3 +330,56 @@ def test_the_provenance_check_compares_exactly_the_persisted_triple():
     query = source[source.index("SELECT input_fingerprint, classifier_version") :]
     assert "fine_classifier_version" in query.split("FROM")[0]
     assert "opportunity_qualifications" in query.split("WHERE")[0]
+
+
+def test_the_binding_fingerprint_sees_a_swap_the_corpus_digest_cannot():
+    """Why Recommendation checks two digests rather than one."""
+    cohort = (
+        opportunity(opportunity_id=1),
+        replace(opportunity(opportunity_id=2), description="something else entirely"),
+    )
+    swapped = (
+        replace(opportunity(opportunity_id=1), description="something else entirely"),
+        replace(
+            opportunity(opportunity_id=2),
+            canonical_title=cohort[0].canonical_title,
+            description=cohort[0].description,
+        ),
+    )
+    # Same ids, same multiset of documents...
+    assert [item.opportunity_id for item in cohort] == [
+        item.opportunity_id for item in swapped
+    ]
+    assert current_semantic_corpus_fingerprint(
+        cohort
+    ) == current_semantic_corpus_fingerprint(swapped)
+    # ...and a different assignment of documents to postings.
+    assert current_semantic_binding_fingerprint(
+        cohort
+    ) != current_semantic_binding_fingerprint(swapped)
+
+
+def test_the_binding_fingerprint_ignores_the_order_the_cohort_was_read_in():
+    cohort = (opportunity(opportunity_id=1), opportunity(opportunity_id=2))
+    assert current_semantic_binding_fingerprint(
+        cohort
+    ) == current_semantic_binding_fingerprint(tuple(reversed(cohort)))
+
+
+def test_the_binding_fingerprint_is_a_sha256_and_repeats_exactly():
+    cohort = (opportunity(opportunity_id=1),)
+    first = current_semantic_binding_fingerprint(cohort)
+    assert first == current_semantic_binding_fingerprint(cohort)
+    assert len(first) == 64 and set(first) <= set("0123456789abcdef")
+
+
+def test_the_binding_helper_delegates_to_the_matching_owned_primitive():
+    """One hash format, owned by Matching, used by both sides of the check."""
+    referenced = _referenced_names("services/recommendation/input_assembly.py")
+    assert {"semantic_binding_fingerprint", "build_opportunity_semantic_document"} <= (
+        referenced
+    )
+    assert "SEMANTIC_BINDING_VERSION" in referenced
+    # No second digest implementation inside Recommendation.
+    for forbidden in ("sha256", "hashlib", "canonical_semantic_binding_payload"):
+        assert forbidden not in referenced

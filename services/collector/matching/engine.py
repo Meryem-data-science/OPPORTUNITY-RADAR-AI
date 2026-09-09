@@ -27,7 +27,11 @@ from .role_domain_preferences_fingerprint import role_domain_preferences_fingerp
 from .skill_fit import SkillFitResult, build_skill_fit
 from .skill_fit_fingerprint import skill_fit_fingerprint
 from .skill_signals import build_opportunity_skill_signals
-from .tfidf_fingerprint import semantic_similarity_fingerprint
+from .tfidf_fingerprint import (
+    SEMANTIC_BINDING_VERSION,
+    semantic_binding_fingerprint,
+    semantic_similarity_fingerprint,
+)
 from .tfidf_similarity import (
     SemanticSimilarityResult,
     SemanticSimilarityStatus,
@@ -122,6 +126,20 @@ class MatchingAssessment:
 
 @dataclass(frozen=True)
 class MatchingBatchResult:
+    """One profile's whole cohort, plus the provenance of the corpus behind it.
+
+    `corpus_fingerprint` and `semantic_binding_fingerprint` are two different
+    statements about the same documents and both are carried: the first says
+    *this is the same corpus content*, the second says *each document is still
+    attached to the same posting*. Only the first can be derived from the
+    fitted model, which is why the second exists.
+
+    Both binding fields are optional and default to `None`. That is the legacy
+    shape — a batch assembled before this provenance existed — and it is
+    preserved so historical runs stay readable and auditable rather than being
+    retroactively declared corrupt.
+    """
+
     assessments: tuple[MatchingAssessment, ...]
     corpus_fingerprint: str
     tfidf_model_fingerprint: str
@@ -129,6 +147,8 @@ class MatchingBatchResult:
     matching_engine_version: str = MATCHING_ENGINE_VERSION
     matching_rules_version: str = MATCHING_RULES_VERSION
     semantic_percentile_version: str = SEMANTIC_PERCENTILE_VERSION
+    semantic_binding_version: str | None = None
+    semantic_binding_fingerprint: str | None = None
     batch_fingerprint: str = ""
 
 
@@ -386,5 +406,12 @@ def build_matching_assessments(
         corpus_fingerprint=corpus.corpus_fingerprint,
         tfidf_model_fingerprint=corpus.model_fingerprint,
         assessment_count=len(assessments),
+        semantic_binding_version=SEMANTIC_BINDING_VERSION,
+        # The documents the corpus was fitted over, reused: no second fit, no
+        # second normalization, and no second pass over the postings.
+        semantic_binding_fingerprint=semantic_binding_fingerprint(corpus.documents),
     )
+    # The batch fingerprint stays identity-independent and therefore does not
+    # see either binding field. The binding is protected by the *run*
+    # fingerprint, which is the layer that already owns operational ids.
     return replace(result, batch_fingerprint=matching_batch_fingerprint(result))

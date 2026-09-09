@@ -24,10 +24,14 @@ primitives — never a rule invented here:
                            alone: Phase 8's own `input_fingerprint` over the
                            posting's fields today, plus the two rule versions
                            running now. No classifier runs.
-    Matching semantic      the current postings must still produce the corpus
-                           the run was fitted over — `semantic_corpus_fingerprint`
-                           of their current documents against the persisted
-                           `run.corpus_fingerprint`. No TF-IDF is fitted.
+    Matching semantic      two digests, because one cannot answer both
+                           questions. `semantic_corpus_fingerprint` asks *is
+                           this the same corpus content* and is ID-free by
+                           design; `semantic_binding_fingerprint` asks *is each
+                           document still attached to the same posting*, which
+                           is what catches two postings exchanging their texts.
+                           Both are compared against the persisted run. No
+                           TF-IDF is fitted for either.
     Matching structured    the recomputed `role-domain-preferences-v2` result
                            must fingerprint to the snapshot's own
                            `domain.upstream_fingerprint`.
@@ -50,9 +54,17 @@ posting no longer carries, and a half-assembled cohort would rank an opportunity
 against a corpus missing its competitors. Nothing is resynchronized to fix it —
 an operator runs the phase that owns the data.
 
-Two of the checks are cohort-wide and run before any assessment is assembled:
-qualification provenance, then the semantic corpus it lets us believe. The rest
-are per-posting. Note that the qualification check is stricter than the *public*
+Three of the checks are cohort-wide and run before any assessment is assembled:
+qualification provenance, then the semantic corpus it lets us believe, then the
+binding of that corpus to the postings it was fitted for. Content before
+binding, so an ordinary title or description edit still reports the corpus code
+rather than the identity one. The rest are per-posting.
+
+A Matching run persisted before the binding provenance existed is valid history
+— `read_current_matching` returns it and Phase 4's own audit passes it — and is
+still not a basis for recommending: nothing in it shows its percentiles belong
+to these postings. That is `STALE_MATCHING_SEMANTIC_BINDING` too, and the cure
+is `sync_matching`, never a repair applied here. Note that the qualification check is stricter than the *public*
 read model on purpose: `fine_read_model` still reports a NULL fine classifier
 version as the documented legacy state, because that is a true statement about a
 row, and `/api/opportunities` is unchanged. A row nothing has fine-classified is
@@ -116,9 +128,11 @@ from services.collector.matching import (
     build_skill_fit,
     load_opportunity_matching_input,
     load_profile_matching_input,
+    SEMANTIC_BINDING_VERSION,
     build_opportunity_semantic_document,
     read_current_matching,
     select_matching_opportunity_ids,
+    semantic_binding_fingerprint,
     semantic_corpus_fingerprint,
     skill_fit_fingerprint,
 )
@@ -174,6 +188,7 @@ __all__ = [
     "RECOMMENDATION_INPUT_ASSEMBLY_VERSION",
     "RecommendationInputAssemblyResult",
     "current_location_signature",
+    "current_semantic_binding_fingerprint",
     "current_semantic_corpus_fingerprint",
     "RecommendationInputRecord",
     "RecommendationOpportunityContext",
@@ -203,6 +218,9 @@ class RecommendationReadinessIssueCode(StrEnum):
     #: The persisted semantic corpus was fitted over documents the current
     #: postings no longer produce, even though the cohort's ids did not move.
     STALE_MATCHING_SEMANTIC_CORPUS = "STALE_MATCHING_SEMANTIC_CORPUS"
+    #: The corpus content still matches, but the documents no longer belong to
+    #: the same postings — or the run predates that provenance entirely.
+    STALE_MATCHING_SEMANTIC_BINDING = "STALE_MATCHING_SEMANTIC_BINDING"
     STALE_MATCHING_SNAPSHOT = "STALE_MATCHING_SNAPSHOT"
     #: The recomputed skill fit no longer fingerprints to the one the snapshot's
     #: required-skill ratio was computed from.
@@ -567,6 +585,59 @@ def current_semantic_corpus_fingerprint(
     )
 
 
+def _binding_is_current(run, opportunities) -> str | None:
+    """Return why the semantic binding is unusable, or None when it is current.
+
+    Three ways it fails, and a legacy run is one of them. A Matching run
+    persisted before this provenance existed is perfectly valid history —
+    `read_current_matching` returns it and Phase 4's own audit passes it — but
+    it carries no evidence that its percentiles still belong to these postings,
+    and Recommendation does not guess. The operator runs `sync_matching`;
+    nothing here upgrades or repairs the old run.
+    """
+    try:
+        version = run.semantic_binding_version
+        stored = run.semantic_binding_fingerprint
+    except MatchingReadError as error:
+        return f"the persisted semantic binding provenance is unreadable: {error}"
+    if version is None or stored is None:
+        return (
+            "the current matching run predates semantic binding provenance, so "
+            "nothing proves its percentiles still belong to these postings"
+        )
+    if version != SEMANTIC_BINDING_VERSION:
+        return (
+            f"the current matching run carries semantic binding provenance "
+            f"{version!r}, and {SEMANTIC_BINDING_VERSION!r} is running"
+        )
+    if current_semantic_binding_fingerprint(opportunities) != stored:
+        return (
+            "the current postings no longer carry the semantic documents the "
+            "persisted percentiles were ranked for"
+        )
+    return None
+
+
+def current_semantic_binding_fingerprint(
+    opportunities: Sequence[MatchingOpportunityInput],
+) -> str:
+    """Which document each current posting produces, read-only.
+
+    The complement of the corpus fingerprint above and the reason both exist.
+    The corpus digest is an unordered multiset of texts, so two postings that
+    exchange their titles and descriptions leave it untouched while every stored
+    percentile ends up describing the other posting. This digest is ordered by
+    `opportunity_id` and moves the moment that assignment does.
+
+    Computed with Matching's own `semantic_binding_fingerprint` over Matching's
+    own documents: no second hash format, no second normalization, and still no
+    vectorizer anywhere near it.
+    """
+    return semantic_binding_fingerprint(
+        tuple(build_opportunity_semantic_document(item) for item in opportunities)
+    )
+
+
 def assemble_recommendation_inputs(
     connection: sqlite3.Connection, profile_id: int
 ) -> RecommendationInputAssemblyResult:
@@ -811,9 +882,9 @@ def assemble_recommendation_inputs(
     # A READY run always carries at least one assessment — `build_matching_assessments`
     # refuses an empty corpus — so the guard is for a database that contradicts
     # that: it answers with a readiness issue rather than a bare ValueError.
-    if not opportunity_inputs or (
-        current_semantic_corpus_fingerprint(tuple(opportunity_inputs.values()))
-        != run.corpus_fingerprint
+    documents = tuple(opportunity_inputs.values())
+    if not documents or (
+        current_semantic_corpus_fingerprint(documents) != run.corpus_fingerprint
     ):
         return _incomplete(
             profile_id,
@@ -823,6 +894,26 @@ def assemble_recommendation_inputs(
                     "the current postings no longer produce the semantic corpus "
                     "the persisted percentiles were ranked against; synchronize "
                     "Matching first",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
+
+    # The corpus content matching is not enough. The corpus digest is an
+    # unordered multiset by design, so two postings that exchanged their titles
+    # and descriptions pass the check above while every persisted percentile now
+    # describes the other posting. The binding provenance is what sees that, and
+    # it is checked second so an ordinary text edit still reports the corpus
+    # code rather than this one.
+    stale_binding = _binding_is_current(run, documents)
+    if stale_binding is not None:
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.STALE_MATCHING_SEMANTIC_BINDING,
+                    f"{stale_binding}; synchronize Matching first",
                 )
             ],
             user_id,

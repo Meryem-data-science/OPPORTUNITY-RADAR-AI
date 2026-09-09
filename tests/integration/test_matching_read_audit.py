@@ -7,7 +7,9 @@ import pytest
 from services.collector.database.connection import connect_database
 from services.collector.database.migrations import apply_migrations
 from services.collector.matching import (
+    SEMANTIC_BINDING_VERSION,
     MatchingBatchResult,
+    MatchingPersistenceError,
     MatchingPersistenceAuditError,
     MatchingReadError,
     audit_matching_profile_history,
@@ -371,3 +373,196 @@ def test_coherent_historical_versions_are_valid(database):
     database.commit()
     report = audit_matching_profile_history(database, profile_id)
     assert report.ok and report.issues == ()
+
+
+# --------------------------------------------------------------------------
+# semantic binding provenance: legacy runs stay valid, new runs are protected
+# --------------------------------------------------------------------------
+
+
+def bound_batch(profile_id, opportunity_ids, fingerprint="1" * 64):
+    """A batch carrying the provenance `build_matching_assessments` computes."""
+    raw = replace(
+        make_batch(profile_id, opportunity_ids),
+        semantic_binding_version=SEMANTIC_BINDING_VERSION,
+        semantic_binding_fingerprint=fingerprint,
+        batch_fingerprint="",
+    )
+    return replace(raw, batch_fingerprint=matching_batch_fingerprint(raw))
+
+
+def store(connection, profile_id, batch):
+    """Commit the fixture's pending inserts first, as every test here does."""
+    if connection.in_transaction:
+        connection.commit()
+    return store_matching_batch(
+        connection, profile_id, batch, selection_version="selection-test-v1"
+    )
+
+
+def stored_payload(connection, run_id):
+    return json.loads(
+        connection.execute(
+            "SELECT batch_payload_json FROM matching_runs WHERE id=?", (run_id,)
+        ).fetchone()[0]
+    )
+
+
+def test_a_new_run_stores_both_binding_fields_and_stays_idempotent(database):
+    profile_id = ensure_user_profile(database, "binding@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "binding")
+    batch = bound_batch(profile_id, (opportunity_id,))
+
+    first = store(database, profile_id, batch)
+    payload = stored_payload(database, first.run_id)
+    assert payload["semantic_binding_version"] == SEMANTIC_BINDING_VERSION
+    assert payload["semantic_binding_fingerprint"] == "1" * 64
+    # The content half is untouched by the addition.
+    assert payload["corpus_fingerprint"] == "a" * 64
+    assert payload["assessment_count"] == 1
+
+    second = store(database, profile_id, batch)
+    assert (second.run_id, second.created) == (first.run_id, False)
+    assert database.execute("SELECT COUNT(*) FROM matching_runs").fetchone()[0] == 1
+    assert audit_matching_profile_history(database, profile_id).ok is True
+
+
+def test_a_legacy_run_without_binding_fields_still_passes_the_audit(database):
+    """History is not retroactively corrupt because a new field exists."""
+    profile_id = ensure_user_profile(database, "legacy@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "legacy")
+    legacy = make_batch(profile_id, (opportunity_id,))
+    assert legacy.semantic_binding_version is None
+
+    result = store(database, profile_id, legacy)
+    payload = stored_payload(database, result.run_id)
+    assert "semantic_binding_version" not in payload
+    assert "semantic_binding_fingerprint" not in payload
+
+    report = audit_matching_profile_history(database, profile_id)
+    assert report.ok is True and report.issues == ()
+    assert read_current_matching(database, profile_id).status == "READY"
+
+
+def test_a_legacy_run_reads_back_as_carrying_no_binding(database):
+    profile_id = ensure_user_profile(database, "legacyread@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "legacyread")
+    store(database, profile_id, make_batch(profile_id, (opportunity_id,)))
+    run = read_current_matching(database, profile_id).current_run
+    assert run.semantic_binding_version is None
+    assert run.semantic_binding_fingerprint is None
+
+
+def test_a_new_run_reads_back_carrying_its_binding(database):
+    profile_id = ensure_user_profile(database, "newread@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "newread")
+    store(database, profile_id, bound_batch(profile_id, (opportunity_id,)))
+    run = read_current_matching(database, profile_id).current_run
+    assert run.semantic_binding_version == SEMANTIC_BINDING_VERSION
+    assert run.semantic_binding_fingerprint == "1" * 64
+
+
+def test_a_tampered_binding_is_caught_by_the_run_fingerprint(database):
+    """The binding is protected by the operational identity, not the content one.
+
+    Editing it in the stored payload without recomputing the run fingerprint is
+    exactly the corruption the run layer exists to notice — and the batch
+    fingerprint, being a content digest, correctly does not move.
+    """
+    profile_id = ensure_user_profile(database, "tamper@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "tamper")
+    result = store(database, profile_id, bound_batch(profile_id, (opportunity_id,)))
+    assert audit_matching_profile_history(database, profile_id).ok is True
+
+    payload = stored_payload(database, result.run_id)
+    payload["semantic_binding_fingerprint"] = "9" * 64
+    database.execute(
+        "UPDATE matching_runs SET batch_payload_json=? WHERE id=?",
+        (canonical_json(payload), result.run_id),
+    )
+    database.commit()
+
+    report = audit_matching_profile_history(database, profile_id)
+    assert report.ok is False
+    codes = {issue.code for issue in report.issues}
+    assert "RUN_FINGERPRINT_MISMATCH" in codes
+    # The content digest is untouched, which is the point of the boundary.
+    assert "BATCH_FINGERPRINT_MISMATCH" not in codes
+    assert "BATCH_CONTENT_MISMATCH" not in codes
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ({"semantic_binding_fingerprint": None}, "SEMANTIC_BINDING_PARTIAL"),
+        ({"semantic_binding_version": None}, "SEMANTIC_BINDING_PARTIAL"),
+        (
+            {"semantic_binding_version": "semantic-binding-v0"},
+            "SEMANTIC_BINDING_VERSION_UNSUPPORTED",
+        ),
+        (
+            {"semantic_binding_fingerprint": "not-a-digest"},
+            "SEMANTIC_BINDING_FINGERPRINT_INVALID",
+        ),
+    ],
+)
+def test_malformed_binding_provenance_is_an_explicit_audit_issue(
+    database, mutation, expected
+):
+    profile_id = ensure_user_profile(database, "broken@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "broken")
+    result = store(database, profile_id, bound_batch(profile_id, (opportunity_id,)))
+    payload = stored_payload(database, result.run_id)
+    for key, value in mutation.items():
+        if value is None:
+            payload.pop(key)
+        else:
+            payload[key] = value
+    database.execute(
+        "UPDATE matching_runs SET batch_payload_json=? WHERE id=?",
+        (canonical_json(payload), result.run_id),
+    )
+    database.commit()
+
+    report = audit_matching_profile_history(database, profile_id)
+    assert report.ok is False
+    assert expected in {issue.code for issue in report.issues}
+
+
+def test_a_different_binding_is_a_different_operational_run(database):
+    """Same content identity, different binding, different run identity."""
+    profile_id = ensure_user_profile(database, "twobind@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "twobind")
+    first = store(database, profile_id, bound_batch(profile_id, (opportunity_id,)))
+    second = store(
+        database, profile_id, bound_batch(profile_id, (opportunity_id,), "2" * 64)
+    )
+    assert second.created is True
+    assert second.run_id != first.run_id
+    assert second.run_fingerprint != first.run_fingerprint
+    # The content-oriented batch fingerprint is identical in both runs.
+    batch_fingerprints = {
+        row[0]
+        for row in database.execute("SELECT batch_fingerprint FROM matching_runs")
+    }
+    assert len(batch_fingerprints) == 1
+    assert audit_matching_profile_history(database, profile_id).ok is True
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ({"semantic_binding_fingerprint": None}, "both a version and a fingerprint"),
+        ({"semantic_binding_version": "semantic-binding-v0"}, "unsupported semantic"),
+        ({"semantic_binding_fingerprint": "nope"}, "invalid semantic binding"),
+    ],
+)
+def test_persistence_refuses_to_store_incoherent_binding_provenance(
+    database, mutation, match
+):
+    profile_id = ensure_user_profile(database, "refuse@example.invalid").profile_id
+    opportunity_id = add_opportunity(database, "refuse")
+    batch = replace(bound_batch(profile_id, (opportunity_id,)), **mutation)
+    with pytest.raises(MatchingPersistenceError, match=match):
+        store(database, profile_id, batch)
+    assert database.execute("SELECT COUNT(*) FROM matching_runs").fetchone()[0] == 0

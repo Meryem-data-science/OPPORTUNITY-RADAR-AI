@@ -22,13 +22,16 @@ machine-readable reasons. There is no LLM anywhere in it, no embedding, no
 similarity of its own, no generated sentence and no invented confidence.
 
 One freshness question stays open, narrowly and on purpose. Opportunity-side
-semantic drift — a posting whose title or description moved while its id stayed
-in the cohort — **is** now detected, read-only, by comparing the corpus digest
-Matching itself computes before fitting. Profile-side semantic-document drift is
-**not**: Matching v1 persists no standalone fingerprint of the profile's semantic
+semantic drift **is** now detected, read-only, in both of its forms: content
+drift — a posting whose title or description moved while its id stayed in the
+cohort — by the corpus digest Matching computes before fitting, and
+identity-binding drift — two postings exchanging their documents, which leaves
+that digest untouched — by the ordered `(opportunity_id, document_hash)`
+binding digest beside it. Profile-side semantic-document drift is **not**:
+Matching v1 persists no standalone fingerprint of the profile's semantic
 document, and refitting TF-IDF merely to discover one is not something this phase
-may do. That gap is documented rather than papered over, and closing it belongs
-with Matching, not here.
+may do. That one gap is documented rather than papered over, and closing it
+belongs with Matching, not here.
 
 What 9A deliberately does **not** do: it persists nothing, migrates nothing,
 exposes no HTTP route and changes no page. It also leaves Matching v1 exactly as
@@ -73,6 +76,7 @@ from services.recommendation.fingerprint import (
 from services.recommendation.input_assembly import (
     RECOMMENDATION_INPUT_ASSEMBLY_VERSION,
     current_location_signature,
+    current_semantic_binding_fingerprint,
     current_semantic_corpus_fingerprint,
     RecommendationInputAssemblyResult,
     RecommendationInputRecord,
@@ -176,6 +180,7 @@ __all__ = [
     "canonical_recommendation_assessment_payload",
     "canonical_recommendation_batch_payload",
     "current_location_signature",
+    "current_semantic_binding_fingerprint",
     "current_semantic_corpus_fingerprint",
     "eligibility_signal_status",
     "preferred_rank_score",
