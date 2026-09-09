@@ -151,7 +151,10 @@ from services.collector.qualification.fine_read_model import (
     decode_fine_classification,
 )
 from services.collector.qualification.persistence import input_fingerprint
-from services.digital_twin.preferences.models import OpportunityPreferences
+from services.digital_twin.preferences.models import (
+    ExplicitProfileInputError,
+    OpportunityPreferences,
+)
 from services.digital_twin.preferences.repository import get_profile_preferences
 from services.eligibility.fingerprint import eligibility_fingerprint
 from services.eligibility.inputs import (
@@ -825,9 +828,18 @@ def _assemble_from_snapshot(
             user_id,
             run.run_id,
         )
+    # The four reads below all reach the Phase 3.4C explicit-profile
+    # projections, and their owners are deliberately strict: a row that is
+    # SQL-legal but no longer decodes canonically is refused rather than read
+    # approximately. Recommendation adapts that refusal into its own readiness
+    # contract instead of letting the owner exception escape, because an
+    # unreadable projection is an identified upstream value this phase cannot
+    # safely consume — not a crash, and not an absent preference. Nothing is
+    # guessed, defaulted or repaired here; the row stays malformed until its
+    # owner is resynchronized.
     try:
         profile_input = load_profile_matching_input(connection, profile_id)
-    except MatchingInputError as error:
+    except (MatchingInputError, ExplicitProfileInputError) as error:
         return _incomplete(
             profile_id,
             [
@@ -839,12 +851,43 @@ def _assemble_from_snapshot(
             user_id,
             run.run_id,
         )
-    profile_target = resolve_profile_target(connection, profile_id)
+    try:
+        profile_target = resolve_profile_target(connection, profile_id)
+    except ExplicitProfileInputError as error:
+        # A malformed mobility row is not an unknown preference: it must not
+        # become OPEN, UNKNOWN, MOBILITY_ABSENT_RULE or an absent restriction.
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
+                    f"profile mobility projection is not readable: {error}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
     # The free-text constraints live on the preferences row and are not part of
     # `MatchingPreferences`, so they are read from the Digital Twin's own
     # repository. They are carried verbatim and never parsed.
     declared_constraints: tuple[str, ...] = ()
-    preference_row = get_profile_preferences(connection, profile_id)
+    try:
+        preference_row = get_profile_preferences(connection, profile_id)
+    except ExplicitProfileInputError as error:
+        # Malformed constraints are not "no constraints stated": dropping them
+        # silently would publish a recommendation that hid what the person
+        # actually declared.
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
+                    f"profile preferences projection is not readable: {error}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
     if preference_row is not None:
         value = preference_row.value
         if not isinstance(value, OpportunityPreferences):
@@ -863,6 +906,22 @@ def _assemble_from_snapshot(
     # One read for the whole profile side of every eligibility digest below.
     try:
         eligibility_profile = load_profile_input(connection, profile_id)
+    except ExplicitProfileInputError as error:
+        # Told apart from `EligibilityInputError` on purpose. Eligibility says
+        # "I do not have enough information about this profile"; this says the
+        # persisted projection itself cannot be decoded. Collapsing the two
+        # would blame the Eligibility inputs for an upstream corruption.
+        return _incomplete(
+            profile_id,
+            [
+                _issue(
+                    RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE,
+                    f"profile projections are not readable: {error}",
+                )
+            ],
+            user_id,
+            run.run_id,
+        )
     except EligibilityInputError as error:
         return _incomplete(
             profile_id,

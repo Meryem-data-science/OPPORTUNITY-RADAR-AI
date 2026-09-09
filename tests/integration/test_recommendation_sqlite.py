@@ -59,6 +59,7 @@ from services.collector.qualification.persistence import persist_qualifications
 from services.digital_twin.preferences.models import (
     CareerObjectives,
     ConventionStatus,
+    ExplicitProfileInputError,
     MobilityPreference,
     MobilityScope,
     OpportunityPreferences,
@@ -66,6 +67,8 @@ from services.digital_twin.preferences.models import (
     WorkMode,
 )
 from services.digital_twin.preferences.repository import (
+    get_profile_mobility,
+    get_profile_preferences,
     synchronize_profile_preferences,
 )
 from services.digital_twin.preferences.service import (
@@ -75,6 +78,7 @@ from services.digital_twin.preferences.service import (
 )
 from services.digital_twin.skills.repository import synchronize_profile_skills
 from services.digital_twin.repository import ensure_user_profile
+from services.geography.profile_target import resolve_profile_target
 from services.geography.service import synchronize_location_resolutions
 from services.collector.matching.skill_signals import SkillSignalKind, SkillSignalSource
 from services.eligibility.models import Dimension, ReasonCode, RuleStatus
@@ -1535,3 +1539,194 @@ def test_the_snapshot_does_not_block_a_concurrent_writer(tmp_path):
         writer.close()
     assert held == "TEST ONLY Org"
     assert fresh == "TEST ONLY Renamed Org"
+
+
+# --------------------------------------------------------------------------
+# Malformed persisted Phase 3.4C explicit-profile projections.
+#
+# The Digital Twin decodes its own projections through the strict codec, and a
+# row that is SQL-legal but no longer canonical is refused rather than read
+# approximately. That refusal is correct, and it is not Recommendation's to
+# soften: what this phase owes is to turn it into its own readiness contract
+# instead of letting `ExplicitProfileInputError` escape the assembly.
+#
+# The corruptions below are written straight into the temporary database on
+# purpose. The write API would refuse every one of them — that is the point:
+# they simulate a row that stopped being canonical after it was stored, which
+# is the only way this state occurs.
+# --------------------------------------------------------------------------
+
+
+def _sql_accepts(connection, table, column, value, profile_id):
+    """Prove the corruption is schema-legal by letting SQLite accept it."""
+    connection.execute(
+        f"UPDATE {table} SET {column} = ? WHERE profile_id = ?", (value, profile_id)
+    )
+    connection.commit()
+    stored = connection.execute(
+        f"SELECT {column} FROM {table} WHERE profile_id = ?", (profile_id,)
+    ).fetchone()
+    assert stored is not None and stored[0] == value
+    return stored[0]
+
+
+def test_a_schema_legal_but_codec_invalid_mobility_is_a_readiness_failure(tmp_path):
+    """The exact Codex case: `OPEN` with a JSON scalar where an array belongs.
+
+    `json_valid('"Morocco"')` is true, and the table's second CHECK only
+    demands `json_array_length(...) > 0` when the scope is `RESTRICTED`, so
+    SQLite stores it without complaint. The codec still refuses it, because a
+    scalar is not the array the contract names.
+    """
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+
+    ready = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert ready.status is RecommendationReadinessStatus.READY
+
+    connection.execute(
+        "UPDATE profile_mobility SET mobility_scope = 'OPEN' WHERE profile_id = ?",
+        (identity.profile_id,),
+    )
+    # SQL accepts it: this UPDATE would raise IntegrityError if it did not.
+    _sql_accepts(
+        connection,
+        "profile_mobility",
+        "locations_json",
+        '"Morocco"',
+        identity.profile_id,
+    )
+    scope, locations = connection.execute(
+        "SELECT mobility_scope, locations_json FROM profile_mobility "
+        "WHERE profile_id = ?",
+        (identity.profile_id,),
+    ).fetchone()
+    assert (scope, locations) == ("OPEN", '"Morocco"')
+    assert json.loads(locations) == "Morocco"
+
+    # The owner still refuses it, and that strictness is not being changed.
+    with pytest.raises(ExplicitProfileInputError):
+        get_profile_mobility(connection, identity.profile_id)
+    with pytest.raises(ExplicitProfileInputError):
+        resolve_profile_target(connection, identity.profile_id)
+
+    assert connection.in_transaction is False
+    result = assemble_recommendation_inputs(connection, identity.profile_id)
+
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert result.records == ()
+    codes = [issue.code for issue in result.issues]
+    assert codes == [RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE]
+    assert "mobility" in result.issues[0].message
+    # The snapshot this call opened was still released through the outer
+    # `finally`, exactly as the READY and exception paths are.
+    assert connection.in_transaction is False
+
+    # Nothing was repaired: the malformed row is still there, byte for byte.
+    assert connection.execute(
+        "SELECT mobility_scope, locations_json FROM profile_mobility "
+        "WHERE profile_id = ?",
+        (identity.profile_id,),
+    ).fetchone() == ("OPEN", '"Morocco"')
+    connection.close()
+
+
+def test_a_malformed_mobility_is_not_read_as_an_open_or_unknown_preference(tmp_path):
+    """An invalid value is not an absent one, and must not be routed as one."""
+    connection, _, identity, ids, _ = build_corpus(tmp_path)
+
+    # A profile that genuinely stated nothing is UNKNOWN, and READY.
+    connection.execute(
+        "DELETE FROM profile_mobility WHERE profile_id = ?", (identity.profile_id,)
+    )
+    connection.commit()
+    absent = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert absent.status is RecommendationReadinessStatus.READY
+
+    # The same profile with an unreadable row is not: it stops the cohort.
+    connection.close()
+    connection, _, identity, ids, _ = build_corpus(tmp_path / "second")
+    connection.execute(
+        "UPDATE profile_mobility SET mobility_scope = 'OPEN', locations_json = ? "
+        "WHERE profile_id = ?",
+        ('"Morocco"', identity.profile_id),
+    )
+    connection.commit()
+    result = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert result.records == ()
+    assert [issue.code for issue in result.issues] == [
+        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE
+    ]
+    connection.close()
+
+
+def test_a_schema_legal_but_codec_invalid_preferences_row_is_a_readiness_failure(
+    tmp_path,
+):
+    """Not a mobility special case: the same class, on another projection.
+
+    `preferred_domains_json` is only constrained by `json_valid(...)`, so a
+    JSON scalar is stored happily and refused by the codec, which expects a
+    JSON array of text entries.
+    """
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+
+    ready = assemble_recommendation_inputs(connection, identity.profile_id)
+    assert ready.status is RecommendationReadinessStatus.READY
+
+    _sql_accepts(
+        connection,
+        "profile_preferences",
+        "preferred_domains_json",
+        '"Data Science"',
+        identity.profile_id,
+    )
+    with pytest.raises(ExplicitProfileInputError):
+        get_profile_preferences(connection, identity.profile_id)
+
+    result = assemble_recommendation_inputs(connection, identity.profile_id)
+
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert result.records == ()
+    assert [issue.code for issue in result.issues] == [
+        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE
+    ]
+    # It stops at the first unreadable boundary — the Matching profile input —
+    # rather than reaching the later preference read.
+    assert "profile projections are not readable" in result.issues[0].message
+    assert connection.in_transaction is False
+
+    # Still malformed. Recommendation reported it; it did not resynchronize
+    # Phase 3.4C and did not rewrite the row.
+    assert connection.execute(
+        "SELECT preferred_domains_json FROM profile_preferences WHERE profile_id = ?",
+        (identity.profile_id,),
+    ).fetchone()[0] == '"Data Science"'
+    connection.close()
+
+
+def test_an_invalid_projection_leaves_a_caller_owned_transaction_alone(tmp_path):
+    """The new early returns obey the snapshot-ownership contract too."""
+    connection, _, identity, _, _ = build_corpus(tmp_path)
+    connection.execute(
+        "UPDATE profile_mobility SET mobility_scope = 'OPEN', locations_json = ? "
+        "WHERE profile_id = ?",
+        ('"Morocco"', identity.profile_id),
+    )
+    connection.commit()
+
+    connection.execute("BEGIN")
+    assert connection.in_transaction is True
+
+    result = assemble_recommendation_inputs(connection, identity.profile_id)
+
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert [issue.code for issue in result.issues] == [
+        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE
+    ]
+    # Neither committed nor rolled back: the caller's snapshot is still theirs.
+    assert connection.in_transaction is True
+
+    connection.rollback()
+    assert connection.in_transaction is False
+    connection.close()

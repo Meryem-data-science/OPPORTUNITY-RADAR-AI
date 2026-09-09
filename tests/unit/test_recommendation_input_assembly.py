@@ -19,9 +19,12 @@ from services.collector.matching import (
     MATCHING_RULES_VERSION,
     MATCHING_SELECTION_VERSION,
     SEMANTIC_PERCENTILE_VERSION,
+    MatchingInputError,
     MatchingPersistenceAuditError,
     MatchingReadError,
 )
+from services.digital_twin.preferences.models import ExplicitProfileInputError
+from services.eligibility.inputs import EligibilityInputError
 from services.recommendation import (
     RECOMMENDATION_INPUT_ASSEMBLY_VERSION,
     RecommendationReadinessIssueCode,
@@ -459,3 +462,248 @@ def test_the_snapshot_transaction_is_not_permission_to_write():
         "synchronize_location_resolutions",
     ):
         assert forbidden not in referenced
+
+
+# --------------------------------------------------------------------------
+# The explicit-profile error boundary, one named owner call at a time.
+#
+# Four Recommendation-side reads reach the strict Phase 3.4C projections, and
+# an integration test can only ever prove the first one that fails. These
+# monkeypatch each owner boundary in turn, so every adapter is shown to hold on
+# its own rather than being covered by the one before it.
+# --------------------------------------------------------------------------
+
+PROFILE_BOUNDARIES = (
+    "load_profile_matching_input",
+    "resolve_profile_target",
+    "get_profile_preferences",
+    "load_profile_input",
+)
+
+
+def _profile_reads(monkeypatch, failing, error):
+    """Let every profile boundary answer, except the one under test."""
+    for name in PROFILE_BOUNDARIES:
+        if name == failing:
+
+            def raiser(*_args, _error=error, **_kwargs):
+                raise _error
+
+            monkeypatch.setattr(
+                f"services.recommendation.input_assembly.{name}", raiser
+            )
+        elif name == "get_profile_preferences":
+            # None is the honest "this profile stated nothing" answer.
+            monkeypatch.setattr(
+                f"services.recommendation.input_assembly.{name}", lambda *_a, **_k: None
+            )
+        else:
+            monkeypatch.setattr(
+                f"services.recommendation.input_assembly.{name}",
+                lambda *_a, **_k: SimpleNamespace(),
+            )
+
+
+@pytest.mark.parametrize("boundary", PROFILE_BOUNDARIES)
+def test_every_profile_boundary_reports_an_unreadable_projection(
+    monkeypatch, boundary
+):
+    """`ExplicitProfileInputError` becomes INVALID_UPSTREAM_VALUE, everywhere."""
+    connection = Connection()
+    _profile_reads(
+        monkeypatch, boundary, ExplicitProfileInputError("TEST ONLY not canonical")
+    )
+
+    result = invoke(monkeypatch, connection=connection, selected=())
+
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert result.records == ()
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE
+    ]
+    assert "TEST ONLY not canonical" in result.issues[0].message
+    # The transaction this call opened is still released on the new paths.
+    assert connection.began == 1
+    assert connection.rolled_back == 1
+    assert connection.in_transaction is False
+
+
+def test_the_mobility_boundary_names_the_projection_it_could_not_read(monkeypatch):
+    _profile_reads(
+        monkeypatch,
+        "resolve_profile_target",
+        ExplicitProfileInputError("mobility.locations must be a JSON array"),
+    )
+
+    result = invoke(monkeypatch, selected=())
+
+    assert codes(result) == [RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE]
+    assert "mobility" in result.issues[0].message
+
+
+def test_the_preferences_boundary_names_the_projection_it_could_not_read(monkeypatch):
+    _profile_reads(
+        monkeypatch,
+        "get_profile_preferences",
+        ExplicitProfileInputError("preferences.preferred_domains must be a JSON array"),
+    )
+
+    result = invoke(monkeypatch, selected=())
+
+    assert codes(result) == [RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE]
+    assert "preferences" in result.issues[0].message
+
+
+def test_an_eligibility_input_gap_keeps_its_own_distinct_readiness_code(monkeypatch):
+    """The two exceptions are not collapsed: they answer different questions.
+
+    `EligibilityInputError` says Phase 3.6 does not have enough information
+    about this profile. `ExplicitProfileInputError` says the persisted
+    projection cannot be decoded at all. Reporting the second as the first
+    would blame the eligibility inputs for an upstream corruption.
+    """
+    _profile_reads(
+        monkeypatch,
+        "load_profile_input",
+        EligibilityInputError("TEST ONLY profile has no eligibility inputs"),
+    )
+
+    result = invoke(monkeypatch, selected=())
+
+    assert result.status is RecommendationReadinessStatus.INCOMPLETE
+    assert result.records == ()
+    assert codes(result) == [
+        RecommendationReadinessIssueCode.ELIGIBILITY_INPUT_INCOMPLETE
+    ]
+
+
+def test_a_matching_input_error_keeps_reporting_an_invalid_upstream_value(monkeypatch):
+    """The pre-existing mapping at the first boundary is unchanged."""
+    _profile_reads(
+        monkeypatch,
+        "load_profile_matching_input",
+        MatchingInputError("TEST ONLY profile 41 does not exist"),
+    )
+
+    result = invoke(monkeypatch, selected=())
+
+    assert codes(result) == [RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE]
+
+
+@pytest.mark.parametrize("boundary", PROFILE_BOUNDARIES)
+def test_an_unexpected_failure_at_a_profile_boundary_still_escapes(
+    monkeypatch, boundary
+):
+    """The catches stay narrow: a programming defect must not become readiness.
+
+    An unreadable projection is a fact about the data. A `TypeError` is a fact
+    about this code, and turning it into an INCOMPLETE would hide it behind a
+    verdict that looks like ordinary upstream staleness.
+    """
+    connection = Connection()
+    _profile_reads(monkeypatch, boundary, TypeError("TEST ONLY coding defect"))
+
+    with pytest.raises(TypeError, match="TEST ONLY coding defect"):
+        invoke(monkeypatch, connection=connection, selected=())
+
+    # And the snapshot is still released, through the same outer `finally`.
+    assert connection.in_transaction is False
+    assert connection.rolled_back == 1
+
+
+def test_an_invalid_projection_does_not_end_a_caller_owned_transaction(monkeypatch):
+    connection = Connection()
+    connection.execute("BEGIN")
+    assert connection.in_transaction is True
+    _profile_reads(
+        monkeypatch,
+        "resolve_profile_target",
+        ExplicitProfileInputError("TEST ONLY not canonical"),
+    )
+
+    result = invoke(monkeypatch, connection=connection, selected=())
+
+    assert codes(result) == [RecommendationReadinessIssueCode.INVALID_UPSTREAM_VALUE]
+    assert connection.in_transaction is True
+    assert connection.began == 1  # the caller's, not a nested one
+    assert connection.rolled_back == 0
+
+
+def _assembly_tree() -> ast.AST:
+    source = pathlib.Path("services/recommendation/input_assembly.py").read_text()
+    return ast.parse(source)
+
+
+def _handler_types(handler: ast.ExceptHandler) -> set[str]:
+    if handler.type is None:
+        return {"<bare>"}
+    parts = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return {ast.unparse(part) for part in parts}
+
+
+def _guards_of(tree: ast.AST, call: str) -> list[set[str]]:
+    """The exception types of every `try` whose body calls `call`."""
+    guards = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        called = {
+            ast.unparse(inner.func)
+            for inner in ast.walk(ast.Module(body=node.body, type_ignores=[]))
+            if isinstance(inner, ast.Call)
+        }
+        if call in called:
+            guards.append(set().union(*(_handler_types(h) for h in node.handlers)))
+    return guards
+
+
+def test_each_profile_boundary_translates_named_owner_exceptions_only():
+    """Narrow on purpose: a coding defect must still fail loudly.
+
+    `ExplicitProfileInputError` happens to subclass `ValueError`, so catching
+    `ValueError` here would have worked and would also have swallowed every
+    unrelated value bug in the same call. Each boundary names its owners.
+    """
+    tree = _assembly_tree()
+    expected = {
+        "load_profile_matching_input": {
+            "MatchingInputError",
+            "ExplicitProfileInputError",
+        },
+        "resolve_profile_target": {"ExplicitProfileInputError"},
+        "get_profile_preferences": {"ExplicitProfileInputError"},
+        "load_profile_input": {"ExplicitProfileInputError", "EligibilityInputError"},
+    }
+    for call, types in expected.items():
+        guards = _guards_of(tree, call)
+        assert guards, f"{call} is not inside a try block"
+        assert set().union(*guards) == types, call
+
+
+def test_no_broad_exception_class_guards_a_profile_boundary():
+    """Nothing added for this boundary widens into a catch-all."""
+    tree = _assembly_tree()
+    for call in PROFILE_BOUNDARIES:
+        for guard in _guards_of(tree, call):
+            assert not guard & {
+                "<bare>",
+                "BaseException",
+                "Exception",
+                "ValueError",
+                "RuntimeError",
+                "sqlite3.Error",
+                "AssertionError",
+            }, call
+
+
+def test_no_catch_all_exists_anywhere_in_the_assembly():
+    """The two pre-existing `(ValueError, TypeError)` decode guards are not
+    catch-alls and are unchanged; nothing in this module catches `Exception`."""
+    tree = _assembly_tree()
+    caught: set[str] = set()
+    for handler in ast.walk(tree):
+        if isinstance(handler, ast.ExceptHandler):
+            caught |= _handler_types(handler)
+
+    assert "ExplicitProfileInputError" in caught
+    assert not caught & {"<bare>", "Exception", "BaseException", "RuntimeError"}
