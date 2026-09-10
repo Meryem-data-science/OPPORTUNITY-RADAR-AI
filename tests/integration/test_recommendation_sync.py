@@ -451,6 +451,143 @@ def test_a_dry_run_works_over_a_read_only_connection(corpus):
 
 
 # --------------------------------------------------------------------------
+# releasing the snapshot a dry run owns
+#
+# A dry run promises two things — it computes an answer, and it leaves the
+# connection exactly as it found it — and the second is as much part of the
+# contract as the first. Both tests below make a real `ROLLBACK` fail, through
+# SQLite's own authorizer rather than by replacing any function, so what is
+# exercised is the module's real cleanup path against a real `sqlite3.Error`.
+# --------------------------------------------------------------------------
+
+
+def deny_rollback(connection):
+    """Let everything through except the one statement under test.
+
+    `BEGIN` and every read the real assembly performs stay allowed, so the dry
+    run does its actual work and fails only where this is about: releasing the
+    snapshot it owns. SQLite raises `DatabaseError: not authorized`, which is a
+    `sqlite3.Error` arriving from SQLite itself.
+    """
+
+    def authorizer(action, first, second, third, fourth):
+        if action == sqlite3.SQLITE_TRANSACTION and first == "ROLLBACK":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    connection.set_authorizer(authorizer)
+
+
+def allow_everything(connection):
+    """Remove the test-only authorizer and end whatever it left open."""
+    connection.set_authorizer(None)
+    if connection.in_transaction:
+        connection.execute("ROLLBACK")
+
+
+def test_a_dry_run_that_cannot_release_its_snapshot_does_not_report_success(corpus):
+    """The release is part of the answer, so a failed release is a failed dry run.
+
+    Without this, a successful assembly whose `ROLLBACK` failed would return a
+    result while the connection stayed inside a transaction this module said it
+    owned and would end — and the caller would be told everything was fine.
+    """
+    connection, _, identity, _, _ = corpus
+    before = rows_of(connection)
+    before_changes = connection.total_changes
+    deny_rollback(connection)
+    try:
+        with pytest.raises(RecommendationSyncError) as raised:
+            sync_recommendations(connection, identity.profile_id, persist=False)
+
+        # The failure is SQLite's own, and it is not swallowed.
+        assert isinstance(raised.value.__cause__, sqlite3.Error)
+        assert "release" in str(raised.value)
+        assert str(identity.profile_id) in str(raised.value)
+        # No result was returned, and nothing was written on the way there.
+        assert rows_of(connection) == before
+        assert connection.total_changes == before_changes
+        # SQLite refused the release, so the transaction really is still open —
+        # which is exactly the state the caller is now told about instead of
+        # being left to discover.
+        assert connection.in_transaction is True
+        # And the connection is still usable, so the caller can act on it.
+        assert connection.execute("SELECT 1").fetchone() == (1,)
+    finally:
+        allow_everything(connection)
+    assert connection.in_transaction is False
+
+
+def test_a_failing_release_never_speaks_over_the_failure_that_caused_it(corpus):
+    """The opposite branch: cleanup must not replace the original error.
+
+    A synchronization failure is raised inside a snapshot this module owns, and
+    the release of that snapshot then fails too. What the caller must see is why
+    the synchronization failed — an absent profile here, raised by the real code
+    path after `BEGIN` — never the secondary rollback problem.
+    """
+    connection, _, _, _, _ = corpus
+    before = rows_of(connection)
+    before_changes = connection.total_changes
+    deny_rollback(connection)
+    try:
+        with pytest.raises(RecommendationSyncError) as raised:
+            sync_recommendations(connection, 99999, persist=False)
+
+        # The original failure, unchanged and unreplaced.
+        assert "profile 99999 does not exist" in str(raised.value)
+        assert "release" not in str(raised.value)
+        # It is the orchestration failure, so it carries no SQLite cause from a
+        # rollback that also failed afterwards.
+        assert not isinstance(raised.value.__cause__, sqlite3.Error)
+        assert rows_of(connection) == before
+        assert connection.total_changes == before_changes
+    finally:
+        allow_everything(connection)
+    assert connection.in_transaction is False
+
+
+def test_a_caller_owned_dry_run_snapshot_is_never_released_even_when_that_fails(
+    corpus,
+):
+    """The borrowed case is untouched by either cleanup path.
+
+    A transaction the caller opened is not this module's to end, so the
+    authorizer that would make a release fail never gets the chance: no
+    `ROLLBACK` is attempted at all, and the caller's transaction survives the
+    dry run exactly as it was.
+    """
+    connection, _, identity, _, _ = corpus
+    connection.execute("BEGIN")
+    connection.execute("INSERT INTO users(email) VALUES ('pending@example.invalid')")
+    deny_rollback(connection)
+    try:
+        result = sync_recommendations(
+            connection, identity.profile_id, persist=False
+        )
+
+        assert result.state is RecommendationReadinessStatus.READY
+        assert result.persisted is False
+        # Still the caller's, still open, still holding the caller's own work.
+        assert connection.in_transaction is True
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM users WHERE email='pending@example.invalid'"
+            ).fetchone()[0]
+            == 1
+        )
+    finally:
+        allow_everything(connection)
+    assert connection.in_transaction is False
+    assert (
+        connection.execute(
+            "SELECT COUNT(*) FROM users WHERE email='pending@example.invalid'"
+        ).fetchone()[0]
+        == 0
+    )
+
+
+# --------------------------------------------------------------------------
 # the READY publication
 # --------------------------------------------------------------------------
 

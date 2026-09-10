@@ -59,9 +59,9 @@ What this module does **not** do, and must never be extended to do:
         no Matching resynchronization, no qualification reprojection, no
         geography resolution, no re-run of the eligibility engine. When the
         assembly says a projection is stale, the answer is INCOMPLETE and the
-        name of the phase
-        that owns the repair — not a repair performed from here, which would
-        make this module a second writer of everybody else's truth.
+        name of the phase that owns the repair — not a repair performed from
+        here, which would make this module a second writer of everybody
+        else's truth.
 
     it computes no recommendation of its own
         no score, no disposition, no reason, no ranking, no weight, no
@@ -505,12 +505,19 @@ def _synchronize(
 # --------------------------------------------------------------------------
 
 
-def _release(connection: sqlite3.Connection) -> None:
-    """End a transaction this module opened, without hiding why it is ending.
+def _rollback_preserving_failure(connection: sqlite3.Connection) -> None:
+    """Release a transaction while another failure is already on its way out.
 
-    A rollback that fails must not replace the exception that caused it: the
-    original failure is what the caller needs, and the connection is left for
-    the caller to deal with either way.
+    Only ever called with an exception in flight, and that is what makes the
+    suppression correct: the failure the caller needs to see is the one that
+    ended the synchronization, not a secondary error from the cleanup after it.
+    Replacing the first with the second would hide the actual cause and report a
+    rollback problem in its place.
+
+    It is *not* the right cleanup for a call that succeeded — there the release
+    is the last thing that can still go wrong, and swallowing it would let this
+    module return a result while silently keeping a transaction it promised to
+    end. `_release_snapshot` is that path.
     """
     if not connection.in_transaction:
         return
@@ -518,6 +525,33 @@ def _release(connection: sqlite3.Connection) -> None:
         connection.execute("ROLLBACK")
     except sqlite3.Error:
         pass
+
+
+def _release_snapshot(connection: sqlite3.Connection, profile_id: int) -> None:
+    """Release a snapshot this module owns, after the work itself succeeded.
+
+    A dry run promises two things: it computes an answer, and it leaves the
+    connection exactly as it found it. Both are part of the contract, so a
+    release that fails is a failed dry run — not a successful one with a
+    transaction quietly still open behind it. The result is therefore discarded
+    and the SQLite failure is reported with its cause chained.
+
+    Nothing is committed here, on any path. A dry run has nothing of its own to
+    commit, and `ROLLBACK` also guarantees it can never commit an unrelated
+    write that happened to be pending.
+    """
+    if not connection.in_transaction:
+        # Nothing left to release, so there is nothing that can fail. Reached
+        # only if something already ended the snapshot, which the read-only work
+        # above never does.
+        return
+    try:
+        connection.execute("ROLLBACK")
+    except sqlite3.Error as error:
+        raise RecommendationSyncError(
+            f"cannot release the recommendation dry-run snapshot for profile"
+            f" {profile_id}"
+        ) from error
 
 
 def _persisted_sync(
@@ -544,7 +578,7 @@ def _persisted_sync(
     except sqlite3.Error as error:
         # Reached by a COMMIT that failed, and by nothing else: every business
         # read and write below is already translated where it happens.
-        _release(connection)
+        _rollback_preserving_failure(connection)
         raise RecommendationSyncError(
             f"cannot commit the synchronization of profile {profile_id}"
         ) from error
@@ -552,7 +586,7 @@ def _persisted_sync(
         # Including KeyboardInterrupt and SystemExit: the transaction must be
         # released whatever ends the call, but nothing here relabels an
         # unexpected exception as an ordinary synchronization outcome.
-        _release(connection)
+        _rollback_preserving_failure(connection)
         raise
     return result
 
@@ -567,6 +601,13 @@ def _dry_sync(
     module cannot see. One opened here is always released, on every path, with
     `ROLLBACK`: there is nothing of this function's own to commit, and rolling
     back also guarantees it can never commit an unrelated pending write.
+
+    How that release is reported depends on whether the work succeeded, and the
+    two are not interchangeable. After a failure the release must not speak over
+    the failure that caused it. After a success the release is the last thing
+    that can still go wrong, and it is reported: returning a result while
+    holding a transaction this function said it would end would leave the caller
+    with a connection whose state contradicts what it was just told.
     """
     owns_snapshot = not connection.in_transaction
     if owns_snapshot:
@@ -577,10 +618,14 @@ def _dry_sync(
                 f"cannot open a read snapshot for profile {profile_id}"
             ) from error
     try:
-        return _synchronize(connection, profile_id, persist=False)
-    finally:
+        result = _synchronize(connection, profile_id, persist=False)
+    except BaseException:
         if owns_snapshot:
-            _release(connection)
+            _rollback_preserving_failure(connection)
+        raise
+    if owns_snapshot:
+        _release_snapshot(connection, profile_id)
+    return result
 
 
 def sync_recommendations(
