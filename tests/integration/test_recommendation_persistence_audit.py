@@ -259,6 +259,15 @@ def batch_payload(connection, run_id):
     )
 
 
+def stored_readiness(connection, profile_id):
+    """The readiness text exactly as SQLite holds it, not as a test built it."""
+    return connection.execute(
+        "SELECT readiness_issues_json FROM recommendation_profile_state"
+        " WHERE profile_id=?",
+        (profile_id,),
+    ).fetchone()[0]
+
+
 def readiness_json(*issues):
     """The canonical array 9B.3 will write, built from `(code, message, id)`."""
     return canonical_json(
@@ -1955,6 +1964,99 @@ def test_a_readiness_message_that_cannot_be_encoded_is_never_repaired_into_a_val
     assert corrupt.audit_fingerprint != literal.audit_fingerprint
 
 
+#: An ordinary JSON object whose stored content is exactly what a value-by-value
+#: rendering of an unpaired surrogate produces. Nothing about it is corrupt: it
+#: is six perfectly ordinary characters under a key a persisted array is free to
+#: carry, and a state storing it is a different state from one storing the
+#: character it resembles.
+SENTINEL_SHAPED_ENTRY = {"__not_utf8__": "\\ud800"}
+
+
+def test_two_corrupt_readiness_states_that_render_alike_stay_distinct(synced):
+    """The review case: a real surrogate, and stored content shaped like its tag.
+
+    State A stores two actual unpaired surrogates. State B stores the object a
+    rendered surrogate looks like, beside one real surrogate — so a stable
+    identity built by rewriting the decoded tree value by value collapses both
+    onto the same representation. Their findings are identical by construction,
+    which is what made that collision total: the digest had nothing else left to
+    tell two genuinely different persisted states apart.
+
+    Carrying the stored text for an array that has no canonical UTF-8 form is
+    what fixes it, and the fix is only real if the findings stay as they were —
+    weakening them would separate the digests by hiding corruption instead.
+    """
+    synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    state_a = storable_json([LONE_SURROGATE, LONE_SURROGATE])
+    state_b = storable_json([SENTINEL_SHAPED_ENTRY, LONE_SURROGATE])
+    # Two different persisted states, and SQLite really is holding both texts.
+    assert state_a != state_b
+
+    incomplete_with(synced.connection, synced.profile_id, state_a)
+    assert stored_readiness(synced.connection, synced.profile_id) == state_a
+    audit_a = fingerprint_of(synced.connection, synced.profile_id)
+
+    incomplete_with(synced.connection, synced.profile_id, state_b)
+    assert stored_readiness(synced.connection, synced.profile_id) == state_b
+    audit_b = fingerprint_of(synced.connection, synced.profile_id)
+
+    assert audit_a.ok is False and audit_b.ok is False
+    # Neither state is reported any less than it was: same codes, same details,
+    # in the same order — so the findings genuinely cannot separate them.
+    assert audit_a.issues == audit_b.issues
+    assert codes(audit_a) == [
+        "READINESS_ISSUES_INVALID_JSON",
+        "READINESS_ISSUE_MALFORMED",
+        "READINESS_ISSUE_MALFORMED",
+    ]
+    # The identity does.
+    assert audit_a.audit_fingerprint != audit_b.audit_fingerprint
+
+
+def test_no_stored_column_value_can_render_as_the_unencodable_tag(synced):
+    """Why the tag cannot collide: nothing SQLite stores digests as an object.
+
+    The tag is only safe while `_stable_value` is a function of one *stored
+    column value* — null, an integer, a real, text or a blob. A decoded JSON
+    tree is the one kind of input that can be an object itself, and it is never
+    rendered here, so no ordinary content can reach the tagged shape.
+
+    The tagged branch is unreachable in this build for a second, independent
+    reason, asserted below: a string strict UTF-8 refuses cannot be written to a
+    column in the first place. It is kept as a guard, not as a rendering of
+    anything a database can hold.
+    """
+    from services.recommendation.persistence_audit import _stable_value
+
+    for value in (
+        None,
+        0,
+        1,
+        -1,
+        1.5,
+        True,
+        False,
+        "",
+        "text",
+        "café",
+        b"\x00\xff",
+        # Including the stored text that resembles the tag, and the tag's own key.
+        "\\ud800",
+        "__not_utf8__",
+        '{"__not_utf8__":"\\ud800"}',
+    ):
+        rendered = _stable_value(value)
+        assert not isinstance(rendered, dict), value
+        assert canonical_json(rendered).encode("utf-8")
+
+    # Only a string strict UTF-8 refuses is tagged, and SQLite cannot hand one
+    # back: the write is refused before any column could hold it.
+    assert isinstance(_stable_value(LONE_SURROGATE), dict)
+    with pytest.raises(UnicodeEncodeError):
+        synced.connection.execute("SELECT ?", (LONE_SURROGATE,))
+
+
 def test_legitimate_non_ascii_text_is_not_treated_as_corruption(synced):
     """Non-ASCII is not the defect; unencodable is. Accented text stays valid."""
     stored = synced.store(ranked_batch(synced))
@@ -2030,10 +2132,12 @@ def test_the_canonical_utf8_primitive_separates_valid_text_from_unencodable(sync
     assert data == text.encode("utf-8")
     assert _canonical_utf8({"value": LONE_SURROGATE}) is None
 
-    # A valid string keeps exactly its old stable rendering; an unencodable one
-    # is tagged, and the tag is itself always encodable — including when it is
-    # reached through the nested containers decoded readiness entries arrive as.
+    # A valid string keeps exactly its old stable rendering, and an unencodable
+    # one is tagged rather than carried.
     assert _stable_value("café") == "café"
+    assert canonical_json(_stable_value(LONE_SURROGATE)).encode("utf-8")
+    # Decoded trees are not rendered here at all — `_readiness_identity` carries
+    # the stored text instead — but one reaching this far still has to encode.
     nested = _stable_value([{"message": LONE_SURROGATE, "opportunity_id": None}])
     assert canonical_json(nested).encode("utf-8")
     assert LONE_SURROGATE not in canonical_json(nested)

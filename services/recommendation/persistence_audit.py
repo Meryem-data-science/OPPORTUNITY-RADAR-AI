@@ -338,9 +338,14 @@ def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-#: How a value strict UTF-8 cannot carry appears in the stable audit payload.
-#: Tagging replaces the string with a single-key *object*, which no valid stored
-#: string can digest as, so a tagged value never collides with an ordinary one.
+#: How a stored string strict UTF-8 cannot carry appears in the stable audit
+#: payload. Tagging replaces the string with a single-key *object*, and what
+#: reaches `_stable_value` is only ever one stored column value — null, an
+#: integer, a real, text or a blob — none of which can digest as an object. That
+#: disjointness is the whole reason the tag is safe, and it is why a *decoded*
+#: JSON tree is never rendered value by value: an object is exactly the shape
+#: ordinary decoded content can also have, so a tree carrying this key would
+#: digest identically to a tree carrying the character it stands in for.
 _UNENCODABLE_KEY = "__not_utf8__"
 
 
@@ -360,7 +365,7 @@ def _escaped(value: str) -> str:
 
 
 def _stable_value(value: object) -> Any:
-    """A JSON-safe, deterministic rendering of one stored value.
+    """A JSON-safe, deterministic rendering of one stored **column** value.
 
     Everything SQLite stores in the audited TEXT and INTEGER columns is already
     JSON-safe; a BLOB left behind by a restore is not, and letting one reach
@@ -369,27 +374,22 @@ def _stable_value(value: object) -> Any:
     not a normalization: nothing is coerced into a plausible-looking version of
     itself, and the finding that named the value still stands beside it.
 
-    A `str` is JSON-safe but not necessarily *encodable*, so one that strict
-    UTF-8 refuses is tagged rather than carried — the audit fingerprint is taken
-    over these bytes and an unpaired surrogate would abort it. Decoded readiness
-    entries arrive here as lists and objects, so containers are walked rather
-    than `repr`-ed, and a value that is encodable is returned exactly as before:
-    valid data digests to what it always digested to.
+    A `str` is JSON-safe but not necessarily *encodable*, and the audit
+    fingerprint is taken over these bytes, so one that strict UTF-8 refuses is
+    tagged rather than carried. SQLite cannot hand such a string back — a column
+    that could not be encoded could never have been written — so that branch
+    guards a path this build cannot reach, and it is kept only so that no future
+    caller can abort the fingerprint. It is safe precisely because the argument
+    is a stored column value: a decoded JSON tree is never rendered here, which
+    is what stops the tag from colliding with ordinary content shaped like it.
     """
     if isinstance(value, str):
         return value if _is_utf8(value) else {_UNENCODABLE_KEY: _escaped(value)}
     if value is None or isinstance(value, (int, float, bool)):
         return value
-    if isinstance(value, list):
-        return [_stable_value(item) for item in value]
-    if isinstance(value, dict):
-        if all(isinstance(key, str) and _is_utf8(key) for key in value):
-            return {key: _stable_value(item) for key, item in value.items()}
-        # An unencodable *key* cannot be tagged in place without two distinct
-        # keys collapsing into one key, so the object is carried whole as the
-        # deterministic rendering of what was stored.
-        return {_UNENCODABLE_KEY: _escaped(repr(value))}
-    return repr(value)
+    # `repr` already escapes what UTF-8 cannot carry, and `_escaped` makes that
+    # a property of this function rather than of `repr`: the result encodes.
+    return _escaped(repr(value))
 
 
 # --------------------------------------------------------------------------
@@ -1223,25 +1223,40 @@ class _ProfileStateAudit:
 def _readiness_identity(raw: object, entries: list[Any] | None) -> dict[str, Any]:
     """The stored readiness array's deterministic contribution to the digest.
 
-    A decodable array contributes its decoded entries **in stored order**. The
-    order is part of the state contract — `input_assembly` sorts the issues once,
-    before they are ever stored — so it is preserved here rather than sorted, for
-    the same reason the audit verifies that order instead of repairing it. Among
-    valid states the decoded value and the stored bytes determine each other,
-    canonical JSON being a bijection, so nothing is lost by carrying the
-    structure rather than the text.
+    A decodable array that *has* a canonical UTF-8 form contributes its decoded
+    entries **in stored order**. The order is part of the state contract —
+    `input_assembly` sorts the issues once, before they are ever stored — so it
+    is preserved here rather than sorted, for the same reason the audit verifies
+    that order instead of repairing it. Among valid states the decoded value and
+    the stored bytes determine each other, canonical JSON being a bijection, so
+    nothing is lost by carrying the structure rather than the text.
 
-    The entries go through `_stable_value`, which is a no-op for every value a
-    valid state can hold and tags the one thing this digest cannot be taken
-    over: a decoded string strict UTF-8 refuses to encode.
+    An array that decodes but has **no** canonical UTF-8 form contributes the
+    stored text instead, and this is the one case where carrying the structure
+    would be wrong rather than merely awkward. Rendering that tree value by
+    value means standing in for a character that cannot be encoded, and every
+    stand-in is itself a value ordinary JSON can contain: a state whose stored
+    content really is the stand-in would then digest identically to the corrupt
+    one, and two genuinely different persisted states would claim to be the same
+    state. The stored text has no stand-in — it is what SQLite actually holds,
+    two different stored texts are two different identities, and it is always
+    encodable, because a column that was not could never have been written.
 
     A value that is not a decodable array has no structure to carry, so the
     stored text itself is the identity; the findings already say what is wrong
     with it.
+
+    The three shapes carry different keys, so no one of them can digest as
+    another.
     """
     if entries is None:
         return {"decoded": False, "raw": _stable_value(raw)}
-    return {"decoded": True, "issues": _stable_value(entries)}
+    if _canonical_utf8(entries) is None:
+        # Asked again here rather than passed down from the finding above it:
+        # `_canonical_utf8` is a pure function of the value, so the identity
+        # branch and the finding can never disagree about the same array.
+        return {"decoded": True, "canonical_utf8": False, "raw": _stable_value(raw)}
+    return {"decoded": True, "issues": entries}
 
 
 def _audit_state(
