@@ -47,6 +47,18 @@ What this module deliberately does **not** do, and the distinction matters:
         would be a staleness check, it would make old history unreadable, and it
         is again 9B.3's question.
 
+Each public read is several SELECTs and is taken as **one snapshot**. Python's
+`sqlite3` opens a transaction only for DML, so without a boundary every SELECT
+would be its own implicit read transaction and a writer could commit in between;
+the projection returned would then be a blend of two database states — a history
+count from before an append beside a state row from after it — which is not
+merely stale, it is a picture that never existed. `_read_snapshot` opens one
+*deferred* read transaction (never `BEGIN IMMEDIATE`, which would reserve the
+write lock and fail on a `mode=ro` connection), and ends it with `ROLLBACK`,
+which is the one ending that cannot write even by accident. A transaction the
+caller already owns — its own, or an outer read of this module calling an inner
+one — is borrowed and never finished here.
+
 The JSON payloads come back frozen — objects as `MappingProxyType`, arrays as
 tuples, recursively — so a consumer cannot mutate what it was shown and hand the
 mutation on as if it had been read from the database.
@@ -57,9 +69,10 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from services.collector.matching.fingerprint import canonical_json
 
@@ -181,6 +194,65 @@ def _query(
         return connection.execute(sql, parameters).fetchall()
     except sqlite3.Error as error:
         raise RecommendationReadError(f"cannot read {description}") from error
+
+
+@contextmanager
+def _read_snapshot(
+    connection: sqlite3.Connection, description: str
+) -> Iterator[None]:
+    """Hold one SQLite read transaction across a whole logical public read.
+
+    Every public read below is several SELECTs — a profile check, a history
+    count, a state row, a run, its assessments — and Python's `sqlite3` opens a
+    transaction only for DML, never for a SELECT. Without a boundary each of
+    those statements is its own implicit read transaction, so another writer may
+    commit in between and the projection returned would be a mix of two database
+    states: a `history_count` from before a run was appended, beside a state row
+    from after it. That is not merely stale, it is a picture that never existed.
+
+    A plain `BEGIN` is a **deferred** transaction: it takes no lock until the
+    first read, and from that read onwards every statement sees one snapshot.
+    Never `BEGIN IMMEDIATE` — that reserves the write lock, which is exactly
+    what a reader must not do, and it would fail outright on a `mode=ro`
+    connection.
+
+    Ownership is the other half of the contract. If the caller already has a
+    transaction open — its own, or an outer public read of this module calling
+    an inner one — this borrows it and finishes nothing: committing or rolling
+    back someone else's transaction would silently end work this module cannot
+    see. Only a transaction opened here is ended here.
+
+    It is always ended with `ROLLBACK`. A read transaction has nothing to
+    persist, and `ROLLBACK` is the one ending that cannot write even by
+    accident.
+    """
+    if connection.in_transaction:
+        # Borrowed, not owned: begin nothing, end nothing.
+        yield
+        return
+    try:
+        connection.execute("BEGIN")
+    except sqlite3.Error as error:
+        raise RecommendationReadError(
+            f"cannot open a read snapshot for {description}"
+        ) from error
+    try:
+        yield
+    except BaseException:
+        # The failure inside the body is the report the caller needs; a failure
+        # while releasing the snapshot must not replace it. The snapshot is
+        # still released, so the connection is never left holding a read lock.
+        try:
+            connection.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    try:
+        connection.execute("ROLLBACK")
+    except sqlite3.Error as error:
+        raise RecommendationReadError(
+            f"cannot release the read snapshot for {description}"
+        ) from error
 
 
 # --------------------------------------------------------------------------
@@ -454,8 +526,21 @@ def _read_assessments(
 def read_recommendation_run(
     connection: sqlite3.Connection, run_id: int
 ) -> RecommendationRunReadModel:
-    """Read one persisted recommendation run, ranking included, or refuse."""
+    """Read one persisted recommendation run, ranking included, or refuse.
+
+    Multi-query — the run row, then its assessments — so it reads inside one
+    snapshot even when called directly, and joins the caller's snapshot when it
+    is reached through `read_current_recommendation`.
+    """
     run_id = _positive(run_id, "run_id")
+    with _read_snapshot(connection, f"recommendation run {run_id}"):
+        return _read_run(connection, run_id)
+
+
+def _read_run(
+    connection: sqlite3.Connection, run_id: int
+) -> RecommendationRunReadModel:
+    """The body of `read_recommendation_run`, inside an established snapshot."""
     rows = _query(
         connection,
         f"SELECT {_RUN_COLUMNS} FROM recommendation_runs WHERE id=?",
@@ -594,6 +679,82 @@ def list_recommendation_runs(
     never asked here.
     """
     profile_id = _positive(profile_id, "profile_id")
+    with _read_snapshot(connection, f"recommendation history of profile {profile_id}"):
+        return _list_runs(connection, profile_id)
+
+
+def _summary_from_row(
+    row: tuple, current_run_id: int | None
+) -> RecommendationRunSummary:
+    """Validate one history row as strictly as the full run reader validates its own.
+
+    Building a summary straight out of the cursor would make the history listing
+    the one public read with a weaker contract than the rest of the module: a
+    restored or hand-edited row whose `assessment_count` is negative, whose
+    version text is blank, or whose digest is not a digest would be refused by
+    `read_recommendation_run` and yet handed out here. Every field this summary
+    exposes is therefore checked under the same policy as the full reader.
+
+    What is deliberately not done: no assessment is loaded to validate a
+    summary. The listing stays an index — one row per run, no payloads — and no
+    fingerprint is recomputed, which remains Phase 9B.2b's work.
+    """
+    (
+        run_id,
+        created_at,
+        assessment_count,
+        source_matching_run_id,
+        persistence_version,
+        input_assembly_version,
+        engine_version,
+        rules_version,
+        source_matching_run_fingerprint,
+        batch_fingerprint,
+        run_fingerprint,
+    ) = row
+    run_id = _positive(run_id, "run_id in recommendation history")
+    where = f"recommendation run {run_id}"
+    if not _is_positive_int(assessment_count):
+        raise RecommendationReadError(
+            f"assessment_count of {where} is not a positive integer"
+        )
+    source_matching_run_id = _positive(
+        source_matching_run_id, f"source_matching_run_id of {where}"
+    )
+    for value, description in (
+        (created_at, "created_at"),
+        (persistence_version, "persistence_version"),
+        (input_assembly_version, "input_assembly_version"),
+        (engine_version, "recommendation_engine_version"),
+        (rules_version, "recommendation_rules_version"),
+    ):
+        _require_text(value, f"{description} of {where}")
+    for value, description in (
+        (source_matching_run_fingerprint, "source_matching_run_fingerprint"),
+        (batch_fingerprint, "batch_fingerprint"),
+        (run_fingerprint, "run_fingerprint"),
+    ):
+        _require_fingerprint(value, f"{description} of {where}")
+    return RecommendationRunSummary(
+        run_id,
+        created_at,
+        assessment_count,
+        source_matching_run_id,
+        persistence_version,
+        input_assembly_version,
+        engine_version,
+        rules_version,
+        source_matching_run_fingerprint,
+        batch_fingerprint,
+        run_fingerprint,
+        run_id == current_run_id,
+    )
+
+
+def _list_runs(
+    connection: sqlite3.Connection, profile_id: int
+) -> tuple[RecommendationRunSummary, ...]:
+    """The body of `list_recommendation_runs`, inside an established snapshot."""
     _require_profile(connection, profile_id)
     history_count = _history_count(connection, profile_id)
     current_run_id = _current_run_id(connection, profile_id, history_count)
@@ -607,9 +768,7 @@ def list_recommendation_runs(
         (profile_id,),
         "recommendation_runs",
     )
-    summaries = tuple(
-        RecommendationRunSummary(*row, row[0] == current_run_id) for row in rows
-    )
+    summaries = tuple(_summary_from_row(row, current_run_id) for row in rows)
     if current_run_id is not None and not any(item.is_current for item in summaries):
         raise RecommendationReadError(
             f"current run {current_run_id} is not in profile {profile_id}'s history"
@@ -622,6 +781,23 @@ def read_current_recommendation(
 ) -> RecommendationProfileReadModel:
     """What this profile's recommendation state is: NOT_SYNCED, READY, INCOMPLETE."""
     profile_id = _positive(profile_id, "profile_id")
+    with _read_snapshot(
+        connection, f"recommendation state of profile {profile_id}"
+    ):
+        return _read_current(connection, profile_id)
+
+
+def _read_current(
+    connection: sqlite3.Connection, profile_id: int
+) -> RecommendationProfileReadModel:
+    """The body of `read_current_recommendation`, inside an established snapshot.
+
+    The profile check, the history count, the state row and the current run are
+    four reads of one picture. Split across four implicit transactions they
+    could disagree — a profile observed to exist and then deleted, a count taken
+    before an append beside a pointer taken after it — so they are taken
+    together or not at all.
+    """
     _require_profile(connection, profile_id)
     history_count = _history_count(connection, profile_id)
     state = _read_state(connection, profile_id)
@@ -682,7 +858,7 @@ def read_current_recommendation(
     current_run_id = _positive(
         current_run_id, f"current_run_id for profile {profile_id}"
     )
-    run = read_recommendation_run(connection, current_run_id)
+    run = _read_run(connection, current_run_id)
     if run.profile_id != profile_id:
         raise RecommendationReadError(
             f"current run {current_run_id} belongs to profile {run.profile_id},"

@@ -55,7 +55,10 @@ It hands back a stored run with its ranking in the persisted order, the profile'
 history, and the profile's current state — NOT_SYNCED, READY or INCOMPLETE — and
 refuses a structure it cannot read safely rather than repairing it. It verifies
 only what a safe read needs: shapes, the ranking's contiguity, the column-level
-business contract and the *form* of every digest it exposes.
+business contract and the *form* of every digest it exposes — and it verifies
+them on the history listing exactly as strictly as on a full run. Each public
+read is several queries and is taken as one deferred-read-transaction snapshot,
+so no caller ever sees a projection blended from two database states.
 
 Still absent, and belonging to later sub-phases: the persistence audit that
 recomputes the three recommendation digests over a whole history (9B.2b), and the

@@ -27,6 +27,8 @@ stored history. That is the Phase 9B.2b persistence audit. This module checks
 that every exposed digest has the *form* of a SHA-256 digest, and stops there.
 """
 
+import ast
+from contextlib import contextmanager
 from dataclasses import fields
 import json
 import sqlite3
@@ -884,28 +886,118 @@ def test_the_module_never_writes_and_the_reads_work_on_a_read_only_connection(
         read_only.close()
 
 
-def test_the_read_model_source_contains_no_write_statement():
-    """A structural guarantee, not a stylistic one: this module cannot write."""
+def literal_sql(node):
+    """The literal text of one SQL argument, joining an f-string's fixed parts."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value
+            for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return None
+
+
+def executed_sql():
+    """Every SQL string the read model can hand to SQLite, from its own AST.
+
+    Narrower than scanning the file, and stronger: prose in a docstring is not
+    what runs, and a keyword smuggled through an f-string interpolation would
+    slip past a plain grep. Two shapes reach SQLite — a literal handed straight
+    to `connection.execute(...)`, and a literal handed to the `_query` helper,
+    which is the module's single indirection — and both are collected. Any
+    *other* computed statement fails the walk rather than being skipped.
+    """
     from services.recommendation import read_model
 
     with open(read_model.__file__, encoding="utf-8") as handle:
-        source = handle.read()
-    statements = "".join(
-        line.split("#", 1)[0]
-        for line in source.splitlines(keepends=True)
-        if not line.lstrip().startswith("#")
-    ).upper()
-    for forbidden in (
-        "INSERT ",
-        "UPDATE ",
-        "DELETE ",
-        "BEGIN IMMEDIATE",
-        "COMMIT",
-        "ROLLBACK",
-        "DROP ",
-        "CREATE ",
-    ):
-        assert forbidden not in statements, forbidden
+        tree = ast.parse(handle.read())
+    statements = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "_query":
+            # _query(connection, sql, parameters, description)
+            assert len(node.args) >= 2, ast.dump(node)
+            text = literal_sql(node.args[1])
+            assert text is not None, f"non-literal _query SQL at line {node.lineno}"
+            statements.append(text)
+            continue
+        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "execute"):
+            continue
+        assert node.args, f"execute() with no SQL at line {node.lineno}"
+        text = literal_sql(node.args[0])
+        if text is None:
+            # The single permitted indirection: `_query` forwarding its own
+            # `sql` parameter, whose literals were collected at each call site.
+            assert isinstance(node.args[0], ast.Name) and node.args[0].id == "sql", (
+                f"non-literal SQL at line {node.lineno}"
+            )
+            continue
+        statements.append(text)
+    return statements
+
+
+def test_the_read_model_can_only_execute_reads_and_its_own_transaction_control():
+    """A structural guarantee, not a stylistic one: this module cannot write.
+
+    The invariant moved when the read-snapshot boundary landed: a read
+    transaction legitimately needs `BEGIN` and a way to release it, so those are
+    allowed — and *only* those. Everything that could change a row, and
+    `BEGIN IMMEDIATE` in particular, stays prohibited: reserving the write lock
+    is exactly what a reader must not do, and it would fail on a `mode=ro`
+    connection.
+    """
+    statements = executed_sql()
+    assert statements, "no SQL found; the AST walk is not seeing the module"
+
+    allowed_openings = ("SELECT ", "BEGIN", "COMMIT", "ROLLBACK")
+    for statement in statements:
+        normalized = " ".join(statement.split()).upper()
+        assert normalized.startswith(allowed_openings), statement
+        if normalized.startswith("BEGIN"):
+            # BEGIN or BEGIN DEFERRED, never IMMEDIATE and never EXCLUSIVE.
+            assert normalized in ("BEGIN", "BEGIN DEFERRED"), statement
+        for forbidden in (
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
+            "REPLACE ",
+            "BEGIN IMMEDIATE",
+            "BEGIN EXCLUSIVE",
+            "CREATE ",
+            "DROP ",
+            "ALTER ",
+            "PRAGMA ",
+            "VACUUM",
+            "ATTACH ",
+        ):
+            assert forbidden not in normalized, (forbidden, statement)
+
+    # Exactly one transaction may be opened, and it must be the deferred one.
+    assert [item for item in statements if item.upper().startswith("BEGIN")] == ["BEGIN"]
+
+
+def test_the_read_model_never_calls_a_connection_transaction_method():
+    """`connection.commit()` would end a transaction this module may not own.
+
+    Ownership is decided by `in_transaction` and released with an explicit
+    `ROLLBACK` on the transaction this module opened itself. A bare
+    `.commit()` / `.rollback()` — or `executescript`, which commits implicitly —
+    would bypass that decision and could finish a caller's transaction.
+    """
+    from services.recommendation import read_model
+
+    with open(read_model.__file__, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    called = {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    for forbidden in ("commit", "rollback", "executemany", "executescript", "cursor"):
+        assert forbidden not in called, forbidden
 
 
 def test_a_sqlite_failure_is_reported_as_a_read_error_with_its_cause(synced, tmp_path):
@@ -935,3 +1027,474 @@ def test_the_stored_envelope_the_reader_returns_is_the_one_on_disk(synced):
     assert run.batch_payload["ranked_assessment_fingerprints"] == tuple(
         decoded["ranked_assessment_fingerprints"]
     )
+
+
+# --------------------------------------------------------------------------
+# snapshot consistency
+#
+# Every public read is several SELECTs, and without a boundary each is its own
+# implicit read transaction. The tests below interleave a *real* commit from a
+# second connection between two of the read model's own statements — no sleep,
+# no timing, the hook fires on a named statement — and require the projection
+# handed back to be one database state rather than a blend of two.
+# --------------------------------------------------------------------------
+
+
+class InterleavingConnection(sqlite3.Connection):
+    """Runs a callback once, immediately before a chosen statement.
+
+    This is how a concurrent commit is placed at an exact point inside a public
+    read without a sleep: the hook fires on the first statement whose SQL
+    contains `marker`, which is a position in the read model's own sequence,
+    not a moment in wall-clock time.
+    """
+
+    marker = None
+    action = None
+    fired = False
+
+    def execute(self, sql, parameters=()):
+        if self.action is not None and not self.fired and self.marker in sql:
+            self.fired = True
+            self.action()
+        return super().execute(sql, parameters)
+
+
+def wal_fixture(path):
+    """A migrated database in WAL mode, plus the profile and matching run.
+
+    Production runs SQLite's default rollback journal, where this module's read
+    transaction locks a concurrent writer out completely — the guarantee holds
+    there too, and is asserted separately below. WAL is used here because it is
+    the mode in which the writer genuinely *succeeds* while a reader holds a
+    snapshot, which is what makes "one stable snapshot" observable rather than
+    merely unfalsifiable.
+    """
+    connection = connect_database(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    apply_migrations(connection)
+    profile_id = ensure_user_profile(connection, TEST_ONLY_EMAIL).profile_id
+    ids = tuple(add_opportunity(connection, f"wal-{suffix}") for suffix in "abc")
+    connection.commit()
+    matching = store_matching_batch(
+        connection,
+        profile_id,
+        make_matching_batch(profile_id, ids),
+        selection_version=SELECTION_VERSION,
+    )
+    connection.commit()
+    return Fixture(connection, profile_id, ids, matching)
+
+
+def reader_for(path, marker, action):
+    reader = sqlite3.connect(path, factory=InterleavingConnection)
+    reader.marker = marker
+    reader.action = action
+    return reader
+
+
+def test_read_current_recommendation_observes_one_snapshot(tmp_path):
+    """A newer run committed mid-read must not blend into the older picture."""
+    path = tmp_path / "snapshot-current.db"
+    writer = wal_fixture(path)
+    first = writer.store(writer.batch(writer.opportunity_ids[:2]))
+    writer.connection.commit()
+
+    appended = []
+
+    def append_a_newer_run():
+        # Lands between the history count and the state row: without one
+        # snapshot the result would carry a count of 1 beside a pointer at
+        # run 2 — a database state that never existed.
+        second = writer.store(writer.batch())
+        writer.connection.commit()
+        appended.append(second.run_id)
+
+    reader = reader_for(path, "recommendation_profile_state", append_a_newer_run)
+    try:
+        model = read_current_recommendation(reader, writer.profile_id)
+        assert reader.fired, "the interleaved commit never ran"
+        assert reader.in_transaction is False
+    finally:
+        reader.close()
+
+    assert appended and appended[0] != first.run_id
+    assert model.status == "READY"
+    assert model.history_count == 1
+    assert model.current_run_id == first.run_id
+    assert model.current_run.run_id == first.run_id
+    assert len(model.current_run.assessments) == 2
+
+    # The commit was real: once the snapshot is over, the newer state is there.
+    fresh = read_current_recommendation(writer.connection, writer.profile_id)
+    assert fresh.history_count == 2
+    assert fresh.current_run_id == appended[0]
+    writer.connection.close()
+
+
+def test_list_recommendation_runs_observes_one_snapshot(tmp_path):
+    """The listing and the pointer it marks `is_current` with are one picture."""
+    path = tmp_path / "snapshot-history.db"
+    writer = wal_fixture(path)
+    first = writer.store(writer.batch(writer.opportunity_ids[:2]))
+    writer.connection.commit()
+
+    appended = []
+
+    def append_a_newer_run():
+        # Lands between the state row and the run listing: without one snapshot
+        # the listing would show run 2 while `is_current` still marked run 1.
+        second = writer.store(writer.batch())
+        writer.connection.commit()
+        appended.append(second.run_id)
+
+    reader = reader_for(path, "ORDER BY id DESC", append_a_newer_run)
+    try:
+        history = list_recommendation_runs(reader, writer.profile_id)
+        assert reader.fired, "the interleaved commit never ran"
+        assert reader.in_transaction is False
+    finally:
+        reader.close()
+
+    assert appended
+    assert [item.run_id for item in history] == [first.run_id]
+    assert [item.is_current for item in history] == [True]
+
+    after = list_recommendation_runs(writer.connection, writer.profile_id)
+    assert [item.run_id for item in after] == [appended[0], first.run_id]
+    assert [item.is_current for item in after] == [True, False]
+    writer.connection.close()
+
+
+def test_read_recommendation_run_observes_one_snapshot(tmp_path):
+    """A run and its assessments are read from one state, or not at all."""
+    path = tmp_path / "snapshot-run.db"
+    writer = wal_fixture(path)
+    stored = writer.store(writer.batch())
+    writer.connection.commit()
+
+    def remove_an_assessment():
+        # Lands between the run row and its assessments. Without one snapshot
+        # the reader would hold `assessment_count == 3` from before and find two
+        # rows after, and report a corruption that is really a race.
+        writer.connection.execute(
+            "DELETE FROM recommendation_assessments"
+            " WHERE run_id=? AND rank_position=3",
+            (stored.run_id,),
+        )
+        writer.connection.commit()
+
+    reader = reader_for(path, "FROM recommendation_assessments", remove_an_assessment)
+    try:
+        run = read_recommendation_run(reader, stored.run_id)
+        assert reader.fired, "the interleaved delete never ran"
+        assert reader.in_transaction is False
+    finally:
+        reader.close()
+
+    assert run.assessment_count == 3
+    assert [item.rank_position for item in run.assessments] == [1, 2, 3]
+
+    # The delete was real, and is visible — as a genuine corruption — after it.
+    with pytest.raises(RecommendationReadError, match="assessment count mismatch"):
+        read_recommendation_run(writer.connection, stored.run_id)
+    writer.connection.close()
+
+
+def test_the_default_rollback_journal_locks_a_writer_out_of_the_snapshot(tmp_path):
+    """The same guarantee in the mode production actually runs.
+
+    Under SQLite's default rollback journal there is no second snapshot to give
+    a writer, so a commit attempted inside the read model's read transaction is
+    refused outright. Both modes give the reader one consistent state; only the
+    writer's experience differs.
+    """
+    path = tmp_path / "snapshot-delete-journal.db"
+    connection = connect_database(path)
+    apply_migrations(connection)
+    assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    profile_id = ensure_user_profile(connection, TEST_ONLY_EMAIL).profile_id
+    ids = tuple(add_opportunity(connection, f"dj-{suffix}") for suffix in "ab")
+    connection.commit()
+    matching = store_matching_batch(
+        connection,
+        profile_id,
+        make_matching_batch(profile_id, ids),
+        selection_version=SELECTION_VERSION,
+    )
+    writer = Fixture(connection, profile_id, ids, matching)
+    writer.store()
+    connection.commit()
+
+    refused = []
+
+    def try_to_commit_mid_read():
+        # timeout=0 so the refusal is immediate: this asserts a lock, not a wait.
+        other = sqlite3.connect(path, timeout=0)
+        try:
+            # A perfectly legal write — only the lock may stop it.
+            other.execute(
+                "UPDATE recommendation_profile_state SET updated_at='2020-01-01'"
+                " WHERE profile_id=?",
+                (profile_id,),
+            )
+            other.commit()
+        except sqlite3.OperationalError as error:
+            refused.append(str(error))
+            other.rollback()
+        finally:
+            other.close()
+
+    reader = reader_for(path, "recommendation_profile_state", try_to_commit_mid_read)
+    try:
+        model = read_current_recommendation(reader, profile_id)
+    finally:
+        reader.close()
+
+    assert reader.fired
+    assert refused and "locked" in refused[0]
+    assert model.status == "READY"
+    connection.close()
+
+
+def test_a_caller_owned_transaction_is_borrowed_and_never_finished(synced):
+    """The read model may join a caller's transaction; it may never end one.
+
+    The caller's own uncommitted change is the probe. If the read model had
+    committed, the rollback afterwards could not undo it; if it had rolled back,
+    the change would already be gone before the rollback.
+    """
+    synced.store()
+    synced.connection.commit()
+    target = synced.opportunity_ids[0]
+
+    def organization():
+        return synced.connection.execute(
+            "SELECT organization FROM opportunities WHERE id=?", (target,)
+        ).fetchone()[0]
+
+    original = organization()
+    synced.connection.execute("BEGIN")
+    synced.connection.execute(
+        "UPDATE opportunities SET organization='CALLER-PENDING' WHERE id=?", (target,)
+    )
+    assert synced.connection.in_transaction is True
+
+    assert read_current_recommendation(synced.connection, synced.profile_id).status == (
+        "READY"
+    )
+    assert synced.connection.in_transaction is True
+    assert organization() == "CALLER-PENDING"
+
+    assert list_recommendation_runs(synced.connection, synced.profile_id)
+    assert synced.connection.in_transaction is True
+    assert organization() == "CALLER-PENDING"
+
+    assert read_recommendation_run(synced.connection, 1).run_id == 1
+    assert synced.connection.in_transaction is True
+    assert organization() == "CALLER-PENDING"
+
+    # Still the caller's to end, and still undoable — so nothing committed it.
+    synced.connection.execute("ROLLBACK")
+    assert synced.connection.in_transaction is False
+    assert organization() == original
+
+
+def test_a_failing_read_releases_the_snapshot_it_opened(synced):
+    """An exception must not leave the connection holding a read transaction."""
+    stored = synced.store()
+    synced.connection.commit()
+    assert synced.connection.in_transaction is False
+
+    # A run that does not exist: the failure happens inside the snapshot.
+    with pytest.raises(RecommendationReadError, match="does not exist"):
+        read_recommendation_run(synced.connection, 99999)
+    assert synced.connection.in_transaction is False
+
+    corrupt_run(synced.connection, stored.run_id, batch_payload_json="{")
+    assert synced.connection.in_transaction is False
+    for read, argument in (
+        (read_recommendation_run, stored.run_id),
+        (read_current_recommendation, synced.profile_id),
+    ):
+        with pytest.raises(RecommendationReadError):
+            read(synced.connection, argument)
+        assert synced.connection.in_transaction is False
+
+    # And the connection is still perfectly usable afterwards.
+    assert synced.connection.execute("SELECT 1").fetchone() == (1,)
+    assert list_recommendation_runs(synced.connection, synced.profile_id)
+    assert synced.connection.in_transaction is False
+
+
+def test_the_snapshot_boundary_works_on_a_read_only_connection(
+    synced, database_path
+):
+    """A deferred read transaction takes no write lock, so `mode=ro` is fine."""
+    stored = synced.store()
+    synced.connection.commit()
+    synced.connection.close()
+
+    read_only = connect_readonly_database(database_path)
+    try:
+        assert read_only.in_transaction is False
+        assert read_current_recommendation(read_only, synced.profile_id).status == (
+            "READY"
+        )
+        assert read_only.in_transaction is False
+        assert read_recommendation_run(read_only, stored.run_id).run_id == stored.run_id
+        assert read_only.in_transaction is False
+        assert len(list_recommendation_runs(read_only, synced.profile_id)) == 1
+        assert read_only.in_transaction is False
+        with pytest.raises(RecommendationReadError):
+            read_recommendation_run(read_only, 99999)
+        assert read_only.in_transaction is False
+        assert read_only.total_changes == 0
+    finally:
+        read_only.close()
+
+
+# --------------------------------------------------------------------------
+# strict validation of history summaries
+#
+# The listing used to build a summary straight out of the cursor, which made it
+# the one public read with a weaker contract than the rest of the module: a row
+# `read_recommendation_run` refuses would still be handed out as history. Each
+# field it exposes is corrupted below and the listing must refuse it.
+# --------------------------------------------------------------------------
+
+
+@contextmanager
+def constraints_off(connection):
+    """Write a row `0026` itself would refuse, then put the guards back.
+
+    The schema already rejects most of these values on write. That protects the
+    writes *this build* makes; it does not protect a reader from a restore, a
+    hand-edit or a future migration, and the read model is the layer a consumer
+    holds. Foreign keys go off alongside the CHECKs because some of the corrupt
+    values below are also dangling references.
+    """
+    connection.execute("PRAGMA ignore_check_constraints=ON")
+    connection.execute("PRAGMA foreign_keys=OFF")
+    try:
+        yield
+    finally:
+        connection.execute("PRAGMA ignore_check_constraints=OFF")
+        connection.execute("PRAGMA foreign_keys=ON")
+
+
+@pytest.mark.parametrize(
+    "column,value,expected",
+    [
+        ("id", 0, "run_id in recommendation history must be a positive integer"),
+        ("id", -5, "run_id in recommendation history must be a positive integer"),
+        ("assessment_count", 0, "assessment_count of .* is not a positive integer"),
+        ("assessment_count", -3, "assessment_count of .* is not a positive integer"),
+        (
+            "source_matching_run_id",
+            0,
+            "source_matching_run_id of .* must be a positive integer",
+        ),
+        ("created_at", "", "created_at of .* is not stored text"),
+        ("created_at", "   ", "created_at of .* is not stored text"),
+        ("created_at", " 2026-01-01 ", "created_at of .* is not stored text"),
+        ("persistence_version", "  ", "persistence_version of .* is not stored text"),
+        (
+            "input_assembly_version",
+            "",
+            "input_assembly_version of .* is not stored text",
+        ),
+        (
+            "recommendation_engine_version",
+            " ",
+            "recommendation_engine_version of .* is not stored text",
+        ),
+        (
+            "recommendation_rules_version",
+            "",
+            "recommendation_rules_version of .* is not stored text",
+        ),
+        (
+            "source_matching_run_fingerprint",
+            "A" * 64,
+            "source_matching_run_fingerprint of .* is not a SHA-256 digest",
+        ),
+        (
+            "source_matching_run_fingerprint",
+            "abc",
+            "source_matching_run_fingerprint of .* is not a SHA-256 digest",
+        ),
+        (
+            "batch_fingerprint",
+            "z" * 64,
+            "batch_fingerprint of .* is not a SHA-256 digest",
+        ),
+        (
+            "batch_fingerprint",
+            "",
+            "batch_fingerprint of .* is not a SHA-256 digest",
+        ),
+        (
+            "run_fingerprint",
+            "0" * 63,
+            "run_fingerprint of .* is not a SHA-256 digest",
+        ),
+        (
+            "run_fingerprint",
+            "F" * 64,
+            "run_fingerprint of .* is not a SHA-256 digest",
+        ),
+    ],
+)
+def test_a_corrupt_history_row_is_refused_by_the_listing(synced, column, value, expected):
+    synced.store()
+    # The listing works before the corruption, so the refusal is provably the
+    # corrupted field and not some other defect in the fixture.
+    assert len(list_recommendation_runs(synced.connection, synced.profile_id)) == 1
+
+    with constraints_off(synced.connection):
+        corrupt_run(synced.connection, 1, **{column: value})
+
+    with pytest.raises(RecommendationReadError, match=expected):
+        list_recommendation_runs(synced.connection, synced.profile_id)
+
+
+def test_the_listing_refuses_exactly_what_the_full_run_reader_refuses(synced):
+    """The two public readers must not disagree about what is readable.
+
+    A field exposed by both is validated by both, under the same policy — the
+    history listing is not a back door around `read_recommendation_run`.
+    """
+    stored = synced.store()
+    with constraints_off(synced.connection):
+        corrupt_run(synced.connection, stored.run_id, batch_fingerprint="A" * 64)
+
+    with pytest.raises(RecommendationReadError, match="is not a SHA-256 digest"):
+        read_recommendation_run(synced.connection, stored.run_id)
+    with pytest.raises(RecommendationReadError, match="is not a SHA-256 digest"):
+        list_recommendation_runs(synced.connection, synced.profile_id)
+    with pytest.raises(RecommendationReadError, match="is not a SHA-256 digest"):
+        read_current_recommendation(synced.connection, synced.profile_id)
+
+
+def test_validating_a_summary_still_loads_no_assessment_row(synced):
+    """Strictness must not turn the index into a bulk read.
+
+    The listing is proven to touch no assessment: every statement it issues is
+    counted, and none of them names `recommendation_assessments`.
+    """
+    synced.store(synced.batch(synced.opportunity_ids[:2]))
+    synced.store(synced.batch())
+    synced.connection.commit()
+
+    seen = []
+    synced.connection.set_trace_callback(seen.append)
+    try:
+        history = list_recommendation_runs(synced.connection, synced.profile_id)
+    finally:
+        synced.connection.set_trace_callback(None)
+
+    assert len(history) == 2
+    assert seen, "the trace callback saw nothing"
+    assert not any("recommendation_assessments" in statement for statement in seen), seen
+    assert not any("payload" in statement for statement in seen), seen
