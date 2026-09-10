@@ -50,10 +50,21 @@ and the ranked opportunity ids that `recommendation_batch_fingerprint`
 deliberately excludes. The content digest of 9A is untouched and must stay that
 way; the two answer different questions and neither may stand in for the other.
 
-Still absent, and belonging to later sub-phases: the public read model and the
-persistence audit (9B.2), the freshness → compute → persist orchestration and the
-INCOMPLETE state (9B.3). This package still exposes no HTTP route and changes no
-page.
+Phase 9B.2a adds `read_model.py`: the strict, read-only view of what 9B.1 wrote.
+It hands back a stored run with its ranking in the persisted order, the profile's
+history, and the profile's current state — NOT_SYNCED, READY or INCOMPLETE — and
+refuses a structure it cannot read safely rather than repairing it. It verifies
+only what a safe read needs: shapes, the ranking's contiguity, the column-level
+business contract and the *form* of every digest it exposes — and it verifies
+them on the history listing exactly as strictly as on a full run. Each public
+read is several queries and is taken as one deferred-read-transaction snapshot,
+so no caller ever sees a projection blended from two database states.
+
+Still absent, and belonging to later sub-phases: the persistence audit that
+recomputes the three recommendation digests over a whole history (9B.2b), and the
+freshness → compute → persist orchestration that writes the INCOMPLETE state
+(9B.3) the read model above already knows how to report. This package still
+exposes no HTTP route and changes no page.
 
 **Matching v1's scoring contract is untouched**, which is what makes the
 recommendation a controlled evolution of that baseline rather than a second
@@ -80,6 +91,7 @@ recommendation score. Runs persisted before it stay readable and auditable.
 
     persistence_fingerprint.py  the operational identity of a stored run
     persistence.py              atomic, append-only, idempotent storage
+    read_model.py               strict, read-only views of what was stored
 """
 
 from services.recommendation.engine import (
@@ -167,6 +179,16 @@ from services.recommendation.persistence_fingerprint import (
     canonical_recommendation_run_payload,
     recommendation_run_fingerprint,
 )
+from services.recommendation.read_model import (
+    RecommendationAssessmentReadModel,
+    RecommendationProfileReadModel,
+    RecommendationReadError,
+    RecommendationRunReadModel,
+    RecommendationRunSummary,
+    list_recommendation_runs,
+    read_current_recommendation,
+    read_recommendation_run,
+)
 
 __all__ = [
     "CONFIRMED_GAP_CODES",
@@ -196,6 +218,7 @@ __all__ = [
     "GeographyState",
     "OpportunityTypeSignal",
     "RecommendationAssessment",
+    "RecommendationAssessmentReadModel",
     "RecommendationBatchResult",
     "RecommendationDisposition",
     "RecommendationEligibilityEvidence",
@@ -209,10 +232,14 @@ __all__ = [
     "RecommendationMatchingSnapshot",
     "RecommendationOpportunityContext",
     "RecommendationPersistenceError",
+    "RecommendationProfileReadModel",
+    "RecommendationReadError",
     "RecommendationReadinessIssue",
     "RecommendationReadinessIssueCode",
     "RecommendationReadinessStatus",
     "RecommendationReasonCode",
+    "RecommendationRunReadModel",
+    "RecommendationRunSummary",
     "RecommendationSkillEvidence",
     "RecommendationStoreResult",
     "RequiredSkillComponent",
@@ -233,8 +260,11 @@ __all__ = [
     "current_semantic_binding_fingerprint",
     "current_semantic_corpus_fingerprint",
     "eligibility_signal_status",
+    "list_recommendation_runs",
     "preferred_rank_score",
     "rank_recommendation_assessments",
+    "read_current_recommendation",
+    "read_recommendation_run",
     "recommendation_assessment_fingerprint",
     "recommendation_batch_fingerprint",
     "recommendation_disposition",
