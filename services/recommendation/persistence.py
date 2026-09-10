@@ -19,6 +19,22 @@ Idempotence is by operational identity, not by the UNIQUE index alone. A batch
 whose `run_fingerprint` already exists is read back in full and compared field
 by field against what would have been written; only an exact match is reused.
 Anything else is a corrupt history and is refused rather than repaired.
+
+Two entry points reach the database here and the difference between them is
+transaction ownership, not behaviour. `store_recommendation_batch` opens its own
+`BEGIN IMMEDIATE` and is the whole story for a caller that has one batch to
+write. Phase 9B.3's synchronization has a longer story — readiness, assembly,
+computation and publication must be one transaction, and it therefore owns that
+transaction itself — so the database work is also reachable as two
+package-private primitives that *require* a transaction and open none:
+
+    _store_prepared_recommendation_batch_in_transaction   the READY publication
+    _set_recommendation_state_incomplete_in_transaction   the INCOMPLETE one
+
+Both are the same SQL either caller runs. Nothing about what is written, what is
+refused, or what is reused depends on which door it came through, and the SQL
+that touches these three tables stays here rather than spreading into an
+orchestrator.
 """
 
 from __future__ import annotations
@@ -36,7 +52,11 @@ from .fingerprint import (
     recommendation_assessment_fingerprint,
     recommendation_batch_fingerprint,
 )
-from .input_assembly import RECOMMENDATION_INPUT_ASSEMBLY_VERSION
+from .input_assembly import (
+    RECOMMENDATION_INPUT_ASSEMBLY_VERSION,
+    RecommendationReadinessIssue,
+    RecommendationReadinessIssueCode,
+)
 from .models import (
     RECOMMENDATION_ENGINE_VERSION,
     RECOMMENDATION_RULES_VERSION,
@@ -363,6 +383,242 @@ def _upsert_ready_state(
     )
 
 
+def _require_transaction(connection: sqlite3.Connection, what: str) -> None:
+    """Refuse to write outside a transaction the caller has already opened.
+
+    The primitives below deliberately issue no transaction control, so running
+    one without a transaction would silently autocommit each statement and split
+    a publication that must be atomic into several. That is a programming error
+    in the caller, not a corrupt batch, but it is refused just as loudly.
+    """
+    if not connection.in_transaction:
+        raise RecommendationPersistenceError(
+            f"{what} requires a transaction its caller has already opened"
+        )
+
+
+def _set_recommendation_state_incomplete_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    *,
+    issues: tuple[RecommendationReadinessIssue, ...],
+    input_assembly_version: str,
+) -> None:
+    """Publish INCOMPLETE: the pointer goes to NULL and the history stays.
+
+    This writes `recommendation_profile_state` and nothing else. No run is
+    inserted, no assessment is inserted, and — the point of the whole state —
+    nothing already stored is deleted. A profile that recommended something last
+    week and cannot recommend anything today still *did* recommend it: the runs
+    remain exactly as they were and only the pointer that says which of them is
+    current stops naming one.
+
+    The issues are encoded in the order they arrive. `input_assembly` sorts them
+    once, before anything stores them, and that order is part of the state
+    contract the read model and the audit both verify — so re-sorting here would
+    be inventing a second ordering authority. Each issue is validated against
+    the vocabulary Phase 9A owns, because writing a code or a message no reader
+    can accept would persist a state that immediately reads as corrupt.
+
+    Requires an active transaction and opens none: the caller owns the atomicity
+    of readiness, assembly and publication together.
+    """
+    _require_transaction(connection, "publishing an INCOMPLETE recommendation state")
+    if not _positive_int(profile_id):
+        raise RecommendationPersistenceError("profile_id must be a positive integer")
+    if not _valid_text(input_assembly_version):
+        raise RecommendationPersistenceError(
+            "input_assembly_version must be non-empty and trimmed"
+        )
+    if input_assembly_version != RECOMMENDATION_INPUT_ASSEMBLY_VERSION:
+        raise RecommendationPersistenceError(
+            f"unexpected input assembly version: {input_assembly_version!r}"
+        )
+    if not isinstance(issues, tuple) or not issues:
+        raise RecommendationPersistenceError(
+            "an INCOMPLETE state must carry a non-empty tuple of readiness issues"
+        )
+    payload = []
+    for item in issues:
+        if not isinstance(item, RecommendationReadinessIssue):
+            raise RecommendationPersistenceError(
+                "readiness issues must be RecommendationReadinessIssue values"
+            )
+        if not isinstance(item.code, RecommendationReadinessIssueCode):
+            raise RecommendationPersistenceError("invalid readiness issue code")
+        if not isinstance(item.message, str) or not item.message.strip():
+            raise RecommendationPersistenceError("invalid readiness issue message")
+        if item.opportunity_id is not None and not _positive_int(item.opportunity_id):
+            raise RecommendationPersistenceError(
+                "invalid readiness issue opportunity_id"
+            )
+        payload.append(
+            {
+                "code": item.code.value,
+                "message": item.message,
+                "opportunity_id": item.opportunity_id,
+            }
+        )
+    connection.execute(
+        """INSERT INTO recommendation_profile_state
+             (profile_id, state, current_run_id, persistence_version,
+              input_assembly_version, readiness_issues_json)
+           VALUES (?, 'INCOMPLETE', NULL, ?, ?, ?)
+           ON CONFLICT(profile_id) DO UPDATE SET state=excluded.state,
+             current_run_id=excluded.current_run_id,
+             persistence_version=excluded.persistence_version,
+             input_assembly_version=excluded.input_assembly_version,
+             readiness_issues_json=excluded.readiness_issues_json,
+             updated_at=CURRENT_TIMESTAMP""",
+        (
+            profile_id,
+            RECOMMENDATION_PERSISTENCE_VERSION,
+            input_assembly_version,
+            canonical_json(payload),
+        ),
+    )
+
+
+def _store_prepared_recommendation_batch_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    batch: RecommendationBatchResult,
+    *,
+    source_matching_run_id: int,
+    source_matching_run_fingerprint: str,
+    input_assembly_version: str,
+    prepared: list[tuple[RecommendationAssessment, str]],
+    batch_payload: str,
+    run_fingerprint: str,
+    after_assessment_insert=None,
+) -> RecommendationStoreResult:
+    """Every database statement a READY publication makes, and no BEGIN.
+
+    Split out of `store_recommendation_batch` so that Phase 9B.3 can publish a
+    recommendation inside the *same* transaction that decided the profile was
+    ready, without either duplicating this SQL or weakening the public store's
+    own transaction ownership. It receives what `_prepare` already validated and
+    digested; it re-derives nothing and re-validates nothing that was decidable
+    without the database.
+
+    It issues no `BEGIN`, no `COMMIT` and no `ROLLBACK`. Whoever opened the
+    transaction ends it, which is what lets the same statements be either the
+    whole of a public store or one step of a longer synchronization.
+    """
+    _require_transaction(connection, "storing a recommendation batch")
+    if (
+        connection.execute(
+            "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
+        ).fetchone()
+        is None
+    ):
+        raise RecommendationPersistenceError(
+            f"profile {profile_id} does not exist"
+        )
+    # The source snapshot must exist, belong to this profile, and be the very
+    # run the caller says it is. Nothing is recomputed: the stored matching
+    # run fingerprint is read and compared, never regenerated.
+    matching_run = connection.execute(
+        "SELECT profile_id,run_fingerprint FROM matching_runs WHERE id=?",
+        (source_matching_run_id,),
+    ).fetchone()
+    if matching_run is None:
+        raise RecommendationPersistenceError(
+            f"matching run {source_matching_run_id} does not exist"
+        )
+    if matching_run[0] != profile_id:
+        raise RecommendationPersistenceError(
+            f"matching run {source_matching_run_id} belongs to another profile"
+        )
+    if matching_run[1] != source_matching_run_fingerprint:
+        raise RecommendationPersistenceError(
+            "source matching run fingerprint does not match the stored run"
+        )
+    missing = [
+        item.opportunity_id
+        for item, _ in prepared
+        if connection.execute(
+            "SELECT 1 FROM opportunities WHERE id=?", (item.opportunity_id,)
+        ).fetchone()
+        is None
+    ]
+    if missing:
+        raise RecommendationPersistenceError(
+            f"opportunities do not exist: {missing}"
+        )
+
+    found = connection.execute(
+        f"SELECT {_RUN_COLUMNS} FROM recommendation_runs WHERE run_fingerprint=?",
+        (run_fingerprint,),
+    ).fetchone()
+    created = found is None
+    if found is not None:
+        _verify_existing(
+            connection,
+            found,
+            profile_id,
+            batch,
+            source_matching_run_id,
+            source_matching_run_fingerprint,
+            input_assembly_version,
+            prepared,
+            batch_payload,
+        )
+        run_id = int(found[0])
+    else:
+        run_id = int(
+            connection.execute(
+                """INSERT INTO recommendation_runs
+                     (profile_id,source_matching_run_id,persistence_version,
+                      input_assembly_version,recommendation_engine_version,
+                      recommendation_rules_version,source_matching_run_fingerprint,
+                      batch_fingerprint,run_fingerprint,assessment_count,
+                      batch_payload_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id""",
+                (
+                    profile_id,
+                    source_matching_run_id,
+                    RECOMMENDATION_PERSISTENCE_VERSION,
+                    input_assembly_version,
+                    batch.recommendation_engine_version,
+                    batch.recommendation_rules_version,
+                    source_matching_run_fingerprint,
+                    batch.batch_fingerprint,
+                    run_fingerprint,
+                    batch.assessment_count,
+                    batch_payload,
+                ),
+            ).fetchone()[0]
+        )
+        for position, (item, payload) in enumerate(prepared):
+            connection.execute(
+                f"INSERT INTO recommendation_assessments (run_id,{_ASSESSMENT_COLUMNS})"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    item.opportunity_id,
+                    position + 1,
+                    item.disposition.value,
+                    item.recommendation_score,
+                    item.recommendation_evidence_coverage,
+                    item.assessment_fingerprint,
+                    payload,
+                ),
+            )
+            if after_assessment_insert is not None:
+                after_assessment_insert(position)
+        if (
+            connection.execute(
+                "SELECT COUNT(*) FROM recommendation_assessments WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+            != batch.assessment_count
+        ):
+            raise RecommendationPersistenceError("stored assessment count mismatch")
+    _upsert_ready_state(connection, profile_id, run_id, input_assembly_version)
+    return RecommendationStoreResult(run_id, run_fingerprint, created)
+
+
 def store_recommendation_batch(
     connection: sqlite3.Connection,
     profile_id: int,
@@ -374,6 +630,11 @@ def store_recommendation_batch(
     after_assessment_insert=None,
 ) -> RecommendationStoreResult:
     """Store one precomputed, ranked batch atomically; reuse identical runs.
+
+    This entry point owns its transaction, and the order below is the contract:
+    everything decidable without the database is decided *before* the write lock
+    is taken, so a malformed batch is refused without ever having reserved the
+    database against other writers.
 
     `after_assessment_insert` is a test-only seam, the same one matching
     persistence exposes: it is called with each 0-based insert position so a test
@@ -390,118 +651,20 @@ def store_recommendation_batch(
     )
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if (
-            connection.execute(
-                "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
-            ).fetchone()
-            is None
-        ):
-            raise RecommendationPersistenceError(
-                f"profile {profile_id} does not exist"
-            )
-        # The source snapshot must exist, belong to this profile, and be the very
-        # run the caller says it is. Nothing is recomputed: the stored matching
-        # run fingerprint is read and compared, never regenerated.
-        matching_run = connection.execute(
-            "SELECT profile_id,run_fingerprint FROM matching_runs WHERE id=?",
-            (source_matching_run_id,),
-        ).fetchone()
-        if matching_run is None:
-            raise RecommendationPersistenceError(
-                f"matching run {source_matching_run_id} does not exist"
-            )
-        if matching_run[0] != profile_id:
-            raise RecommendationPersistenceError(
-                f"matching run {source_matching_run_id} belongs to another profile"
-            )
-        if matching_run[1] != source_matching_run_fingerprint:
-            raise RecommendationPersistenceError(
-                "source matching run fingerprint does not match the stored run"
-            )
-        missing = [
-            item.opportunity_id
-            for item, _ in prepared
-            if connection.execute(
-                "SELECT 1 FROM opportunities WHERE id=?", (item.opportunity_id,)
-            ).fetchone()
-            is None
-        ]
-        if missing:
-            raise RecommendationPersistenceError(
-                f"opportunities do not exist: {missing}"
-            )
-
-        found = connection.execute(
-            f"SELECT {_RUN_COLUMNS} FROM recommendation_runs WHERE run_fingerprint=?",
-            (run_fingerprint,),
-        ).fetchone()
-        created = found is None
-        if found is not None:
-            _verify_existing(
-                connection,
-                found,
-                profile_id,
-                batch,
-                source_matching_run_id,
-                source_matching_run_fingerprint,
-                input_assembly_version,
-                prepared,
-                batch_payload,
-            )
-            run_id = int(found[0])
-        else:
-            run_id = int(
-                connection.execute(
-                    """INSERT INTO recommendation_runs
-                         (profile_id,source_matching_run_id,persistence_version,
-                          input_assembly_version,recommendation_engine_version,
-                          recommendation_rules_version,source_matching_run_fingerprint,
-                          batch_fingerprint,run_fingerprint,assessment_count,
-                          batch_payload_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING id""",
-                    (
-                        profile_id,
-                        source_matching_run_id,
-                        RECOMMENDATION_PERSISTENCE_VERSION,
-                        input_assembly_version,
-                        batch.recommendation_engine_version,
-                        batch.recommendation_rules_version,
-                        source_matching_run_fingerprint,
-                        batch.batch_fingerprint,
-                        run_fingerprint,
-                        batch.assessment_count,
-                        batch_payload,
-                    ),
-                ).fetchone()[0]
-            )
-            for position, (item, payload) in enumerate(prepared):
-                connection.execute(
-                    f"INSERT INTO recommendation_assessments (run_id,{_ASSESSMENT_COLUMNS})"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        run_id,
-                        item.opportunity_id,
-                        position + 1,
-                        item.disposition.value,
-                        item.recommendation_score,
-                        item.recommendation_evidence_coverage,
-                        item.assessment_fingerprint,
-                        payload,
-                    ),
-                )
-                if after_assessment_insert is not None:
-                    after_assessment_insert(position)
-            if (
-                connection.execute(
-                    "SELECT COUNT(*) FROM recommendation_assessments WHERE run_id=?",
-                    (run_id,),
-                ).fetchone()[0]
-                != batch.assessment_count
-            ):
-                raise RecommendationPersistenceError("stored assessment count mismatch")
-        _upsert_ready_state(connection, profile_id, run_id, input_assembly_version)
+        result = _store_prepared_recommendation_batch_in_transaction(
+            connection,
+            profile_id,
+            batch,
+            source_matching_run_id=source_matching_run_id,
+            source_matching_run_fingerprint=source_matching_run_fingerprint,
+            input_assembly_version=input_assembly_version,
+            prepared=prepared,
+            batch_payload=batch_payload,
+            run_fingerprint=run_fingerprint,
+            after_assessment_insert=after_assessment_insert,
+        )
         connection.execute("COMMIT")
-        return RecommendationStoreResult(run_id, run_fingerprint, created)
+        return result
     except BaseException:
         connection.execute("ROLLBACK")
         raise
