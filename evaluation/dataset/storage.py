@@ -24,12 +24,14 @@ an existing dataset is verified and left alone:
                                   the `generated_at` the snapshot was frozen at
     present and different         raise, and change nothing
 
-That last case is the one that matters. The same `dataset_id` naming different
-content means either a corrupted directory or a fingerprint collision, and both
-are conditions to report rather than to resolve by overwriting somebody's frozen
-artefact. There is no lock here — that is out of scope for this slice — but
-there is also no silent overwrite, which is the property the absence of a lock
-would otherwise cost.
+That last case is the one that matters, and "different" is decided
+**semantically**: every field the digest covers is compared field by field
+against the stored manifest, along with `dataset_id` and `record_count`, rather
+than the stored `content_fingerprint` being taken at its word. A manifest can be
+edited while keeping the digest it claims for itself, and such a file must never
+pass as UNCHANGED. There is no lock here — that is out of scope for this slice —
+but there is also no silent overwrite and no trusted self-report, which is what
+the absence of a lock would otherwise cost.
 
 **The bytes are stable.** `opportunities.jsonl` is one canonical JSON object per
 record, in the dataset's canonical order, so two extractions over an unchanged
@@ -52,6 +54,7 @@ from pathlib import Path
 
 from services.collector.matching.fingerprint import canonical_json
 
+from .fingerprint import manifest_fingerprint_domain
 from .schema import (
     EvaluationDataset,
     EvaluationDatasetError,
@@ -118,26 +121,10 @@ def _render(dataset: EvaluationDataset) -> tuple[str, str]:
     return manifest, records
 
 
-def _verify_existing(
-    dataset: EvaluationDataset,
-    directory: Path,
-    manifest_path: Path,
-    records_path: Path,
-    records: str,
-) -> str:
-    """Confirm a directory already holds this exact snapshot, or refuse.
-
-    Returns the `generated_at` the existing manifest was frozen at. Every
-    disagreement raises: a half-written directory, a manifest naming other
-    content, or records that differ by a single byte are all reasons to stop and
-    say so, never to overwrite.
-    """
-    dataset_id = dataset.manifest.dataset_id
-    if not manifest_path.is_file() or not records_path.is_file():
-        raise EvaluationDatasetError(
-            f"evaluation dataset {dataset_id} exists at {directory} but is "
-            "incomplete; remove the directory to re-freeze it"
-        )
+def _stored_manifest(
+    dataset_id: str, directory: Path, manifest_path: Path
+) -> dict:
+    """Read back the manifest of an existing dataset, or refuse the directory."""
     try:
         stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -149,6 +136,89 @@ def _verify_existing(
         raise EvaluationDatasetError(
             f"the manifest of evaluation dataset {dataset_id} is not an object"
         )
+    return stored
+
+
+def _verify_existing(
+    dataset: EvaluationDataset,
+    directory: Path,
+    manifest_path: Path,
+    records_path: Path,
+    records: str,
+) -> str:
+    """Confirm a directory already holds this exact snapshot, or refuse.
+
+    Returns the `generated_at` the existing manifest was frozen at.
+
+    The check is **semantic, not just a fingerprint comparison**. A stored
+    `content_fingerprint` is a claim the manifest makes about itself, and a
+    manifest that was edited — by hand, by a partial restore, by a script — can
+    keep that claim while its `profile_context`, its cohort, its upstream
+    provenance or its `dataset_id` now say something else entirely. Trusting the
+    digest alone would let such a manifest pass as UNCHANGED and be handed to
+    Phase 10.2 as though it described this dataset.
+
+    So everything the digest covers is compared field by field, through
+    `manifest_fingerprint_domain` — the one definition of that domain, shared
+    with the code that computes the digest in the first place — together with
+    the identity and size fields the digest deliberately leaves out
+    (`dataset_id`, `record_count`) and the record bytes themselves.
+
+    What is allowed to differ, because it is execution metadata and nothing a
+    measurement can see: `generated_at`, `git_commit`, every field of `source`
+    (path, size, digest, WAL flags, applied migrations) and the autoincrement
+    `matching_run_id` / `recommendation_run_id`. A second extraction differing
+    only in those is UNCHANGED and rewrites nothing.
+    """
+    dataset_id = dataset.manifest.dataset_id
+    if not manifest_path.is_file() or not records_path.is_file():
+        raise EvaluationDatasetError(
+            f"evaluation dataset {dataset_id} exists at {directory} but is "
+            "incomplete; remove the directory to re-freeze it"
+        )
+    stored = _stored_manifest(dataset_id, directory, manifest_path)
+    expected = evaluation_manifest_payload(dataset.manifest)
+
+    # Identity. The directory name is structurally the id this call derived, so
+    # it can only disagree if a caller pointed somewhere else; the manifest's own
+    # `dataset_id` can disagree because a file was edited.
+    for label, found in (
+        ("directory name", directory.name),
+        ("dataset_id", stored.get("dataset_id")),
+    ):
+        if found != dataset_id:
+            raise EvaluationDatasetError(
+                f"evaluation dataset at {directory} states {label} {found!r}, "
+                f"not {dataset_id!r}; refusing to overwrite a frozen dataset"
+            )
+
+    # Size, which the digest leaves out because the record list already fixes
+    # it — and which an edited manifest can therefore contradict freely.
+    if stored.get("record_count") != expected["record_count"]:
+        raise EvaluationDatasetError(
+            f"evaluation dataset {dataset_id} states record_count "
+            f"{stored.get('record_count')!r}, not {expected['record_count']!r}; "
+            "refusing to overwrite a frozen dataset"
+        )
+
+    # Everything the digest covers, compared as values rather than trusted
+    # through the digest the manifest claims for itself.
+    stored_domain = manifest_fingerprint_domain(stored)
+    expected_domain = manifest_fingerprint_domain(expected)
+    if canonical_json(stored_domain) != canonical_json(expected_domain):
+        differing = sorted(
+            key
+            for key in expected_domain
+            if canonical_json(stored_domain.get(key)) != canonical_json(
+                expected_domain[key]
+            )
+        )
+        raise EvaluationDatasetError(
+            f"evaluation dataset {dataset_id} already exists at {directory} "
+            f"and its {', '.join(differing)} do not match this snapshot; "
+            "refusing to overwrite a frozen dataset"
+        )
+
     stored_fingerprint = stored.get("content_fingerprint")
     if stored_fingerprint != dataset.manifest.content_fingerprint:
         raise EvaluationDatasetError(
@@ -157,6 +227,7 @@ def _verify_existing(
             f"{dataset.manifest.content_fingerprint!r}; refusing to overwrite "
             "a frozen dataset"
         )
+
     try:
         stored_records = records_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -171,6 +242,7 @@ def _verify_existing(
             "with the same fingerprint but different records; refusing to "
             "overwrite a frozen dataset"
         )
+
     frozen_at = stored.get("generated_at")
     if not isinstance(frozen_at, str) or not frozen_at:
         raise EvaluationDatasetError(

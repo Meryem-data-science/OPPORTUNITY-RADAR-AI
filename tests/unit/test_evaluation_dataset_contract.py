@@ -71,6 +71,7 @@ def record(opportunity_id: int = 1, **overrides) -> EvaluationOpportunityRecord:
         "location": "Casablanca, Maroc",
         "country": "MA",
         "remote_type": "ONSITE",
+        "description": "We are hiring a data engineering intern.",
         "source_url": "https://example.invalid/offers/1",
         "application_url": None,
         "canonical_url": "https://example.invalid/offers/1",
@@ -211,6 +212,39 @@ def test_absent_fine_classification_is_null_and_not_an_empty_list():
     assert evaluation_record_fingerprint(never_ran) != evaluation_record_fingerprint(
         ran_without_category
     )
+
+
+def test_the_posting_text_is_carried_verbatim_into_the_record():
+    """Phase 10.2 judges the frozen evidence, so the evidence has to be in it.
+
+    A label made by re-reading the live database, or by following a URL that may
+    have changed or gone, is not a label about this dataset. So the posting's
+    own words travel with it — untrimmed, unnormalised, unsummarised and
+    untruncated, because every one of those would be a judgement made before the
+    human's.
+    """
+    text = "  Nous recherchons un·e stagiaire PFE.\n\nProfil:\t Python, SQL.  "
+    payload = evaluation_record_payload(record(description=text))
+    assert payload["description"] == text
+
+
+def test_a_posting_with_no_text_says_null_rather_than_an_empty_string():
+    """SQL NULL is not the empty string, and neither is the empty string NULL."""
+    assert evaluation_record_payload(record(description=None))["description"] is None
+    assert evaluation_record_payload(record(description=""))["description"] == ""
+    assert evaluation_record_fingerprint(record(description=None)) != (
+        evaluation_record_fingerprint(record(description=""))
+    )
+
+
+def test_an_edited_description_moves_both_fingerprints():
+    """The evidence is in the digest, so re-written evidence is a new dataset."""
+    before = record(1)
+    after = replace(before, description="A different advertisement entirely.")
+    assert evaluation_record_fingerprint(after) != evaluation_record_fingerprint(
+        before
+    )
+    assert fingerprint([after, record(2)]) != fingerprint([before, record(2)])
 
 
 def test_absent_downstream_signals_serialize_as_null():
@@ -414,7 +448,16 @@ def test_an_unknown_schema_version_is_refused_at_the_boundary():
     require_supported_schema_version(
         {"schema_version": EVALUATION_DATASET_SCHEMA_VERSION}
     )
-    for payload in ({}, {"schema_version": "evaluation-dataset-v1"}):
+    for payload in (
+        {},
+        # Every earlier contract is refused, not only the one before this. `v1`
+        # selected a narrower universe and `v2` carried no `description`, so
+        # reading either as though it were this one would be reading absent
+        # evidence as absent facts.
+        {"schema_version": "evaluation-dataset-v1"},
+        {"schema_version": "evaluation-dataset-v2"},
+        {"schema_version": "evaluation-dataset-v4"},
+    ):
         with pytest.raises(EvaluationDatasetError, match="schema version"):
             require_supported_schema_version(payload)
 

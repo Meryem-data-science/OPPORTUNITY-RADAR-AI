@@ -60,24 +60,97 @@ canonical form of a Python structure and never over the bytes of a file.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from services.collector.matching.fingerprint import canonical_json
 
 from .schema import (
     EvaluationCohortDefinition,
+    EvaluationDatasetError,
     EvaluationOpportunityRecord,
     EvaluationProfileContext,
     EvaluationUpstreamProvenance,
+    evaluation_cohort_payload,
+    evaluation_profile_context_payload,
     evaluation_record_payload,
+    evaluation_upstream_payload,
 )
 
 __all__ = [
     "canonical_evaluation_content_payload",
     "evaluation_content_fingerprint",
     "evaluation_record_fingerprint",
+    "manifest_fingerprint_domain",
 ]
+
+#: The manifest fields the digest covers, named once. A reader that has only a
+#: stored `manifest.json` — the writer verifying an already-frozen dataset — and
+#: a writer that has only the in-memory objects must agree exactly on this set,
+#: so both go through `manifest_fingerprint_domain` below and neither spells the
+#: domain out a second time.
+_COHORT_FINGERPRINTED_KEYS = ("version", "criteria", "ordering", "excluded_counts")
+_PROFILE_CONTEXT_FINGERPRINTED_KEYS = ("profile_id", "user_id", "fingerprint")
+#: Statuses, run digests and engine versions — and deliberately not
+#: `matching_run_id` or `recommendation_run_id`, which are autoincrement row
+#: identity: re-persisting an identical run under a new id changes nothing a
+#: measurement can see.
+_UPSTREAM_FINGERPRINTED_KEYS = (
+    "matching_status",
+    "matching_run_fingerprint",
+    "matching_engine_version",
+    "matching_rules_version",
+    "matching_selection_version",
+    "recommendation_status",
+    "recommendation_run_fingerprint",
+    "recommendation_engine_version",
+    "recommendation_rules_version",
+)
+
+
+def _section(payload: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    section = payload.get(name)
+    if not isinstance(section, Mapping):
+        raise EvaluationDatasetError(f"manifest section {name!r} is not an object")
+    return section
+
+
+def _project(
+    payload: Mapping[str, Any], name: str, keys: tuple[str, ...]
+) -> dict[str, Any]:
+    """Keep exactly `keys` from one manifest section, refusing a missing one.
+
+    A key that is absent is an error rather than a `None`: a manifest written by
+    another version of this contract must be refused, not silently read as one
+    stating nothing.
+    """
+    section = _section(payload, name)
+    missing = [key for key in keys if key not in section]
+    if missing:
+        raise EvaluationDatasetError(
+            f"manifest section {name!r} is missing {', '.join(sorted(missing))}"
+        )
+    return {key: section[key] for key in keys}
+
+
+def manifest_fingerprint_domain(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a manifest payload onto the half of it the digest covers.
+
+    The **one** definition of that half. It is applied to the manifest this
+    process just built when computing a fingerprint, and to a manifest read back
+    off disk when verifying an already-frozen dataset, so the two can never
+    drift into disagreeing about which fields are semantic.
+    """
+    if "schema_version" not in payload:
+        raise EvaluationDatasetError("manifest states no schema_version")
+    return {
+        "schema_version": payload["schema_version"],
+        "cohort": _project(payload, "cohort", _COHORT_FINGERPRINTED_KEYS),
+        "profile_context": _project(
+            payload, "profile_context", _PROFILE_CONTEXT_FINGERPRINTED_KEYS
+        ),
+        "upstream": _project(payload, "upstream", _UPSTREAM_FINGERPRINTED_KEYS),
+    }
 
 
 def evaluation_record_fingerprint(record: EvaluationOpportunityRecord) -> str:
@@ -94,48 +167,28 @@ def canonical_evaluation_content_payload(
     upstream: EvaluationUpstreamProvenance,
     records: Sequence[EvaluationOpportunityRecord],
 ) -> dict[str, Any]:
-    """The digest domain, as a plain structure a test can read and assert on."""
-    return {
-        "schema_version": schema_version,
-        "cohort": {
-            "version": cohort.version,
-            # The criteria keep the order they are stated in: they are a
-            # written rule, and a rule reads the way it was written.
-            "criteria": list(cohort.criteria),
-            "ordering": cohort.ordering,
-            # A statement about the selection, not about the surroundings: two
-            # snapshots that refused different numbers of rows did not select
-            # the same universe.
-            "excluded_counts": dict(cohort.excluded_counts),
-        },
-        # Row identity, and in the digest on purpose — see
-        # `EvaluationProfileContext`. Two profiles whose Matching and
-        # Recommendation runs are both absent would otherwise collide.
-        "profile_context": {
-            "profile_id": profile_context.profile_id,
-            "user_id": profile_context.user_id,
-            "fingerprint": profile_context.fingerprint,
-        },
-        "upstream": {
-            "matching_status": upstream.matching_status,
-            "matching_run_fingerprint": upstream.matching_run_fingerprint,
-            "matching_engine_version": upstream.matching_engine_version,
-            "matching_rules_version": upstream.matching_rules_version,
-            "matching_selection_version": upstream.matching_selection_version,
-            "recommendation_status": upstream.recommendation_status,
-            "recommendation_run_fingerprint": (
-                upstream.recommendation_run_fingerprint
-            ),
-            "recommendation_engine_version": (
-                upstream.recommendation_engine_version
-            ),
-            "recommendation_rules_version": upstream.recommendation_rules_version,
-        },
-        # In canonical order, and not sorted here: the order *is* part of the
-        # statement, and the snapshot builder is the one component entitled to
-        # decide it.
-        "records": [evaluation_record_fingerprint(record) for record in records],
-    }
+    """The digest domain, as a plain structure a test can read and assert on.
+
+    Built by laying the three blocks out in their manifest shape and then
+    projecting them through `manifest_fingerprint_domain`, which is what keeps
+    "what is digested" and "what the writer verifies on disk" one definition
+    rather than two that agree today.
+    """
+    domain = manifest_fingerprint_domain(
+        {
+            "schema_version": schema_version,
+            "cohort": evaluation_cohort_payload(cohort),
+            "profile_context": evaluation_profile_context_payload(profile_context),
+            "upstream": evaluation_upstream_payload(upstream),
+        }
+    )
+    # In canonical order, and not sorted here: the order *is* part of the
+    # statement, and the snapshot builder is the one component entitled to
+    # decide it.
+    domain["records"] = [
+        evaluation_record_fingerprint(record) for record in records
+    ]
+    return domain
 
 
 def evaluation_content_fingerprint(

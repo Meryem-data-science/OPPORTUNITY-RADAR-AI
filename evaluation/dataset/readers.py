@@ -173,8 +173,8 @@ def read_opportunities(
     rows = query(
         connection,
         """SELECT id, canonical_title, organization, opportunity_type,
-                  employment_type, location, country, remote_type, source_url,
-                  application_url, canonical_url, status, is_active,
+                  employment_type, location, country, remote_type, description,
+                  source_url, application_url, canonical_url, status, is_active,
                   published_at, deadline, discovered_at, first_seen_at,
                   last_seen_at
              FROM opportunities

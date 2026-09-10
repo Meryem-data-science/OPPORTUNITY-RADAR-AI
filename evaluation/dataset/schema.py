@@ -45,7 +45,7 @@ from typing import Any
 #: manifest or a record changes — a field added, removed or re-interpreted — so
 #: that a reader can refuse a snapshot it does not understand instead of
 #: silently reading a missing key as a missing fact.
-EVALUATION_DATASET_SCHEMA_VERSION = "evaluation-dataset-v2"
+EVALUATION_DATASET_SCHEMA_VERSION = "evaluation-dataset-v3"
 
 #: The version of the cohort *rule* — which opportunities a snapshot contains.
 #: Separate from the schema version on purpose: widening or narrowing the
@@ -239,6 +239,13 @@ class EvaluationOpportunityRecord:
     location: str | None
     country: str | None
     remote_type: str | None
+    #: The posting's own text, exactly as `opportunities.description` holds it,
+    #: and `None` when that column is NULL. It is carried so that a human
+    #: judgement in a later slice can be made **from the frozen evidence** — not
+    #: by re-reading the live database, and not by following a URL that may have
+    #: changed or gone. Nothing here trims, normalises, cleans, summarises or
+    #: truncates it: this record is evidence, and edited evidence is not.
+    description: str | None
     source_url: str
     application_url: str | None
     canonical_url: str | None
@@ -477,6 +484,7 @@ def evaluation_record_payload(
         "location": record.location,
         "country": record.country,
         "remote_type": record.remote_type,
+        "description": record.description,
         "source_url": record.source_url,
         "application_url": record.application_url,
         "canonical_url": record.canonical_url,
@@ -536,28 +544,71 @@ def evaluation_record_payload(
     }
 
 
+def evaluation_cohort_payload(cohort: EvaluationCohortDefinition) -> dict[str, Any]:
+    """The cohort block, in the one layout both the manifest and the digest use."""
+    return {
+        "version": cohort.version,
+        # The criteria keep the order they are stated in: they are a written
+        # rule, and a rule reads the way it was written.
+        "criteria": list(cohort.criteria),
+        "ordering": cohort.ordering,
+        "excluded_counts": dict(cohort.excluded_counts),
+    }
+
+
+def evaluation_profile_context_payload(
+    profile_context: EvaluationProfileContext,
+) -> dict[str, Any]:
+    """The profile binding block, in the one layout both uses share."""
+    return {
+        "profile_id": profile_context.profile_id,
+        "user_id": profile_context.user_id,
+        "fingerprint": profile_context.fingerprint,
+    }
+
+
+def evaluation_upstream_payload(
+    upstream: EvaluationUpstreamProvenance,
+) -> dict[str, Any]:
+    """The upstream provenance block, run ids included.
+
+    The digest keeps only part of this — `fingerprint.py` names which part — but
+    the *layout* is defined once, here, so the manifest on disk and the digest
+    domain cannot drift into two different spellings of the same field.
+    """
+    return {
+        "matching_status": upstream.matching_status,
+        "matching_run_id": upstream.matching_run_id,
+        "matching_run_fingerprint": upstream.matching_run_fingerprint,
+        "matching_engine_version": upstream.matching_engine_version,
+        "matching_rules_version": upstream.matching_rules_version,
+        "matching_selection_version": upstream.matching_selection_version,
+        "recommendation_status": upstream.recommendation_status,
+        "recommendation_run_id": upstream.recommendation_run_id,
+        "recommendation_run_fingerprint": upstream.recommendation_run_fingerprint,
+        "recommendation_engine_version": upstream.recommendation_engine_version,
+        "recommendation_rules_version": upstream.recommendation_rules_version,
+    }
+
+
 def evaluation_manifest_payload(
     manifest: EvaluationDatasetManifest,
 ) -> dict[str, Any]:
     """The manifest as it is written to `manifest.json`, volatile fields included.
 
-    This is *not* the fingerprint domain — see `fingerprint.py`, which digests a
-    deliberately smaller structure.
+    This is *not* the fingerprint domain — see `fingerprint.py`, which projects
+    this structure onto a deliberately smaller one.
     """
     source = manifest.source
-    cohort = manifest.cohort
-    upstream = manifest.upstream
     return {
         "schema_version": manifest.schema_version,
         "dataset_id": manifest.dataset_id,
         "generated_at": manifest.generated_at,
         "git_commit": manifest.git_commit,
         "record_count": manifest.record_count,
-        "profile_context": {
-            "profile_id": manifest.profile_context.profile_id,
-            "user_id": manifest.profile_context.user_id,
-            "fingerprint": manifest.profile_context.fingerprint,
-        },
+        "profile_context": evaluation_profile_context_payload(
+            manifest.profile_context
+        ),
         "source": {
             "database_path": source.database_path,
             "database_bytes": source.database_bytes,
@@ -567,28 +618,7 @@ def evaluation_manifest_payload(
             "shm_present": source.shm_present,
             "applied_migrations": list(source.applied_migrations),
         },
-        "cohort": {
-            "version": cohort.version,
-            "criteria": list(cohort.criteria),
-            "ordering": cohort.ordering,
-            "excluded_counts": dict(cohort.excluded_counts),
-        },
-        "upstream": {
-            "matching_status": upstream.matching_status,
-            "matching_run_id": upstream.matching_run_id,
-            "matching_run_fingerprint": upstream.matching_run_fingerprint,
-            "matching_engine_version": upstream.matching_engine_version,
-            "matching_rules_version": upstream.matching_rules_version,
-            "matching_selection_version": upstream.matching_selection_version,
-            "recommendation_status": upstream.recommendation_status,
-            "recommendation_run_id": upstream.recommendation_run_id,
-            "recommendation_run_fingerprint": (
-                upstream.recommendation_run_fingerprint
-            ),
-            "recommendation_engine_version": (
-                upstream.recommendation_engine_version
-            ),
-            "recommendation_rules_version": upstream.recommendation_rules_version,
-        },
+        "cohort": evaluation_cohort_payload(manifest.cohort),
+        "upstream": evaluation_upstream_payload(manifest.upstream),
         "content_fingerprint": manifest.content_fingerprint,
     }

@@ -46,6 +46,7 @@ from services.digital_twin.repository import ensure_user_profile
 
 FINGERPRINT = "0" * 64
 WHEN = "2026-01-01T00:00:00+00:00"
+POSTING_TEXT = "  Nous recherchons un·e stagiaire PFE.\n\nProfil:\t Python, SQL.  "
 
 #: The seven postings. Ids are explicit so the assertions below can name them.
 #:
@@ -71,20 +72,22 @@ def _insert_opportunity(
     opportunity_id: int,
     *,
     title: str,
+    description: str | None = None,
     status: str = "active",
     is_active: int = 1,
 ) -> None:
     connection.execute(
         """INSERT INTO opportunities
                (id, canonical_title, organization, opportunity_type, location,
-                country, remote_type, source_url, canonical_url, status,
-                is_active, published_at, discovered_at, first_seen_at,
+                country, remote_type, description, source_url, canonical_url,
+                status, is_active, published_at, discovered_at, first_seen_at,
                 last_seen_at)
            VALUES (?, ?, 'Example Org', 'PFE', 'Casablanca, Maroc', 'MA',
-                   'ONSITE', ?, ?, ?, ?, NULL, ?, ?, ?)""",
+                   'ONSITE', ?, ?, ?, ?, ?, NULL, ?, ?, ?)""",
         (
             opportunity_id,
             title,
+            description,
             f"https://example.invalid/offers/{opportunity_id}",
             f"https://example.invalid/offers/{opportunity_id}",
             status,
@@ -338,7 +341,15 @@ def operational_database(tmp_path):
             """INSERT INTO sources (id, type, status)
                VALUES ('example-source', 'board', 'active')"""
         )
-        _insert_opportunity(connection, 1, title="Data Engineering PFE")
+        _insert_opportunity(
+            connection,
+            1,
+            title="Data Engineering PFE",
+            # Awkward on purpose: leading and trailing spaces, newlines, a tab
+            # and a non-ASCII character, so a test can prove nothing cleans it.
+            description=POSTING_TEXT,
+        )
+        # A posting whose advertisement was never captured: NULL, not "".
         _insert_opportunity(connection, 2, title="Ambiguous Data Role")
         _insert_opportunity(connection, 3, title="Analytics Internship")
         _insert_opportunity(connection, 4, title="Warehouse Operative")
@@ -976,3 +987,270 @@ def test_a_changed_preference_moves_the_dataset_fingerprint(operational_database
         after.manifest.content_fingerprint != before.manifest.content_fingerprint
     )
     assert after.manifest.dataset_id != before.manifest.dataset_id
+
+
+# --------------------------------------------------------------------------
+# the frozen evidence a human will judge
+# --------------------------------------------------------------------------
+
+
+def test_the_posting_text_travels_with_the_record(dataset, tmp_path):
+    """Byte for byte, from `opportunities.description` to the JSONL line.
+
+    Phase 10.2 must be able to judge from the frozen artefact alone — not by
+    re-reading the live database, and not by following a URL that may have
+    changed or gone. So the check goes all the way to the file.
+    """
+    by_id = {record.opportunity_id: record for record in dataset.records}
+    assert by_id[1].description == POSTING_TEXT
+    paths = write_evaluation_dataset(dataset, tmp_path / "datasets")
+    lines = {
+        json.loads(line)["opportunity_id"]: json.loads(line)
+        for line in paths.records.read_text(encoding="utf-8").splitlines()
+    }
+    assert lines[1]["description"] == POSTING_TEXT
+    # Untrimmed, unnormalised, unsummarised, untruncated.
+    assert lines[1]["description"].startswith("  ")
+    assert lines[1]["description"].endswith("  ")
+    assert "\t" in lines[1]["description"]
+
+
+def test_a_posting_with_no_text_reads_as_null(dataset, tmp_path):
+    """SQL NULL becomes JSON `null`, never `""`."""
+    by_id = {record.opportunity_id: record for record in dataset.records}
+    assert by_id[2].description is None
+    paths = write_evaluation_dataset(dataset, tmp_path / "datasets")
+    lines = {
+        json.loads(line)["opportunity_id"]: json.loads(line)
+        for line in paths.records.read_text(encoding="utf-8").splitlines()
+    }
+    assert lines[2]["description"] is None
+
+
+def test_an_edited_description_moves_the_dataset_fingerprint(operational_database):
+    """Re-written evidence is a different dataset, even at the same URL."""
+    path, identity = operational_database
+    with connect_readonly_database(path) as read_only:
+        before = build_evaluation_dataset(
+            read_only,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    connection = connect_database(path)
+    try:
+        connection.execute(
+            "UPDATE opportunities SET description = ? WHERE id = 1",
+            ("A different advertisement entirely.",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with connect_readonly_database(path) as read_only:
+        after = build_evaluation_dataset(
+            read_only,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    assert [record.opportunity_id for record in after.records] == list(COHORT_IDS)
+    assert (
+        after.manifest.content_fingerprint != before.manifest.content_fingerprint
+    )
+    assert after.manifest.dataset_id != before.manifest.dataset_id
+
+
+# --------------------------------------------------------------------------
+# an edited manifest is never accepted as unchanged
+# --------------------------------------------------------------------------
+
+
+def _tamper(paths, mutate) -> None:
+    """Edit a frozen manifest in place, leaving its `content_fingerprint` alone.
+
+    That is the whole point of these cases: the stored digest is a claim the
+    manifest makes about itself, and an edited file can keep making it.
+    """
+    stored = json.loads(paths.manifest.read_text(encoding="utf-8"))
+    mutate(stored)
+    paths.manifest.write_text(json.dumps(stored), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "message"),
+    [
+        (
+            "dataset_id",
+            lambda stored: stored.__setitem__("dataset_id", "evaluation-dataset-v3-0"),
+            "dataset_id",
+        ),
+        (
+            "schema_version",
+            lambda stored: stored.__setitem__(
+                "schema_version", "evaluation-dataset-v2"
+            ),
+            "do not match",
+        ),
+        (
+            "record_count",
+            lambda stored: stored.__setitem__("record_count", 99),
+            "record_count",
+        ),
+        (
+            "profile_context",
+            lambda stored: stored["profile_context"].__setitem__("profile_id", 999),
+            "do not match",
+        ),
+        (
+            "profile_context fingerprint",
+            lambda stored: stored["profile_context"].__setitem__(
+                "fingerprint", "c" * 64
+            ),
+            "do not match",
+        ),
+        (
+            "cohort version",
+            lambda stored: stored["cohort"].__setitem__(
+                "version", "evaluation-cohort-v1"
+            ),
+            "do not match",
+        ),
+        (
+            "cohort excluded_counts",
+            lambda stored: stored["cohort"]["excluded_counts"].__setitem__(
+                "inactive", 999
+            ),
+            "do not match",
+        ),
+        (
+            "upstream run fingerprint",
+            lambda stored: stored["upstream"].__setitem__(
+                "recommendation_run_fingerprint", "d" * 64
+            ),
+            "do not match",
+        ),
+        (
+            "upstream engine version",
+            lambda stored: stored["upstream"].__setitem__(
+                "matching_engine_version", "matching-engine-v99"
+            ),
+            "do not match",
+        ),
+        (
+            "upstream status",
+            lambda stored: stored["upstream"].__setitem__(
+                "recommendation_status", "NOT_SYNCED"
+            ),
+            "do not match",
+        ),
+    ],
+)
+def test_an_edited_manifest_is_refused_however_it_was_edited(
+    dataset, tmp_path, name, mutate, message
+):
+    """Every fingerprinted field, plus the two the digest deliberately omits.
+
+    None of these edits touches `content_fingerprint`, so a writer that trusted
+    the stored digest would report UNCHANGED and hand Phase 10.2 a manifest
+    describing something else.
+    """
+    root = tmp_path / "datasets"
+    paths = write_evaluation_dataset(dataset, root)
+    _tamper(paths, mutate)
+    with pytest.raises(EvaluationDatasetError, match=message):
+        write_evaluation_dataset(dataset, root)
+
+
+def test_metadata_outside_the_fingerprint_may_differ_without_a_rewrite(
+    operational_database, tmp_path
+):
+    """The other half of the contract: execution metadata is free to move.
+
+    A second extraction from a copy of the database, at another moment, from
+    another checkout, is the same snapshot. It must report UNCHANGED and leave
+    the frozen manifest exactly as it was — otherwise every re-run would be an
+    error, and the freeze would be unusable rather than strict.
+    """
+    path, identity = operational_database
+    root = tmp_path / "datasets"
+    with connect_readonly_database(path) as connection:
+        first = build_evaluation_dataset(
+            connection,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    paths = write_evaluation_dataset(first, root)
+    frozen = paths.manifest.read_text(encoding="utf-8")
+
+    # The same database at another path: a different `database_path`, a
+    # different file digest is impossible for a copy, so the WAL flags and the
+    # path are what move — along with the clock and the commit.
+    copy = tmp_path / "copy.db"
+    copy.write_bytes(path.read_bytes())
+    with connect_readonly_database(copy) as connection:
+        second = build_evaluation_dataset(
+            connection,
+            profile_id=identity.profile_id,
+            database_path=copy,
+            generated_at="2027-06-15T12:34:56+00:00",
+            git_commit="a" * 40,
+        )
+    assert second.manifest.source.database_path != (
+        first.manifest.source.database_path
+    )
+    assert second.manifest.content_fingerprint == first.manifest.content_fingerprint
+
+    again = write_evaluation_dataset(second, root)
+    assert again.status == WRITE_STATUS_UNCHANGED
+    assert again.frozen_generated_at == WHEN
+    assert paths.manifest.read_text(encoding="utf-8") == frozen
+
+
+def test_a_renumbered_upstream_run_is_still_the_same_frozen_dataset(
+    operational_database, tmp_path
+):
+    """Row identity is metadata: re-persisting an identical run rewrites nothing."""
+    path, identity = operational_database
+    root = tmp_path / "datasets"
+    with connect_readonly_database(path) as connection:
+        first = build_evaluation_dataset(
+            connection,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    paths = write_evaluation_dataset(first, root)
+    frozen = paths.manifest.read_text(encoding="utf-8")
+
+    connection = connect_database(path)
+    try:
+        # Same run, same fingerprints, new autoincrement ids.
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("UPDATE matching_runs SET id = 500 WHERE id = ?",
+                           (first.manifest.upstream.matching_run_id,))
+        connection.execute("UPDATE matching_assessments SET run_id = 500")
+        connection.execute("UPDATE matching_profile_state SET current_run_id = 500")
+        connection.execute(
+            "UPDATE recommendation_runs SET id = 600, source_matching_run_id = 500"
+        )
+        connection.execute("UPDATE recommendation_assessments SET run_id = 600")
+        connection.execute(
+            "UPDATE recommendation_profile_state SET current_run_id = 600"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with connect_readonly_database(path) as read_only:
+        second = build_evaluation_dataset(
+            read_only,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at="2027-06-15T12:34:56+00:00",
+        )
+    assert second.manifest.upstream.matching_run_id == 500
+    assert second.manifest.content_fingerprint == first.manifest.content_fingerprint
+    again = write_evaluation_dataset(second, root)
+    assert again.status == WRITE_STATUS_UNCHANGED
+    assert paths.manifest.read_text(encoding="utf-8") == frozen
