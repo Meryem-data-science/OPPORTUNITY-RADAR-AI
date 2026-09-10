@@ -78,10 +78,28 @@ Freshness stays out of all three. A historical run whose source Matching run is 
 longer the profile's current one is valid history, and no layer here compares the
 two — requiring that equality is explicitly forbidden.
 
-Still absent, and belonging to a later sub-phase: the freshness → compute →
-persist orchestration that writes the INCOMPLETE state (9B.3) the read model and
-the audit above already know how to report. This package still exposes no HTTP
-route and changes no page.
+Phase 9B.3 adds `sync.py`, and it is the one place where freshness and writing
+meet: readiness → compute → persist, as a single act. A persisted sync owns one
+`BEGIN IMMEDIATE` that opens before the first business read and closes at one
+`COMMIT`, so the profile check, the whole of input assembly, the engine call, the
+source Matching read and the publication all observe — and publish — one world.
+Without that, a recommendation could become *current* while describing upstream
+data that had already changed, and no audit could detect it: every stored digest
+would agree with every other, because all of them came from the same superseded
+reading. A persisted sync therefore refuses to borrow a caller's transaction, and
+`persist=False` inverts the whole thing into a strictly read-only dry run that
+works on a `mode=ro` connection.
+
+It is the only writer of the INCOMPLETE state the schema has carried since 0026,
+and INCOMPLETE is *only* ever the verdict `input_assembly` returned: an engine
+error, a persistence error or a SQLite failure is a failed synchronization, never
+a profile that "isn't ready". It repairs no upstream phase, recomputes no score
+or ranking of its own, and rewrites no history — a profile that goes stale keeps
+every recommendation it ever made and merely stops pointing at one. There is no
+Recommendation EMPTY state: Matching has one because selection can legitimately
+select nothing, and Recommendation has no selection of its own.
+
+This package still exposes no HTTP route and changes no page.
 
 **Matching v1's scoring contract is untouched**, which is what makes the
 recommendation a controlled evolution of that baseline rather than a second
@@ -109,6 +127,7 @@ recommendation score. Runs persisted before it stay readable and auditable.
     persistence_fingerprint.py  the operational identity of a stored run
     persistence.py              atomic, append-only, idempotent storage
     read_model.py               strict, read-only views of what was stored
+    sync.py                     readiness -> compute -> publish, in one transaction
 
     persistence_audit.py             read-only integrity audit of a whole history
     persistence_audit_fingerprint.py the audit report's deterministic digest
@@ -221,6 +240,11 @@ from services.recommendation.read_model import (
     read_current_recommendation,
     read_recommendation_run,
 )
+from services.recommendation.sync import (
+    RecommendationSyncError,
+    RecommendationSyncResult,
+    sync_recommendations,
+)
 
 __all__ = [
     "CONFIRMED_GAP_CODES",
@@ -280,6 +304,8 @@ __all__ = [
     "RecommendationRunSummary",
     "RecommendationSkillEvidence",
     "RecommendationStoreResult",
+    "RecommendationSyncError",
+    "RecommendationSyncResult",
     "RequiredSkillComponent",
     "SemanticComponent",
     "WorkModeSignal",
@@ -310,4 +336,5 @@ __all__ = [
     "recommendation_persistence_audit_fingerprint",
     "recommendation_run_fingerprint",
     "store_recommendation_batch",
+    "sync_recommendations",
 ]
