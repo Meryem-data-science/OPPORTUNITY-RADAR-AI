@@ -295,6 +295,21 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _stable_value(value: object) -> Any:
+    """A JSON-safe, deterministic rendering of one stored column value.
+
+    Everything SQLite stores in the audited TEXT and INTEGER columns is already
+    JSON-safe; a BLOB left behind by a restore is not, and letting one reach
+    `canonical_json` would crash the audit over the very corruption it exists to
+    report. Such a value is rendered with `repr`, which is deterministic and is
+    not a normalization: nothing is coerced into a plausible-looking version of
+    itself, and the finding that named the value still stands beside it.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
 # --------------------------------------------------------------------------
 # the one snapshot
 # --------------------------------------------------------------------------
@@ -1056,12 +1071,52 @@ def _audit_readiness_issues(
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _ProfileStateAudit:
+    """What the state audit establishes, kept internal on purpose.
+
+    `status` and `current_run_id` are what the report exposes. `identity` is the
+    *stable persisted identity* of `recommendation_profile_state` and exists for
+    the audit fingerprint, which must distinguish two states that are both
+    perfectly valid and therefore produce no finding at all — two INCOMPLETE
+    rows carrying different readiness issues, say, or the same state written
+    under different stored versions. Judging the digest by `status`,
+    `current_run_id` and the findings alone would collapse those into one.
+
+    It carries no timestamp: `created_at` and `updated_at` are never read.
+    """
+
+    status: str
+    current_run_id: int | None
+    identity: dict[str, Any]
+
+
+def _readiness_identity(raw: object, entries: list[Any] | None) -> dict[str, Any]:
+    """The stored readiness array's deterministic contribution to the digest.
+
+    A decodable array contributes its decoded entries **in stored order**. The
+    order is part of the state contract — `input_assembly` sorts the issues once,
+    before they are ever stored — so it is preserved here rather than sorted, for
+    the same reason the audit verifies that order instead of repairing it. Among
+    valid states the decoded value and the stored bytes determine each other,
+    canonical JSON being a bijection, so nothing is lost by carrying the
+    structure rather than the text.
+
+    A value that is not a decodable array has no structure to carry, so the
+    stored text itself is the identity; the findings already say what is wrong
+    with it.
+    """
+    if entries is None:
+        return {"decoded": False, "raw": _stable_value(raw)}
+    return {"decoded": True, "issues": entries}
+
+
 def _audit_state(
     connection: sqlite3.Connection,
     profile_id: int,
     run_versions: dict[int, tuple[object, object]],
     issues: list[RecommendationPersistenceAuditIssue],
-) -> tuple[str, int | None]:
+) -> _ProfileStateAudit:
     """Audit `recommendation_profile_state`, and never write or repair it.
 
     NOT_SYNCED is the absence of a row, and it is only honest when nothing has
@@ -1099,7 +1154,10 @@ def _audit_state(
                 f"profile {profile_id} has {len(run_versions)} recommendation"
                 " run(s) and no state row",
             )
-        return _STATUS_NOT_SYNCED, None
+        # The absence of the row is itself a state, and it is stated rather
+        # than left as a gap: `present: False` cannot be reached by any stored
+        # row, so NOT_SYNCED can never digest as some other state.
+        return _ProfileStateAudit(_STATUS_NOT_SYNCED, None, {"present": False})
     (
         state,
         current_run_id,
@@ -1123,6 +1181,17 @@ def _audit_state(
         if not _is_text(value):
             finding(code, None, f"state {description} {value!r} is not stored text")
     entries = _audit_readiness_issues(readiness_issues_json, profile_id, issues)
+    # Every stored column of the row, as stored — not as the report chose to
+    # summarize it. `current_run_id` is the raw value rather than the gated one
+    # so that two differently malformed pointers stay distinguishable.
+    identity = {
+        "present": True,
+        "state": _stable_value(state),
+        "current_run_id": _stable_value(current_run_id),
+        "persistence_version": _stable_value(persistence_version),
+        "input_assembly_version": _stable_value(input_assembly_version),
+        "readiness_issues": _readiness_identity(readiness_issues_json, entries),
+    }
 
     if state == _STATUS_READY:
         if current is None:
@@ -1151,7 +1220,7 @@ def _audit_state(
                 current,
                 "READY state does not carry the canonical empty readiness array",
             )
-        return _STATUS_READY, current
+        return _ProfileStateAudit(_STATUS_READY, current, identity)
     if state == _STATUS_INCOMPLETE:
         if current_run_id is not None:
             finding(
@@ -1165,13 +1234,13 @@ def _audit_state(
                 None,
                 "INCOMPLETE state carries no readiness issue",
             )
-        return _STATUS_INCOMPLETE, current
+        return _ProfileStateAudit(_STATUS_INCOMPLETE, current, identity)
     finding(
         "STATE_UNKNOWN",
         current,
         f"unknown recommendation state {state!r}",
     )
-    return _STATUS_UNKNOWN, current
+    return _ProfileStateAudit(_STATUS_UNKNOWN, current, identity)
 
 
 # --------------------------------------------------------------------------
@@ -1205,8 +1274,7 @@ def _matching_run_results(
 
 def _stable_payload(
     profile_id: int,
-    status: str,
-    current_run_id: int | None,
+    state: _ProfileStateAudit,
     runs: tuple[RecommendationRunAuditResult, ...],
     issues: tuple[RecommendationPersistenceAuditIssue, ...],
 ) -> dict[str, Any]:
@@ -1214,13 +1282,23 @@ def _stable_payload(
 
     Stable persisted identities and deterministic structured findings, in the
     orders the report itself carries. No audit timestamp, no duration, no
-    database path, no process value and no wall-clock time reaches this.
+    database path, no process value and no wall-clock time reaches this — and
+    nothing about Matching's *current* run either, so a superseding Matching run
+    cannot move a recommendation history's digest.
+
+    `state` carries the persisted state row whole, not only the two fields the
+    report surfaces. Findings alone are not enough to identify a state: two
+    INCOMPLETE rows naming different readiness issues, or one state row rewritten
+    under a different stored version, can both be entirely valid and produce no
+    finding at all — and a digest that could not tell them apart would be
+    claiming an equivalence that does not hold.
     """
     return dict(
         audit_version=RECOMMENDATION_PERSISTENCE_AUDIT_VERSION,
         profile_id=profile_id,
-        status=status,
-        current_run_id=current_run_id,
+        status=state.status,
+        current_run_id=state.current_run_id,
+        state=state.identity,
         runs=[
             {
                 "run_id": run.run_id,
@@ -1300,19 +1378,17 @@ def audit_recommendation_profile_history(
         runs = tuple(_audit_run(connection, row, matching_results) for row in raw_runs)
         run_versions = {row[0]: (row[3], row[4]) for row in raw_runs}
         issues: list[RecommendationPersistenceAuditIssue] = []
-        status, current_run_id = _audit_state(
-            connection, profile_id, run_versions, issues
-        )
+        state = _audit_state(connection, profile_id, run_versions, issues)
         issues.extend(issue for run in runs for issue in run.issues)
         ordered = _ordered(issues)
         fingerprint = recommendation_persistence_audit_fingerprint(
-            **_stable_payload(profile_id, status, current_run_id, runs, ordered)
+            **_stable_payload(profile_id, state, runs, ordered)
         )
     return RecommendationPersistenceAuditReport(
         RECOMMENDATION_PERSISTENCE_AUDIT_VERSION,
         profile_id,
-        status,
-        current_run_id,
+        state.status,
+        state.current_run_id,
         len(raw_runs),
         len(runs),
         sum(run.assessment_count for run in runs),

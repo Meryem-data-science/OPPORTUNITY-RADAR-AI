@@ -1417,6 +1417,245 @@ def test_findings_from_many_simultaneous_corruptions_come_back_in_one_order(sync
         assert set(run.issues) <= set(report.issues)
 
 
+# --------------------------------------------------------------------------
+# the persisted state's own identity
+#
+# A finding is not the only thing that distinguishes two states. Two rows can
+# both be entirely valid — no issue, `ok = True` — and still be different states,
+# and a digest that could not tell them apart would be asserting an equivalence
+# that does not hold. These are the cases where the audit has nothing to
+# complain about and everything to distinguish.
+# --------------------------------------------------------------------------
+
+
+def incomplete_profile(connection, email=TEST_ONLY_EMAIL, issues=ONE_ISSUE):
+    """One profile whose state is a valid INCOMPLETE, with no history at all."""
+    profile_id = ensure_user_profile(connection, email).profile_id
+    connection.commit()
+    insert_state(connection, profile_id, "INCOMPLETE", issues)
+    return profile_id
+
+
+def fingerprint_of(connection, profile_id):
+    """Audit twice, require the digest to be stable, and return it.
+
+    Every call below goes through this, so repeatability is asserted at each
+    step rather than once at the end: a digest that moved between two audits of
+    one unchanged state would fail here before any comparison is made.
+    """
+    first = audit_recommendation_profile_history(connection, profile_id)
+    second = audit_recommendation_profile_history(connection, profile_id)
+    assert first == second
+    assert first.audit_fingerprint == second.audit_fingerprint
+    return first
+
+
+def test_two_valid_incomplete_states_with_different_readiness_issues_differ(database):
+    """The blocker case: both valid, both silent, and genuinely not the same state.
+
+    `MATCHING_NOT_READY` and `STALE_MATCHING_COHORT` are both codes this build
+    knows, so neither array produces a finding. If the digest were computed from
+    `status`, `current_run_id` and the findings alone — as it was — these two
+    would collide, and an operator comparing two audit reports would be told a
+    state had not changed when it had.
+    """
+    profile_id = incomplete_profile(database)
+    first = fingerprint_of(database, profile_id)
+    assert first.ok is True and first.issues == ()
+    assert first.status == "INCOMPLETE" and first.current_run_id is None
+
+    # The row's clocks are not part of its identity, and reading the state row
+    # more closely must not have quietly let them in.
+    database.execute(
+        "UPDATE recommendation_profile_state SET created_at='2020-01-01',"
+        " updated_at='2020-01-01' WHERE profile_id=?",
+        (profile_id,),
+    )
+    database.commit()
+    assert (
+        fingerprint_of(database, profile_id).audit_fingerprint
+        == first.audit_fingerprint
+    )
+
+    other = readiness_json(
+        (
+            RecommendationReadinessIssueCode.STALE_MATCHING_COHORT.value,
+            "cohort moved",
+            None,
+        )
+    )
+    assert other != ONE_ISSUE
+    force_state(database, profile_id, readiness_issues_json=other)
+    second = fingerprint_of(database, profile_id)
+
+    # Still nothing to report: this is a difference between two *valid* states.
+    assert second.ok is True and second.issues == ()
+    assert second.status == "INCOMPLETE" and second.current_run_id is None
+    assert second.run_count == first.run_count == 0
+    assert second.audit_fingerprint != first.audit_fingerprint
+
+
+def test_a_readiness_message_or_posting_alone_moves_the_state_digest(database):
+    """The whole stored entry is the identity, not just its code.
+
+    Two issues under one code can say different things about different postings,
+    and both spellings are valid. The digest has to follow each of them.
+    """
+    code = RecommendationReadinessIssueCode.OPPORTUNITY_MISSING.value
+    profile_id = incomplete_profile(
+        database, issues=readiness_json((code, "posting is gone", 7))
+    )
+    baseline = fingerprint_of(database, profile_id).audit_fingerprint
+
+    seen = {baseline}
+    for entry in (
+        (code, "posting was withdrawn", 7),
+        (code, "posting is gone", 9),
+    ):
+        force_state(database, profile_id, readiness_issues_json=readiness_json(entry))
+        report = fingerprint_of(database, profile_id)
+        assert report.ok is True and report.issues == ()
+        assert report.audit_fingerprint not in seen
+        seen.add(report.audit_fingerprint)
+
+
+def test_the_stored_order_of_valid_readiness_issues_is_part_of_the_state_digest(
+    database,
+):
+    """Order is a fact about the array, so the digest may not sort it away.
+
+    Only the *valid* ordering is used here — its reverse is reported as
+    `READINESS_ISSUES_NOT_ORDERED` and would move the digest through the finding
+    instead, which would prove nothing about the identity.
+    """
+    first = (RecommendationReadinessIssueCode.MATCHING_NOT_READY.value, "a", None)
+    second = (
+        RecommendationReadinessIssueCode.OPPORTUNITY_MISSING.value,
+        "b",
+        11,
+    )
+    profile_id = incomplete_profile(database, issues=readiness_json(first, second))
+    both = fingerprint_of(database, profile_id)
+    assert both.ok is True and both.issues == ()
+
+    # The same two codes, one of them dropped: a different valid state, and the
+    # remaining entry is byte-identical to the one it kept.
+    force_state(database, profile_id, readiness_issues_json=readiness_json(first))
+    one = fingerprint_of(database, profile_id)
+    assert one.ok is True and one.issues == ()
+    assert one.audit_fingerprint != both.audit_fingerprint
+
+
+@pytest.mark.parametrize(
+    ("column", "replacement"),
+    [
+        ("input_assembly_version", "recommendation-input-assembly-v0"),
+        ("persistence_version", "recommendation-persistence-v0"),
+    ],
+)
+def test_a_valid_stored_state_version_moves_the_digest_with_no_run_to_disagree_with(
+    database, column, replacement
+):
+    """An INCOMPLETE profile names no run, so no version comparison can fire.
+
+    `STATE_VERSION_MISMATCH` needs a current run to disagree with and there is
+    none here, and the stored version is deliberately never compared against the
+    constant this build ships — that would be version obsolescence, which is
+    9B.3's question. So neither state produces a finding, and the digest is the
+    only thing that can distinguish them.
+    """
+    profile_id = incomplete_profile(database)
+    before = fingerprint_of(database, profile_id)
+    assert before.ok is True and before.issues == ()
+
+    stored = database.execute(
+        f"SELECT {column} FROM recommendation_profile_state WHERE profile_id=?",
+        (profile_id,),
+    ).fetchone()[0]
+    assert replacement != stored and replacement == replacement.strip()
+    force_state(database, profile_id, **{column: replacement})
+
+    after = fingerprint_of(database, profile_id)
+
+    assert after.ok is True and after.issues == ()
+    assert after.status == "INCOMPLETE"
+    assert after.audit_fingerprint != before.audit_fingerprint
+
+
+def test_the_absence_of_a_state_row_is_a_state_the_digest_can_name(database):
+    """NOT_SYNCED is stated, not left as a gap.
+
+    A profile that has never synchronized and one carrying a valid INCOMPLETE
+    row are different states with no finding between them, so the digest has to
+    separate them — and it must come back to exactly its old value when the row
+    is removed again.
+    """
+    profile_id = ensure_user_profile(database, TEST_ONLY_EMAIL).profile_id
+    database.commit()
+    absent = fingerprint_of(database, profile_id)
+    assert absent.ok is True and absent.status == "NOT_SYNCED"
+
+    insert_state(database, profile_id, "INCOMPLETE", ONE_ISSUE)
+    present = fingerprint_of(database, profile_id)
+    assert present.ok is True and present.issues == ()
+    assert present.audit_fingerprint != absent.audit_fingerprint
+
+    database.execute(
+        "DELETE FROM recommendation_profile_state WHERE profile_id=?", (profile_id,)
+    )
+    database.commit()
+    assert (
+        fingerprint_of(database, profile_id).audit_fingerprint
+        == absent.audit_fingerprint
+    )
+
+
+def test_a_ready_state_digest_follows_its_stored_versions_too(synced):
+    """The same property on the state 9B.1 actually writes.
+
+    Both the state row and the run it names are moved to the same older version,
+    so they still agree with each other and `STATE_VERSION_MISMATCH` stays
+    silent. The run fingerprint does move — the assembly version is part of the
+    operational identity — so the run identity is asserted to be the *only*
+    finding, and the state's own contribution is what the changed digest then
+    proves.
+    """
+    stored = synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    before = fingerprint_of(synced.connection, synced.profile_id)
+    assert before.ok is True and before.issues == ()
+
+    corrupt_run(synced.connection, stored.run_id, input_assembly_version="assembly-v0")
+    force_state(
+        synced.connection, synced.profile_id, input_assembly_version="assembly-v0"
+    )
+    after = fingerprint_of(synced.connection, synced.profile_id)
+
+    assert codes(after) == ["RUN_FINGERPRINT_MISMATCH"]
+    assert after.audit_fingerprint != before.audit_fingerprint
+
+
+def test_a_malformed_state_value_is_carried_into_the_digest_without_crashing(synced):
+    """Corruption must still be distinguishable, and must not normalize away.
+
+    Two different unknown state values are both reported as `STATE_UNKNOWN`, and
+    the detail names each — so the digest would separate them through the finding
+    alone. What is asserted here is the weaker but necessary property: an
+    unreadable state row does not crash the digest, and repeats stably.
+    """
+    synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    seen = set()
+    for value in ("ALMOST_READY", "NEARLY_READY"):
+        with relaxed(synced.connection, "ignore_check_constraints"):
+            force_state(synced.connection, synced.profile_id, state=value)
+        report = fingerprint_of(synced.connection, synced.profile_id)
+        assert report.ok is False and codes(report) == ["STATE_UNKNOWN"]
+        assert report.status == "UNKNOWN"
+        seen.add(report.audit_fingerprint)
+    assert len(seen) == 2
+
+
 def test_the_audit_fingerprint_moves_with_what_was_audited_and_not_with_anything_else(
     synced,
 ):
