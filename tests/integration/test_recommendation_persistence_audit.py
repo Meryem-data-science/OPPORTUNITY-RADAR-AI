@@ -1717,6 +1717,329 @@ def test_the_audit_fingerprint_moves_with_what_was_audited_and_not_with_anything
 
 
 # --------------------------------------------------------------------------
+# corruption strict UTF-8 cannot carry
+#
+# `json.loads` is more permissive than the encoding this project fingerprints
+# under. `"\ud800"` is syntactically valid JSON and decodes to the high half of
+# a surrogate pair with no low half after it — a Python `str` that strict UTF-8
+# refuses to encode. So a stored payload can parse and still have no canonical
+# bytes, and the audit has to report that as the corruption it is instead of
+# aborting over it.
+#
+# The escape is the only way such a value reaches storage at all: SQLite is
+# handed UTF-8, so binding the decoded string is refused outright. That is
+# asserted below rather than assumed, because it is what makes these fixtures
+# honest — the corruption they write is corruption a database can really hold.
+# --------------------------------------------------------------------------
+
+#: The escape as stored, and the character it decodes to.
+LONE_SURROGATE = "\ud800"
+
+#: Text that is legitimately non-ASCII and legitimately UTF-8. It must keep
+#: behaving exactly as it always did: the fix separates "not encodable" from
+#: "not ASCII", and conflating the two would break every accented message.
+ACCENTED_MESSAGE = "aucune exécution de matching disponible"
+
+
+def storable_json(payload):
+    """`payload` as JSON text SQLite can hold, escaping what UTF-8 cannot carry.
+
+    `ensure_ascii=True` writes the unpaired surrogate as the six characters
+    `\ud800`, which is what a restore, a hand-edit or an older writer would
+    leave behind. `json.loads` decodes those six characters back into the one
+    character that has no strict UTF-8 encoding.
+    """
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def readiness_json_with(message):
+    """One readiness issue whose message is `message`, as stored text."""
+    return storable_json(
+        [
+            {
+                "code": RecommendationReadinessIssueCode.MATCHING_NOT_READY.value,
+                "message": message,
+                "opportunity_id": None,
+            }
+        ]
+    )
+
+
+def test_an_unpaired_surrogate_survives_storage_only_as_an_escape(synced):
+    """The premise every fixture below rests on, asserted rather than assumed."""
+    with pytest.raises(UnicodeEncodeError):
+        LONE_SURROGATE.encode("utf-8")
+    # SQLite is handed UTF-8, so the decoded character cannot even be bound.
+    with pytest.raises(UnicodeEncodeError):
+        synced.connection.execute("SELECT ?", (LONE_SURROGATE,))
+    # Escaped, it stores as plain ASCII and decodes back to the same character.
+    stored = storable_json({"value": LONE_SURROGATE})
+    assert stored.isascii() and stored == '{"value":"\\ud800"}'
+    assert json.loads(stored)["value"] == LONE_SURROGATE
+    # And the project's canonical form of it has no bytes at all.
+    with pytest.raises(UnicodeEncodeError):
+        canonical_json(json.loads(stored)).encode("utf-8")
+
+
+def test_a_matching_schema_failure_is_translated_into_this_modules_error(synced):
+    """A `sqlite3.Error` from the delegated Matching audit is not this API's.
+
+    Matching reads its per-run assessments outside its own `sqlite3.Error`
+    boundary, so schema damage there — a `matching_assessments` table a restore
+    never recreated — reaches this module raw. Callers are promised
+    `RecommendationPersistenceAuditError` for a failed audit, and that promise is
+    kept at the delegation boundary, with the original error chained.
+    """
+    from services.collector.matching import audit_matching_profile_history
+    from services.collector.matching.persistence_audit import (
+        MatchingPersistenceAuditError,
+    )
+
+    synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    assert (
+        audit_recommendation_profile_history(synced.connection, synced.profile_id).ok
+        is True
+    )
+    # Only the temporary database is damaged, and only this one table.
+    synced.connection.execute("DROP TABLE matching_assessments")
+    synced.connection.commit()
+
+    # The delegated audit is what fails, and it does not fail as this module's
+    # error: whatever it raises, the translation below is what holds the
+    # contract. Matching itself is not changed by this slice.
+    with pytest.raises((MatchingPersistenceAuditError, sqlite3.Error)):
+        audit_matching_profile_history(synced.connection, synced.profile_id)
+
+    with pytest.raises(RecommendationPersistenceAuditError) as raised:
+        audit_recommendation_profile_history(synced.connection, synced.profile_id)
+
+    # The type callers are given, and never a raw SQLite error.
+    assert not isinstance(raised.value, sqlite3.Error)
+    assert "matching history" in str(raised.value)
+    # The cause is not swallowed: it is whichever error the delegated audit
+    # actually raised.
+    assert isinstance(
+        raised.value.__cause__, (MatchingPersistenceAuditError, sqlite3.Error)
+    )
+
+
+def test_an_assessment_payload_with_an_unpaired_surrogate_is_reported(synced):
+    """It parses, it has no canonical bytes, and the audit says so and goes on.
+
+    The envelope is otherwise untouched, so the only thing wrong with it is the
+    one thing under test: the digest and the canonical-form comparison are both
+    skipped — neither can be made honestly over a value that cannot be encoded —
+    and no second, invented mismatch is reported in their place.
+    """
+    older = synced.store(ranked_batch(synced, synced.opportunity_ids[:2]))
+    newer = synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    payload = assessment_payload(synced.connection, newer.run_id, 2)
+    payload["eligibility"]["evidence"][0]["explanation"] = LONE_SURROGATE
+    stored_text = storable_json(payload)
+    assert stored_text.isascii()
+    corrupt_assessment(
+        synced.connection, newer.run_id, 2, assessment_payload_json=stored_text
+    )
+
+    report = audit_recommendation_profile_history(synced.connection, synced.profile_id)
+
+    assert report.ok is False
+    assert codes(report) == ["ASSESSMENT_PAYLOAD_INVALID_JSON"]
+    found = report.issues[0]
+    assert found.scope == "ASSESSMENT" and found.run_id == newer.run_id
+    assert "canonical UTF-8" in found.detail
+    # No digest was possible, so none is claimed to have failed.
+    assert "ASSESSMENT_FINGERPRINT_MISMATCH" not in codes(report)
+    assert "ASSESSMENT_PAYLOAD_NOT_CANONICAL" not in codes(report)
+    # The rest of the history was audited: both runs, every assessment, and the
+    # two intact runs still report their own identities.
+    assert [item.run_id for item in report.runs] == [newer.run_id, older.run_id]
+    assert [len(item.ranked_assessments) for item in report.runs] == [3, 2]
+    assert report.runs[1].ok is True
+    assert report.assessment_count == 5
+
+    repeated = audit_recommendation_profile_history(
+        synced.connection, synced.profile_id
+    )
+    assert repeated == report
+    assert repeated.audit_fingerprint == report.audit_fingerprint
+
+
+def test_a_batch_payload_with_an_unpaired_surrogate_is_reported(synced):
+    """The same protection on the run's own batch statement."""
+    older = synced.store(ranked_batch(synced, synced.opportunity_ids[:2]))
+    newer = synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    payload = batch_payload(synced.connection, newer.run_id)
+    payload["recommendation_engine_version"] = LONE_SURROGATE
+    corrupt_run(
+        synced.connection, newer.run_id, batch_payload_json=storable_json(payload)
+    )
+
+    report = audit_recommendation_profile_history(synced.connection, synced.profile_id)
+
+    assert report.ok is False
+    assert "BATCH_PAYLOAD_INVALID_JSON" in codes(report)
+    found = [
+        item for item in report.issues if item.code == "BATCH_PAYLOAD_INVALID_JSON"
+    ]
+    assert len(found) == 1
+    assert found[0].scope == "RUN" and found[0].run_id == newer.run_id
+    assert "canonical UTF-8" in found[0].detail
+    # The digest step was impossible and is skipped rather than guessed at, and
+    # so is the canonical-form comparison.
+    assert "BATCH_FINGERPRINT_MISMATCH" not in codes(report)
+    assert "BATCH_PAYLOAD_NOT_CANONICAL" not in codes(report)
+    # What *can* still be compared honestly still is: this payload genuinely no
+    # longer states the versions the run stores.
+    assert "BATCH_CONTENT_MISMATCH" in codes(report)
+    # And the other run is untouched and still audited.
+    assert [item.run_id for item in report.runs] == [newer.run_id, older.run_id]
+    assert report.runs[1].ok is True and report.runs[1].run_id == older.run_id
+
+    repeated = audit_recommendation_profile_history(
+        synced.connection, synced.profile_id
+    )
+    assert repeated == report
+    assert repeated.audit_fingerprint == report.audit_fingerprint
+
+
+def test_a_readiness_message_with_an_unpaired_surrogate_is_reported(synced):
+    """A profile-scoped finding, a stable digest, and no repaired message."""
+    synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    incomplete_with(
+        synced.connection, synced.profile_id, readiness_json_with(LONE_SURROGATE)
+    )
+
+    report = fingerprint_of(synced.connection, synced.profile_id)
+
+    assert report.ok is False
+    assert codes(report) == ["READINESS_ISSUES_INVALID_JSON"]
+    assert report.issues[0].scope == "PROFILE"
+    assert "canonical UTF-8" in report.issues[0].detail
+    assert report.status == "INCOMPLETE"
+    assert len(report.audit_fingerprint) == 64
+    # The run beside the broken state row was still audited.
+    assert report.runs[0].ok is True
+
+
+def test_a_readiness_message_that_cannot_be_encoded_is_never_repaired_into_a_valid_one(
+    synced,
+):
+    """The escape stays evidence: it is tagged, not turned into a real message.
+
+    The comparison state stores the *literal* six characters `\ud800`, which is
+    an ordinary, perfectly valid message. If the unencodable one were normalized
+    — the character dropped, replaced, or written back out as its escape — the
+    two states would become indistinguishable, and the corrupt one would read as
+    clean.
+    """
+    synced.store(ranked_batch(synced))
+    synced.connection.commit()
+
+    incomplete_with(
+        synced.connection, synced.profile_id, readiness_json_with("\\ud800")
+    )
+    literal = fingerprint_of(synced.connection, synced.profile_id)
+    assert literal.ok is True and literal.issues == ()
+
+    incomplete_with(
+        synced.connection, synced.profile_id, readiness_json_with(LONE_SURROGATE)
+    )
+    corrupt = fingerprint_of(synced.connection, synced.profile_id)
+
+    assert corrupt.ok is False
+    assert corrupt.audit_fingerprint != literal.audit_fingerprint
+
+
+def test_legitimate_non_ascii_text_is_not_treated_as_corruption(synced):
+    """Non-ASCII is not the defect; unencodable is. Accented text stays valid."""
+    stored = synced.store(ranked_batch(synced))
+    synced.connection.commit()
+
+    ready = fingerprint_of(synced.connection, synced.profile_id)
+    assert ready.ok is True and ready.issues == ()
+    assert ready.status == "READY" and ready.current_run_id == stored.run_id
+
+    accented = readiness_json_with(ACCENTED_MESSAGE)
+    # The stored text really does carry the accented characters, canonically:
+    # `ensure_ascii=False` is this project's canonical form, and escaping them
+    # would be a different stored value.
+    assert accented != canonical_json(json.loads(accented))
+    incomplete_with(
+        synced.connection, synced.profile_id, canonical_json(json.loads(accented))
+    )
+
+    report = fingerprint_of(synced.connection, synced.profile_id)
+
+    assert report.ok is True and report.issues == ()
+    assert report.status == "INCOMPLETE"
+    # And it is its own state, distinct from the same issue written in ASCII.
+    incomplete_with(synced.connection, synced.profile_id, readiness_json_with("plain"))
+    assert (
+        fingerprint_of(synced.connection, synced.profile_id).audit_fingerprint
+        != report.audit_fingerprint
+    )
+
+
+def test_a_surrogate_corrupted_history_is_audited_read_only(synced, database_path):
+    """The new path writes nothing either, over a `mode=ro` connection."""
+    stored = synced.store(ranked_batch(synced))
+    synced.connection.commit()
+    payload = assessment_payload(synced.connection, stored.run_id, 1)
+    payload["eligibility"]["evidence"][0]["explanation"] = LONE_SURROGATE
+    corrupt_assessment(
+        synced.connection,
+        stored.run_id,
+        1,
+        assessment_payload_json=storable_json(payload),
+    )
+    incomplete_with(
+        synced.connection, synced.profile_id, readiness_json_with(LONE_SURROGATE)
+    )
+    synced.connection.close()
+
+    read_only = connect_readonly_database(database_path)
+    try:
+        report = audit_recommendation_profile_history(read_only, synced.profile_id)
+
+        assert report.ok is False
+        assert codes(report) == [
+            "READINESS_ISSUES_INVALID_JSON",
+            "ASSESSMENT_PAYLOAD_INVALID_JSON",
+        ]
+        assert len(report.audit_fingerprint) == 64
+        assert read_only.total_changes == 0
+        assert read_only.in_transaction is False
+    finally:
+        read_only.close()
+
+
+def test_the_canonical_utf8_primitive_separates_valid_text_from_unencodable(synced):
+    """The private primitive, directly: `é` encodes, an unpaired surrogate does not."""
+    from services.recommendation.persistence_audit import (
+        _canonical_utf8,
+        _stable_value,
+    )
+
+    text, data = _canonical_utf8({"value": "café"})
+    assert text == '{"value":"café"}'
+    assert data == text.encode("utf-8")
+    assert _canonical_utf8({"value": LONE_SURROGATE}) is None
+
+    # A valid string keeps exactly its old stable rendering; an unencodable one
+    # is tagged, and the tag is itself always encodable — including when it is
+    # reached through the nested containers decoded readiness entries arrive as.
+    assert _stable_value("café") == "café"
+    nested = _stable_value([{"message": LONE_SURROGATE, "opportunity_id": None}])
+    assert canonical_json(nested).encode("utf-8")
+    assert LONE_SURROGATE not in canonical_json(nested)
+
+
+# --------------------------------------------------------------------------
 # the snapshot, transaction ownership, and the read-only guarantee
 # --------------------------------------------------------------------------
 
