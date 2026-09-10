@@ -28,6 +28,7 @@ from evaluation.dataset import (
     EvaluationDatasetError,
     EvaluationMatchingRecord,
     EvaluationOpportunityRecord,
+    EvaluationProfileContext,
     EvaluationQualificationRecord,
     EvaluationRecommendationRecord,
     EvaluationUpstreamProvenance,
@@ -99,6 +100,10 @@ COHORT = EvaluationCohortDefinition(
     excluded_counts={"merged_duplicate": 1, "inactive": 2},
 )
 
+PROFILE_CONTEXT = EvaluationProfileContext(
+    profile_id=1, user_id=1, fingerprint="9" * 64
+)
+
 UPSTREAM = EvaluationUpstreamProvenance(
     matching_status="READY",
     matching_run_id=7,
@@ -114,10 +119,13 @@ UPSTREAM = EvaluationUpstreamProvenance(
 )
 
 
-def fingerprint(records, *, cohort=COHORT, upstream=UPSTREAM) -> str:
+def fingerprint(
+    records, *, cohort=COHORT, upstream=UPSTREAM, profile_context=PROFILE_CONTEXT
+) -> str:
     return evaluation_content_fingerprint(
         schema_version=EVALUATION_DATASET_SCHEMA_VERSION,
         cohort=cohort,
+        profile_context=profile_context,
         upstream=upstream,
         records=tuple(records),
     )
@@ -128,21 +136,43 @@ def fingerprint(records, *, cohort=COHORT, upstream=UPSTREAM) -> str:
 # --------------------------------------------------------------------------
 
 
-def test_cohort_admits_uncertain_and_refuses_the_asserted_negative():
-    """`UNCERTAIN` is in and `OUT_OF_SCOPE` is out — the whole point of v1.
+def test_the_cohort_does_not_filter_on_the_classifiers_verdict():
+    """Every qualification state is admitted, `OUT_OF_SCOPE` included.
 
-    Matching selects only CORE_TARGET and ADJACENT_TARGET, so every UNCERTAIN
-    posting is invisible to Matching, Eligibility, Priority and Recommendation
-    alike. Those are the pipeline's own "I do not know", and dropping them here
-    would read an UNKNOWN as a FALSE and hide the earliest filter in the chain
-    from every later measurement.
+    `qualification` is a *prediction*, not a human truth. A real Data/AI
+    opportunity the classifier judged `OUT_OF_SCOPE` is a false negative, and
+    filtering on that verdict would delete exactly the rows Phase 10 exists to
+    find. `evaluation-cohort-v2` therefore selects on collection — active and
+    not a duplicate — and on nothing a model decided.
     """
-    assert EVALUATION_COHORT_QUALIFICATIONS == (
+    assert set(EVALUATION_COHORT_QUALIFICATIONS) == {
         "CORE_TARGET",
         "ADJACENT_TARGET",
+        "OUT_OF_SCOPE",
         "UNCERTAIN",
+    }
+    assert EVALUATION_COHORT_CRITERIA == (
+        "opportunities.is_active = 1",
+        "opportunities.status != 'merged_duplicate'",
     )
-    assert "OUT_OF_SCOPE" not in EVALUATION_COHORT_QUALIFICATIONS
+    assert not any(
+        "qualification" in criterion for criterion in EVALUATION_COHORT_CRITERIA
+    )
+
+
+def test_an_unread_posting_has_no_qualification_rather_than_a_verdict():
+    """`None`, and never `OUT_OF_SCOPE`, `UNCERTAIN`, `{}` or `False`."""
+    unread = record(qualification=None)
+    payload = evaluation_record_payload(unread)
+    assert payload["qualification"] is None
+    assert payload["qualification"] != {}
+    # And it is a distinct statement from every verdict the classifier can make.
+    for verdict in ("CORE_TARGET", "ADJACENT_TARGET", "OUT_OF_SCOPE", "UNCERTAIN"):
+        assert evaluation_record_fingerprint(unread) != (
+            evaluation_record_fingerprint(
+                record(qualification=qualification(qualification=verdict))
+            )
+        )
 
 
 # --------------------------------------------------------------------------
@@ -258,7 +288,7 @@ def test_a_changed_order_moves_the_fingerprint():
 
 def test_a_changed_cohort_rule_moves_the_fingerprint():
     """Two datasets taken under different universes are not comparable."""
-    widened = replace(COHORT, version="evaluation-cohort-v2")
+    widened = replace(COHORT, version="evaluation-cohort-v3")
     assert fingerprint([record(1)], cohort=widened) != fingerprint([record(1)])
 
 
@@ -272,6 +302,7 @@ def test_volatile_and_identity_metadata_are_outside_the_digest_domain():
     payload = canonical_evaluation_content_payload(
         schema_version=EVALUATION_DATASET_SCHEMA_VERSION,
         cohort=COHORT,
+        profile_context=PROFILE_CONTEXT,
         upstream=UPSTREAM,
         records=(record(1),),
     )
@@ -282,11 +313,15 @@ def test_volatile_and_identity_metadata_are_outside_the_digest_domain():
         "git_commit",
         "database_path",
         "database_sha256",
+        "applied_migrations",
         "matching_run_id",
         "recommendation_run_id",
-        "excluded_counts",
+        "record_count",
     ):
         assert absent not in serialized
+    # ...and the four things that must be in it, are.
+    for present in ("excluded_counts", "profile_context", "cohort", "records"):
+        assert present in serialized
 
 
 def test_a_renumbered_upstream_run_does_not_move_the_fingerprint():
@@ -295,10 +330,65 @@ def test_a_renumbered_upstream_run_does_not_move_the_fingerprint():
     assert fingerprint([record(1)], upstream=renumbered) == fingerprint([record(1)])
 
 
-def test_a_surrounding_excluded_count_does_not_move_the_fingerprint():
-    """What the cohort left behind is provenance, not this dataset's content."""
+def test_a_changed_excluded_count_moves_the_fingerprint():
+    """Two selections that refused different rows are not the same selection.
+
+    `excluded_counts` is part of the cohort statement the manifest records, so
+    it is inside the digest: one `dataset_id` must never name two different
+    selection states.
+    """
     elsewhere = replace(COHORT, excluded_counts={"merged_duplicate": 99})
-    assert fingerprint([record(1)], cohort=elsewhere) == fingerprint([record(1)])
+    assert fingerprint([record(1)], cohort=elsewhere) != fingerprint([record(1)])
+
+
+# --------------------------------------------------------------------------
+# the dataset is bound to the person it was built for
+# --------------------------------------------------------------------------
+
+
+def test_two_profiles_cannot_collide_when_no_downstream_run_exists():
+    """The case a personalised dataset must never get wrong.
+
+    A profile with no Matching and no Recommendation run produces records whose
+    downstream blocks are all `null` — which is to say, records identical to
+    those of any other such profile over the same postings. Without the profile
+    binding both would fingerprint the same, land in one directory, and a human
+    label attached there would name no one.
+    """
+    empty_upstream = replace(
+        UPSTREAM,
+        matching_status="NOT_SYNCED",
+        matching_run_id=None,
+        matching_run_fingerprint=None,
+        matching_engine_version=None,
+        matching_rules_version=None,
+        matching_selection_version=None,
+        recommendation_status="NOT_SYNCED",
+        recommendation_run_id=None,
+        recommendation_run_fingerprint=None,
+        recommendation_engine_version=None,
+        recommendation_rules_version=None,
+    )
+    records = [record(1), record(2)]
+    first = fingerprint(
+        records,
+        upstream=empty_upstream,
+        profile_context=EvaluationProfileContext(1, 1, "9" * 64),
+    )
+    second = fingerprint(
+        records,
+        upstream=empty_upstream,
+        profile_context=EvaluationProfileContext(2, 2, "9" * 64),
+    )
+    assert first != second
+
+
+def test_a_changed_profile_context_moves_the_fingerprint():
+    """An edited preference produces a new dataset even over unchanged postings."""
+    moved = replace(PROFILE_CONTEXT, fingerprint="8" * 64)
+    assert fingerprint([record(1)], profile_context=moved) != fingerprint(
+        [record(1)]
+    )
 
 
 def test_indentation_and_key_order_cannot_move_the_fingerprint():
@@ -324,7 +414,7 @@ def test_an_unknown_schema_version_is_refused_at_the_boundary():
     require_supported_schema_version(
         {"schema_version": EVALUATION_DATASET_SCHEMA_VERSION}
     )
-    for payload in ({}, {"schema_version": "evaluation-dataset-v2"}):
+    for payload in ({}, {"schema_version": "evaluation-dataset-v1"}):
         with pytest.raises(EvaluationDatasetError, match="schema version"):
             require_supported_schema_version(payload)
 

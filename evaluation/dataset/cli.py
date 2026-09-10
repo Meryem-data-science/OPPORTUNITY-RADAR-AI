@@ -14,6 +14,10 @@ runs can write to the operational database even by mistake.
 which is what a determinism check wants: the fingerprint is a property of the
 data, so two dry runs must agree before anything is stored.
 
+Running it twice without `--dry-run` is safe and says so: the second run reports
+`write_status: UNCHANGED` and leaves the frozen snapshot — `generated_at`
+included — exactly as the first run left it.
+
 This is the minimum needed to use the feature. It is deliberately not an
 experiment runner: baselines, metrics and comparisons belong to the later Phase
 10 slices, and adding a hook for them here would be building 10.5 in 10.1.
@@ -29,7 +33,11 @@ from services.collector.database.connection import connect_readonly_database
 
 from .schema import EvaluationDataset, EvaluationDatasetError
 from .snapshot import build_evaluation_dataset, resolve_git_commit
-from .storage import DEFAULT_EVALUATION_DATASET_ROOT, write_evaluation_dataset
+from .storage import (
+    DEFAULT_EVALUATION_DATASET_ROOT,
+    WRITE_STATUS_UNCHANGED,
+    write_evaluation_dataset,
+)
 
 
 def _positive_integer(value: str) -> int:
@@ -63,13 +71,18 @@ def summarize(dataset: EvaluationDataset) -> dict:
     """The distributions a reader needs to check the cohort at a glance.
 
     Counted from the records themselves rather than re-queried, so the summary
-    describes the dataset that was just built and cannot disagree with it. The
-    `null` keys are the interesting ones: an opportunity in the cohort with no
-    recommendation is one the engine never ranked.
+    describes the dataset that was just built and cannot disagree with it.
+
+    The `null` keys are the interesting ones, and there is now one in every
+    distribution. `qualification: {"null": n}` counts the postings the Data/AI
+    classifier has never read — admitted by `evaluation-cohort-v2` and reported
+    explicitly rather than folded into `OUT_OF_SCOPE`; the other three count the
+    postings each downstream stage never produced an answer for.
     """
     manifest = dataset.manifest
     qualifications = Counter(
-        record.qualification.qualification for record in dataset.records
+        "null" if record.qualification is None else record.qualification.qualification
+        for record in dataset.records
     )
     eligibility = Counter(
         "null" if record.eligibility is None else record.eligibility.status
@@ -88,8 +101,11 @@ def summarize(dataset: EvaluationDataset) -> dict:
         "schema_version": manifest.schema_version,
         "generated_at": manifest.generated_at,
         "git_commit": manifest.git_commit,
-        "profile_id": manifest.profile_id,
-        "user_id": manifest.user_id,
+        "profile_context": {
+            "profile_id": manifest.profile_context.profile_id,
+            "user_id": manifest.profile_context.user_id,
+            "fingerprint": manifest.profile_context.fingerprint,
+        },
         "record_count": manifest.record_count,
         "content_fingerprint": manifest.content_fingerprint,
         "source": {
@@ -140,11 +156,19 @@ def main(argv: list[str] | None = None) -> int:
         except EvaluationDatasetError as error:
             print(json.dumps({"error": str(error)}, ensure_ascii=False))
             return 2
+        payload["write_status"] = paths.status
+        # What the snapshot on disk says, which for an already-frozen dataset is
+        # not the moment this extraction ran.
+        payload["frozen_generated_at"] = paths.frozen_generated_at
         payload["paths"] = {
             "directory": str(paths.directory),
             "manifest": str(paths.manifest),
             "records": str(paths.records),
         }
+        if paths.status == WRITE_STATUS_UNCHANGED:
+            payload["note"] = (
+                "this dataset was already frozen; nothing was rewritten"
+            )
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

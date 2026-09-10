@@ -11,42 +11,43 @@ against it can only ever report on postings the pipeline already liked. Every
 somewhere upstream — is absent by construction, and a recall computed over it
 would be a tautology.
 
-So the snapshot is taken one boundary further upstream, at the frontier the
-pipeline already defines for itself:
+**Why it is not the Data/AI cohort either.**
 
-    services/collector/matching/selection.py :: matching-selection-v1
+`evaluation-cohort-v1` selected the frontier production matches
+(`matching-selection-v1`, widened to admit `UNCERTAIN`). That was still too
+narrow, and for a reason that goes to the heart of what Phase 10 measures:
+`qualification` is a **prediction of the Data/AI classifier, not a human
+truth**. A real Data/AI opportunity that the classifier read and judged
+`OUT_OF_SCOPE` is a false negative — the earliest and most consequential one the
+pipeline can make — and filtering on the classifier's own verdict deletes
+exactly those rows before anyone can look at them. Filtering on the presence of
+a qualification row has the same effect for a posting the classifier has not
+read yet: its absence is an upstream fact worth measuring, not a negative
+judgement about the posting.
 
-        is_active = 1
-        AND status != 'merged_duplicate'
-        AND qualification IN ('CORE_TARGET', 'ADJACENT_TARGET')
+**`evaluation-cohort-v2` is therefore defined by collection, not by prediction:**
 
-That is the cohort *production* matches, and it sits above Matching,
-Eligibility, Priority and Recommendation. Taking it verbatim would already make
-false negatives at those four stages visible.
+    opportunities.is_active = 1
+    AND opportunities.status != 'merged_duplicate'
+    ORDER BY opportunities.id
 
-**`evaluation-cohort-v1` widens it by exactly one state: `UNCERTAIN`.**
+Everything the collector found and deduplicated, whatever any downstream model
+later said about it: `CORE_TARGET`, `ADJACENT_TARGET`, `UNCERTAIN`,
+`OUT_OF_SCOPE` and postings carrying no qualification row at all. Those last
+ones arrive with `qualification = None`, which is never rewritten into
+`OUT_OF_SCOPE`, `UNCERTAIN`, `UNKNOWN`, `False` or an empty object.
 
-`UNCERTAIN` is the coarse classifier's own "I do not know whether this is
-Data/AI". Matching excludes it, which means every `UNCERTAIN` posting is
-invisible to Matching, to Eligibility, to Priority and to Recommendation alike:
-it is dropped at the earliest gate in the chain, and it is the single largest
-reservoir of candidate false negatives the pipeline has. Excluding it here would
-be the very move this contract forbids — reading the pipeline's UNKNOWN as a
-FALSE — and it would quietly make the earliest and most consequential filter the
-one stage Phase 10 can never evaluate.
+**Two exclusions remain, and neither hides a judgement.**
 
-**And it stops there.** `OUT_OF_SCOPE` is not an absence of knowledge, it is the
-classifier's asserted negative: a posting it read and judged not to be Data/AI
-at all. Postings with no qualification row are likewise out, because the row is
-what makes an opportunity part of the Data/AI universe in the first place.
-Pulling either in would drown a human-labelled benchmark in plainly off-domain
-listings while the project already has a canonical frontier that does not.
+`is_active = 0` is a posting the collector stopped seeing, and
+`status = 'merged_duplicate'` is a tombstone whose content was folded into a
+canonical row that *is* in the cohort — with `absorbed_duplicate_ids` naming the
+merge, so the deduplication context stays traceable from inside the dataset.
+Both are decisions about *collection*, made before any model ran, and both are
+counted in `excluded_counts` so their size is visible.
 
-Both exclusions are real limits on what can be measured, so neither is silent:
-`excluded_counts` below reports how many rows each of them left behind, and an
-`unclassified` count that is not near zero is a visible sign that qualification
-has not caught up with collection — a fact a later slice must weigh, not one it
-should have to discover.
+**And no sampling.** Stratifying a human benchmark is Phase 10.2's problem; a
+snapshot that has already thrown rows away cannot be stratified honestly later.
 
 Everything in this module is a `SELECT`. Nothing here writes.
 """
@@ -58,11 +59,14 @@ import sqlite3
 from .schema import EvaluationDatasetError
 
 
-#: The qualification states an evaluation snapshot admits, in the order the
-#: contract states them. `UNCERTAIN` is present on purpose — see above.
+#: Every qualification state a snapshot admits — which, deliberately, is all of
+#: them, plus the absence of a qualification row entirely. Kept as a named
+#: constant because "the cohort does not filter on the classifier's verdict" is
+#: the load-bearing property of `v2` and deserves somewhere to be asserted.
 EVALUATION_COHORT_QUALIFICATIONS: tuple[str, ...] = (
     "CORE_TARGET",
     "ADJACENT_TARGET",
+    "OUT_OF_SCOPE",
     "UNCERTAIN",
 )
 
@@ -72,17 +76,20 @@ EVALUATION_COHORT_QUALIFICATIONS: tuple[str, ...] = (
 _COHORT_SQL = """
     SELECT o.id
       FROM opportunities AS o
-      JOIN opportunity_qualifications AS q
-        ON q.opportunity_id = o.id
      WHERE o.is_active = 1
        AND o.status != 'merged_duplicate'
-       AND q.qualification IN ('CORE_TARGET', 'ADJACENT_TARGET', 'UNCERTAIN')
      ORDER BY o.id
 """
 
-#: What the cohort left behind, one count per reason. Each is measured against
-#: the same universe the cohort starts from, so the four are readable side by
-#: side rather than being four different denominators.
+#: One count per exclusion rule this cohort applies, and no other count: a key
+#: here is a row the snapshot refused. The two are disjoint and sum with the
+#: cohort to the whole `opportunities` table, so a reader can check the
+#: partition rather than trust it.
+#:
+#: These counts are **inside the content fingerprint**. They state what the
+#: selection did, so two snapshots that excluded different numbers of postings
+#: did not select the same universe and must not share a `dataset_id` — even in
+#: the unlikely case that the rows they did select happen to match.
 _EXCLUDED_COUNT_SQL: dict[str, str] = {
     "merged_duplicate": """
         SELECT COUNT(*) FROM opportunities WHERE status = 'merged_duplicate'
@@ -91,29 +98,13 @@ _EXCLUDED_COUNT_SQL: dict[str, str] = {
         SELECT COUNT(*) FROM opportunities
          WHERE is_active = 0 AND status != 'merged_duplicate'
     """,
-    "out_of_scope": """
-        SELECT COUNT(*)
-          FROM opportunities AS o
-          JOIN opportunity_qualifications AS q ON q.opportunity_id = o.id
-         WHERE o.is_active = 1
-           AND o.status != 'merged_duplicate'
-           AND q.qualification = 'OUT_OF_SCOPE'
-    """,
-    "unclassified": """
-        SELECT COUNT(*)
-          FROM opportunities AS o
-          LEFT JOIN opportunity_qualifications AS q ON q.opportunity_id = o.id
-         WHERE o.is_active = 1
-           AND o.status != 'merged_duplicate'
-           AND q.opportunity_id IS NULL
-    """,
 }
 
 
 def select_evaluation_cohort_ids(
     connection: sqlite3.Connection,
 ) -> tuple[int, ...]:
-    """Return the `evaluation-cohort-v1` opportunity ids, in canonical order."""
+    """Return the `evaluation-cohort-v2` opportunity ids, in canonical order."""
     try:
         rows = connection.execute(_COHORT_SQL).fetchall()
     except sqlite3.Error as error:

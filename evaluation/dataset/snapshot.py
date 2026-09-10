@@ -25,7 +25,14 @@ collection anywhere in a record is left in whatever sequence SQLite returned it.
 **Nothing repaired, nothing invented.** Where an upstream produced nothing, the
 record says `None`. A missing eligibility decision does not become INELIGIBLE, an
 opportunity the Recommendation Engine never ranked does not become a zero-scored
-one, and `UNCERTAIN`/`UNKNOWN` states travel through untouched.
+one, a posting the Data/AI classifier has not read does not become
+`OUT_OF_SCOPE`, and `UNCERTAIN`/`UNKNOWN` states travel through untouched.
+
+**Bound to a person.** Eligibility, Matching and Recommendation are
+personalised, so the dataset records which profile it was built for and a digest
+of what that profile declared, both inside the content fingerprint. Two profiles
+cannot share a `dataset_id` — not even when neither has a Matching or a
+Recommendation run and every record therefore looks the same.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from pathlib import Path
 
 from .cohort import count_excluded_opportunities, select_evaluation_cohort_ids
 from .fingerprint import evaluation_content_fingerprint
+from .profile_context import read_profile_context
 from .readers import (
     read_absorbed_duplicates,
     read_eligibilities,
@@ -161,6 +169,7 @@ def build_evaluation_dataset(
 
     with _read_snapshot(connection):
         user_id = resolve_user_id(connection, profile_id)
+        profile_context = read_profile_context(connection, profile_id, user_id)
         cohort_ids = select_evaluation_cohort_ids(connection)
         cohort = frozenset(cohort_ids)
         opportunities = read_opportunities(connection, cohort)
@@ -206,6 +215,7 @@ def build_evaluation_dataset(
     content_fingerprint = evaluation_content_fingerprint(
         schema_version=EVALUATION_DATASET_SCHEMA_VERSION,
         cohort=cohort_definition,
+        profile_context=profile_context,
         upstream=upstream,
         records=records,
     )
@@ -219,9 +229,8 @@ def build_evaluation_dataset(
             datetime.now(UTC).isoformat() if generated_at is None else generated_at
         ),
         git_commit=git_commit,
-        profile_id=profile_id,
-        user_id=user_id,
         record_count=len(records),
+        profile_context=profile_context,
         source=source_identity,
         cohort=cohort_definition,
         upstream=upstream,
@@ -242,15 +251,11 @@ def _build_record(
     recommendation: EvaluationRecommendationRecord | None,
 ) -> EvaluationOpportunityRecord:
     opportunity_id = int(row[0])
+    # `None` when the Data/AI classifier has never read this posting, which
+    # `evaluation-cohort-v2` admits on purpose: an unread posting is an upstream
+    # fact to measure, not a negative judgement, so nothing here substitutes a
+    # verdict for its absence.
     qualification = qualifications.get(opportunity_id)
-    if qualification is None:
-        # Unreachable through the cohort's INNER JOIN, and refused rather than
-        # papered over: a cohort member with no qualification row would mean
-        # the selection and this read disagree about what the database holds.
-        raise EvaluationDatasetError(
-            f"opportunity {opportunity_id} is in the cohort without a "
-            "persisted qualification"
-        )
     return EvaluationOpportunityRecord(
         opportunity_id=opportunity_id,
         canonical_title=str(row[1]),

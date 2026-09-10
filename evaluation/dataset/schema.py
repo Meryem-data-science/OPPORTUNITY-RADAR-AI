@@ -10,9 +10,10 @@ Three rules shape everything below.
 * **Nothing is invented.** Every field here is a column that already exists in
   the operational schema or a value an already-shipped read model already
   returns. Where the pipeline has not produced something — an opportunity the
-  Matching run never assessed, a fine classification that never ran — the field
-  is `None` and stays `None`. `None` means *not stated*; it is never rewritten
-  into a `False`, a `0.0`, an empty list or a negative verdict.
+  Matching run never assessed, a fine classification that never ran, a posting
+  the Data/AI classifier has not read yet — the field is `None` and stays
+  `None`. `None` means *not stated*; it is never rewritten into a `False`, a
+  `0.0`, an empty list, an empty object or a negative verdict.
 * **UNKNOWN is a value, not an absence.** `UNCERTAIN` qualification, `UNKNOWN`
   eligibility, the `UNCERTAIN` matching lane and the `UNCERTAIN` recommendation
   disposition are carried through verbatim. Phase 10 exists to measure how often
@@ -44,14 +45,24 @@ from typing import Any
 #: manifest or a record changes — a field added, removed or re-interpreted — so
 #: that a reader can refuse a snapshot it does not understand instead of
 #: silently reading a missing key as a missing fact.
-EVALUATION_DATASET_SCHEMA_VERSION = "evaluation-dataset-v1"
+EVALUATION_DATASET_SCHEMA_VERSION = "evaluation-dataset-v2"
 
 #: The version of the cohort *rule* — which opportunities a snapshot contains.
 #: Separate from the schema version on purpose: widening or narrowing the
 #: universe changes what a measurement means without changing a single field
 #: name, and two datasets taken under different cohort rules are not comparable
 #: however identical their records look.
-EVALUATION_COHORT_VERSION = "evaluation-cohort-v1"
+#:
+#: `v2` widened `v1` from the Data/AI-qualified cohort to every active,
+#: non-duplicate posting. `v1` filtered on `qualification`, which is a
+#: *prediction* of the Data/AI classifier and not a human truth: a real Data/AI
+#: opportunity misclassified `OUT_OF_SCOPE`, or one collected but not yet
+#: classified at all, was absent from the snapshot, so that classifier error —
+#: the earliest and most consequential false negative the pipeline can make —
+#: was undetectable by every later Phase 10 slice. The universe is therefore
+#: defined by what the *collector* found and deduplicated, not by what a
+#: downstream model predicted about it.
+EVALUATION_COHORT_VERSION = "evaluation-cohort-v2"
 
 #: The canonical order of the records inside a dataset, stated once so the
 #: manifest can carry it verbatim. `opportunities.id` is an INTEGER PRIMARY KEY,
@@ -65,8 +76,6 @@ EVALUATION_CANONICAL_ORDER = "opportunity_id ASC"
 EVALUATION_COHORT_CRITERIA: tuple[str, ...] = (
     "opportunities.is_active = 1",
     "opportunities.status != 'merged_duplicate'",
-    "opportunity_qualifications.qualification IN "
-    "('CORE_TARGET', 'ADJACENT_TARGET', 'UNCERTAIN')",
 )
 
 
@@ -213,6 +222,13 @@ class EvaluationOpportunityRecord:
     later slice attaches a human label to. Everything else is either a column of
     `opportunities` or an already-persisted downstream signal; nothing is
     derived, rescored or repaired here.
+
+    Every downstream block is optional, and each absence is a different fact:
+    no qualification row means the classifier never read the posting; no
+    eligibility decision means none was stored for this person; no matching or
+    recommendation assessment means the run never covered it. A reader that
+    folds those four nulls together is wrong — but it will be wrong about a
+    value the record states rather than about a key that quietly is not there.
     """
 
     opportunity_id: int
@@ -237,7 +253,11 @@ class EvaluationOpportunityRecord:
     #: Empty means it absorbed none — it does not mean deduplication never ran.
     absorbed_duplicate_ids: tuple[int, ...]
     sources: tuple[EvaluationSourceRecord, ...]
-    qualification: EvaluationQualificationRecord
+    #: `None` when the Data/AI classifier has never read this posting. That is
+    #: an upstream fact worth measuring — a collector running ahead of
+    #: qualification — and it is emphatically not `OUT_OF_SCOPE`, not
+    #: `UNCERTAIN`, not `UNKNOWN` and not an empty object.
+    qualification: EvaluationQualificationRecord | None
     geography_segments: tuple[EvaluationGeographySegmentRecord, ...]
     eligibility: EvaluationEligibilityRecord | None
     matching: EvaluationMatchingRecord | None
@@ -253,16 +273,46 @@ class EvaluationOpportunityRecord:
 class EvaluationCohortDefinition:
     """What the snapshot selected, in what order, and what it left behind.
 
-    `excluded_counts` is diagnostic provenance, not content: it lets a reader
-    see at a glance that, say, three hundred active postings carry no
-    qualification row at all — an upstream that has not caught up — instead of
-    discovering it as a silently smaller cohort.
+    `excluded_counts` holds one count per exclusion rule this cohort applies,
+    and it is **inside** the content fingerprint: it is a statement about the
+    selection, so two datasets that excluded different numbers of postings did
+    not select the same universe and must not share a `dataset_id`.
     """
 
     version: str
     criteria: tuple[str, ...]
     ordering: str
     excluded_counts: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class EvaluationProfileContext:
+    """Whose evaluation this is, and what their profile said at the time.
+
+    A dataset is not only a set of postings: three of its four downstream blocks
+    — eligibility, matching, recommendation — are *personalised*, and the human
+    labels a later slice attaches to it are judgements made for one specific
+    person against one specific profile state. So the dataset is bound to that
+    context and the binding is inside the content fingerprint.
+
+    `profile_id` and `user_id` are in the digest domain even though row identity
+    is excluded everywhere else in this contract, and the difference is real. A
+    per-record digest excludes identity because two identical postings genuinely
+    are the same input; a *dataset* is a frozen artefact that answers "what was
+    evaluated, and for whom", and two people can hold identical profiles. Two
+    profiles whose downstream runs are both absent would otherwise produce
+    byte-identical datasets under one `dataset_id`, and a label attached to that
+    id would name no one.
+
+    `fingerprint` covers what the profile actually said — see
+    `profile_context.py` for the exact domain — so editing a preference,
+    gaining a skill or widening a declared mobility produces a new dataset id
+    even when every posting in the cohort is unchanged.
+    """
+
+    profile_id: int
+    user_id: int
+    fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -310,19 +360,21 @@ class EvaluationSourceIdentity:
 class EvaluationDatasetManifest:
     """Everything about a dataset except the records themselves.
 
-    `generated_at` is metadata and **is not in `content_fingerprint`**. Two
-    extractions a day apart over an unchanged database produce the same digest,
-    which is precisely what makes the digest a statement about the data rather
-    than about the run that read it.
+    `generated_at` is execution metadata and **is not in `content_fingerprint`**.
+    Two extractions a day apart over an unchanged database produce the same
+    digest, which is precisely what makes the digest a statement about the data
+    rather than about the run that read it — and `storage.py` then refuses to
+    rewrite a dataset directory that already exists, so the first manifest
+    written under a `dataset_id` keeps its `generated_at` for good. A frozen
+    dataset whose metadata could still move would not be frozen.
     """
 
     schema_version: str
     dataset_id: str
     generated_at: str
     git_commit: str | None
-    profile_id: int
-    user_id: int
     record_count: int
+    profile_context: EvaluationProfileContext
     source: EvaluationSourceIdentity
     cohort: EvaluationCohortDefinition
     upstream: EvaluationUpstreamProvenance
@@ -406,11 +458,12 @@ def evaluation_record_payload(
 
     Every optional block serializes to `null` when the pipeline produced
     nothing, and each of the four downstream blocks is optional for its own
-    distinct reason — no eligibility decision stored for this person, no
-    Matching assessment in the current run, no Recommendation assessment in the
-    current run. A reader that treats those three nulls as the same thing is
-    wrong, but it will at least be wrong about a value that is present in the
-    file rather than about a key that quietly is not.
+    distinct reason — the Data/AI classifier never read the posting, no
+    eligibility decision was stored for this person, no Matching assessment in
+    the current run, no Recommendation assessment in the current run. A reader
+    that treats those four nulls as the same thing is wrong, but it will at
+    least be wrong about a value that is present in the file rather than about
+    a key that quietly is not.
     """
     eligibility = record.eligibility
     matching = record.matching
@@ -436,7 +489,12 @@ def evaluation_record_payload(
         "last_seen_at": record.last_seen_at,
         "absorbed_duplicate_ids": list(record.absorbed_duplicate_ids),
         "sources": _sources_payload(record.sources),
-        "qualification": _qualification_payload(record.qualification),
+        # `null`, never `{}`: an unread posting states nothing about itself.
+        "qualification": (
+            None
+            if record.qualification is None
+            else _qualification_payload(record.qualification)
+        ),
         "geography_segments": _geography_payload(record.geography_segments),
         "eligibility": (
             None
@@ -494,9 +552,12 @@ def evaluation_manifest_payload(
         "dataset_id": manifest.dataset_id,
         "generated_at": manifest.generated_at,
         "git_commit": manifest.git_commit,
-        "profile_id": manifest.profile_id,
-        "user_id": manifest.user_id,
         "record_count": manifest.record_count,
+        "profile_context": {
+            "profile_id": manifest.profile_context.profile_id,
+            "user_id": manifest.profile_context.user_id,
+            "fingerprint": manifest.profile_context.fingerprint,
+        },
         "source": {
             "database_path": source.database_path,
             "database_bytes": source.database_bytes,

@@ -29,6 +29,12 @@ from .cohort import (
     count_excluded_opportunities,
     select_evaluation_cohort_ids,
 )
+from .profile_context import (
+    PROFILE_CONTEXT_VERSION,
+    canonical_profile_context_payload,
+    profile_context_fingerprint,
+    read_profile_context,
+)
 from .fingerprint import (
     canonical_evaluation_content_payload,
     evaluation_content_fingerprint,
@@ -47,6 +53,7 @@ from .schema import (
     EvaluationGeographySegmentRecord,
     EvaluationMatchingRecord,
     EvaluationOpportunityRecord,
+    EvaluationProfileContext,
     EvaluationQualificationRecord,
     EvaluationRecommendationRecord,
     EvaluationSourceIdentity,
@@ -59,6 +66,8 @@ from .schema import (
 from .snapshot import build_evaluation_dataset, resolve_git_commit
 from .storage import (
     DEFAULT_EVALUATION_DATASET_ROOT,
+    WRITE_STATUS_CREATED,
+    WRITE_STATUS_UNCHANGED,
     EvaluationDatasetPaths,
     write_evaluation_dataset,
 )
@@ -70,6 +79,9 @@ __all__ = [
     "EVALUATION_COHORT_QUALIFICATIONS",
     "EVALUATION_COHORT_VERSION",
     "EVALUATION_DATASET_SCHEMA_VERSION",
+    "PROFILE_CONTEXT_VERSION",
+    "WRITE_STATUS_CREATED",
+    "WRITE_STATUS_UNCHANGED",
     "EvaluationCohortDefinition",
     "EvaluationDataset",
     "EvaluationDatasetError",
@@ -79,6 +91,7 @@ __all__ = [
     "EvaluationGeographySegmentRecord",
     "EvaluationMatchingRecord",
     "EvaluationOpportunityRecord",
+    "EvaluationProfileContext",
     "EvaluationQualificationRecord",
     "EvaluationRecommendationRecord",
     "EvaluationSourceIdentity",
@@ -86,11 +99,14 @@ __all__ = [
     "EvaluationUpstreamProvenance",
     "build_evaluation_dataset",
     "canonical_evaluation_content_payload",
+    "canonical_profile_context_payload",
     "count_excluded_opportunities",
     "evaluation_content_fingerprint",
     "evaluation_manifest_payload",
     "evaluation_record_fingerprint",
     "evaluation_record_payload",
+    "profile_context_fingerprint",
+    "read_profile_context",
     "require_supported_schema_version",
     "resolve_git_commit",
     "select_evaluation_cohort_ids",

@@ -13,9 +13,9 @@ constraints intact — which is what makes the fixture's `UNCERTAIN` qualificati
 plausible-looking strings.
 
 The fixture is deliberately small and is built around one question: **can this
-dataset see what the pipeline dropped?** Seven postings go in, three come out,
-and each of the four exclusions and each of the two false-negative shapes is
-represented exactly once.
+dataset see what the pipeline dropped?** Seven postings go in, five come out,
+and every qualification verdict, the absence of a verdict, both exclusions and
+all three false-negative shapes are represented exactly once.
 """
 
 import hashlib
@@ -26,8 +26,13 @@ import pytest
 
 from evaluation.dataset import (
     EVALUATION_DATASET_SCHEMA_VERSION,
+    WRITE_STATUS_CREATED,
+    WRITE_STATUS_UNCHANGED,
+    EvaluationDatasetError,
     build_evaluation_dataset,
+    evaluation_manifest_payload,
     evaluation_record_payload,
+    profile_context_fingerprint,
     select_evaluation_cohort_ids,
     write_evaluation_dataset,
 )
@@ -44,16 +49,21 @@ WHEN = "2026-01-01T00:00:00+00:00"
 
 #: The seven postings. Ids are explicit so the assertions below can name them.
 #:
-#:   1  CORE_TARGET, fully processed          -> in the cohort, recommended
-#:   2  UNCERTAIN, never matched              -> in the cohort, invisible to
-#:                                               Matching and everything after it
-#:   3  ADJACENT_TARGET, matched, not ranked  -> in the cohort, dropped between
-#:                                               Matching and Recommendation
-#:   4  OUT_OF_SCOPE                          -> excluded: asserted negative
-#:   5  CORE_TARGET but inactive              -> excluded
-#:   6  CORE_TARGET but merged_duplicate      -> excluded, absorbed by 1
-#:   7  active with no qualification row      -> excluded, and counted
-COHORT_IDS = (1, 2, 3)
+#:   1  CORE_TARGET, fully processed          -> in, recommended
+#:   2  UNCERTAIN, never matched              -> in, invisible to Matching and
+#:                                               everything after it
+#:   3  ADJACENT_TARGET, matched, not ranked  -> in, dropped between Matching
+#:                                               and Recommendation
+#:   4  OUT_OF_SCOPE                          -> in: the classifier's verdict is
+#:                                               a prediction, not a truth, and
+#:                                               may itself be the false negative
+#:   5  CORE_TARGET but inactive              -> excluded: collection stopped
+#:                                               seeing it
+#:   6  CORE_TARGET but merged_duplicate      -> excluded: tombstone, absorbed
+#:                                               by 1 and traceable from there
+#:   7  active with no qualification row      -> in, `qualification is None`:
+#:                                               the classifier never read it
+COHORT_IDS = (1, 2, 3, 4, 7)
 
 
 def _insert_opportunity(
@@ -285,6 +295,37 @@ def _insert_recommendation_run(
     return run_id
 
 
+def _state_preferences(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    *,
+    preferred_domains: str,
+) -> None:
+    """State one profile's opportunity preferences, through the real tables.
+
+    Written as an accepted `profile_facts` row plus its `profile_preferences`
+    projection, which is the shape Phase 3.4 leaves behind — so what the
+    profile-context loaders read here is what they read in production.
+    """
+    fact_id = connection.execute(
+        """INSERT INTO profile_facts
+               (profile_id, fact_type, value, status, created_at, updated_at,
+                decided_at)
+           VALUES (?, 'opportunity_preferences', 'stated', 'ACCEPTED', ?, ?, ?)
+           RETURNING id""",
+        (profile_id, WHEN, WHEN, WHEN),
+    ).fetchone()[0]
+    connection.execute(
+        """INSERT INTO profile_preferences
+               (profile_id, fact_id, opportunity_types_json, work_modes_json,
+                preferred_domains_json, convention_status,
+                visa_sponsorship_required, constraints_json, input_version)
+           VALUES (?, ?, '["PFE"]', '["ON_SITE"]', ?, 'AVAILABLE', 'NO', '[]',
+                   'profile-preferences-v1')""",
+        (profile_id, fact_id, preferred_domains),
+    )
+
+
 @pytest.fixture()
 def operational_database(tmp_path):
     """A disposable database holding the seven-posting fixture."""
@@ -348,6 +389,9 @@ def operational_database(tmp_path):
                VALUES (?, 1, 6, 'APPLIED', '{}', '{}', '{}', '[]', ?)""",
             (decision_id, WHEN),
         )
+        _state_preferences(
+            connection, identity.profile_id, preferred_domains='["DATA_ENGINEERING"]'
+        )
         matching_run_id = _insert_matching_run(connection, identity.profile_id)
         _insert_recommendation_run(
             connection, identity.profile_id, matching_run_id
@@ -386,7 +430,7 @@ def _dump(path) -> str:
 
 
 def test_the_cohort_is_the_upstream_universe_not_the_recommendations(dataset):
-    """Three postings in, and only one of them was ever recommended.
+    """Five postings in, and only one of them was ever recommended.
 
     This is the property the whole slice exists for. A dataset built from the
     current recommendation run would hold posting 1 alone; posting 3 was dropped
@@ -409,24 +453,56 @@ def test_the_cohort_is_the_upstream_universe_not_the_recommendations(dataset):
     assert by_id[2].recommendation is None
 
 
-def test_the_cohort_excludes_what_the_contract_says_it_excludes(
+def test_every_qualification_verdict_is_in_the_cohort(dataset):
+    """CORE_TARGET, ADJACENT_TARGET, UNCERTAIN, OUT_OF_SCOPE, and none at all.
+
+    `OUT_OF_SCOPE` is the one that matters: it is the classifier saying "this is
+    not Data/AI", and if that judgement is wrong the posting is a false negative
+    that only a human can catch. Filtering it out would make the classifier
+    unfalsifiable.
+    """
+    verdicts = {
+        record.opportunity_id: (
+            None if record.qualification is None
+            else record.qualification.qualification
+        )
+        for record in dataset.records
+    }
+    assert verdicts == {
+        1: "CORE_TARGET",
+        2: "UNCERTAIN",
+        3: "ADJACENT_TARGET",
+        4: "OUT_OF_SCOPE",
+        7: None,
+    }
+
+
+def test_an_unread_posting_is_included_with_no_qualification_at_all(dataset):
+    """`None`, and never a verdict the classifier did not make."""
+    unread = next(record for record in dataset.records if record.opportunity_id == 7)
+    assert unread.qualification is None
+    assert evaluation_record_payload(unread)["qualification"] is None
+
+
+def test_the_cohort_excludes_only_what_collection_decided(
     operational_database, dataset
 ):
+    """Inactive and merged-duplicate, and nothing a model decided."""
     path, _ = operational_database
     with connect_readonly_database(path) as connection:
         assert select_evaluation_cohort_ids(connection) == COHORT_IDS
     assert dataset.manifest.cohort.excluded_counts == {
         "merged_duplicate": 1,
         "inactive": 1,
-        "out_of_scope": 1,
-        "unclassified": 1,
     }
-
-
-def test_an_unclassified_posting_is_excluded_but_never_silently(dataset):
-    """A stale qualification upstream is a number in the manifest, not a shrug."""
-    assert 7 not in {record.opportunity_id for record in dataset.records}
-    assert dataset.manifest.cohort.excluded_counts["unclassified"] == 1
+    excluded = {5, 6}
+    assert excluded & {record.opportunity_id for record in dataset.records} == set()
+    # The two exclusions and the cohort partition the whole table.
+    with connect_readonly_database(path) as connection:
+        total = connection.execute("SELECT COUNT(*) FROM opportunities").fetchone()[0]
+    assert total == len(COHORT_IDS) + sum(
+        dataset.manifest.cohort.excluded_counts.values()
+    )
 
 
 # --------------------------------------------------------------------------
@@ -465,8 +541,10 @@ def test_an_absent_upstream_reads_as_absent_rather_than_as_a_value(dataset):
     assert by_id[1].application_url is None
 
 
-def test_the_canonical_posting_reports_what_it_absorbed(dataset):
+def test_the_excluded_duplicate_stays_traceable_from_its_canonical(dataset):
+    """A tombstone is out of the records, and its merge is not lost with it."""
     by_id = {record.opportunity_id: record for record in dataset.records}
+    assert 6 not in by_id
     assert by_id[1].absorbed_duplicate_ids == (6,)
     assert by_id[2].absorbed_duplicate_ids == ()
 
@@ -538,9 +616,8 @@ def test_the_written_files_are_byte_identical_across_extractions(
 ):
     """Reproducibility a reader can check with `diff`, not only with a digest."""
     path, identity = operational_database
-    root = tmp_path / "datasets"
     digests = []
-    for generated_at in (WHEN, "2027-06-15T12:34:56+00:00"):
+    for index, generated_at in enumerate((WHEN, "2027-06-15T12:34:56+00:00")):
         with connect_readonly_database(path) as connection:
             dataset = build_evaluation_dataset(
                 connection,
@@ -548,15 +625,102 @@ def test_the_written_files_are_byte_identical_across_extractions(
                 database_path=path,
                 generated_at=generated_at,
             )
-        paths = write_evaluation_dataset(dataset, root)
+        # A separate root each time, so this checks the *rendering* rather than
+        # the freeze — the freeze has its own tests below.
+        paths = write_evaluation_dataset(dataset, tmp_path / f"datasets{index}")
         digests.append(_digest(paths.records))
     assert digests[0] == digests[1]
-    # The manifest is the one file that legitimately differs, and only in the
-    # metadata that is outside the fingerprint.
-    manifest = json.loads(paths.manifest.read_text(encoding="utf-8"))
-    assert manifest["generated_at"] == "2027-06-15T12:34:56+00:00"
-    assert manifest["content_fingerprint"] == dataset.manifest.content_fingerprint
-    assert manifest["record_count"] == len(COHORT_IDS)
+
+
+# --------------------------------------------------------------------------
+# a frozen dataset is frozen
+# --------------------------------------------------------------------------
+
+
+def test_the_first_write_creates_the_dataset(dataset, tmp_path):
+    root = tmp_path / "datasets"
+    paths = write_evaluation_dataset(dataset, root)
+    assert paths.status == WRITE_STATUS_CREATED
+    assert paths.frozen_generated_at == dataset.manifest.generated_at
+    assert paths.directory.name == dataset.manifest.dataset_id
+    assert paths.manifest.is_file() and paths.records.is_file()
+
+
+def test_a_second_write_of_the_same_dataset_changes_nothing(
+    operational_database, tmp_path
+):
+    """The property the word "frozen" is doing all the work for.
+
+    The second extraction is a different *run* — a later clock, a git commit
+    where there was none — and it resolves to the same `dataset_id` because the
+    data did not move. Rewriting the directory would replace `generated_at`,
+    which is outside the fingerprint precisely because it may differ, and a
+    Phase 10.2 label attached to that id would then describe a snapshot that had
+    since been rewritten underneath it.
+    """
+    path, identity = operational_database
+    root = tmp_path / "datasets"
+    first = None
+    for generated_at, commit in (
+        (WHEN, None),
+        ("2027-06-15T12:34:56+00:00", "a" * 40),
+    ):
+        with connect_readonly_database(path) as connection:
+            built = build_evaluation_dataset(
+                connection,
+                profile_id=identity.profile_id,
+                database_path=path,
+                generated_at=generated_at,
+                git_commit=commit,
+            )
+        paths = write_evaluation_dataset(built, root)
+        if first is None:
+            first = (paths, _digest(paths.manifest), _digest(paths.records))
+            assert paths.status == WRITE_STATUS_CREATED
+            continue
+        assert paths.status == WRITE_STATUS_UNCHANGED
+        # Nothing on disk moved, and the caller is told when it was really
+        # frozen rather than when this run happened to re-derive it.
+        assert paths.frozen_generated_at == WHEN
+        assert built.manifest.generated_at != WHEN
+        assert _digest(paths.manifest) == first[1]
+        assert _digest(paths.records) == first[2]
+    stored = json.loads(first[0].manifest.read_text(encoding="utf-8"))
+    assert stored["generated_at"] == WHEN
+    assert stored["git_commit"] is None
+    # Exactly one directory: the freeze is idempotent, not accumulative.
+    assert [entry.name for entry in root.iterdir()] == [
+        first[0].directory.name
+    ]
+
+
+def test_a_dataset_id_naming_other_content_is_refused(dataset, tmp_path):
+    """Same id, different content: report it, never overwrite it."""
+    root = tmp_path / "datasets"
+    paths = write_evaluation_dataset(dataset, root)
+    stored = json.loads(paths.manifest.read_text(encoding="utf-8"))
+    stored["content_fingerprint"] = "f" * 64
+    paths.manifest.write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(EvaluationDatasetError, match="refusing to overwrite"):
+        write_evaluation_dataset(dataset, root)
+
+
+def test_a_dataset_whose_records_were_altered_is_refused(dataset, tmp_path):
+    """The manifest agreeing is not enough; the bytes have to agree too."""
+    root = tmp_path / "datasets"
+    paths = write_evaluation_dataset(dataset, root)
+    paths.records.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(EvaluationDatasetError, match="different records"):
+        write_evaluation_dataset(dataset, root)
+
+
+def test_a_half_written_dataset_directory_is_refused(dataset, tmp_path):
+    """An interrupted freeze is reported, not silently completed."""
+    root = tmp_path / "datasets"
+    paths = write_evaluation_dataset(dataset, root)
+    paths.manifest.unlink()
+    with pytest.raises(EvaluationDatasetError, match="incomplete"):
+        write_evaluation_dataset(dataset, root)
 
 
 def test_the_records_file_holds_one_canonical_record_per_line(
@@ -616,13 +780,17 @@ def test_the_cli_writes_a_dataset_and_reports_it(
     assert report["distribution"]["qualification"] == {
         "ADJACENT_TARGET": 1,
         "CORE_TARGET": 1,
+        "OUT_OF_SCOPE": 1,
         "UNCERTAIN": 1,
+        # Reported explicitly: the classifier has never read this posting.
+        "null": 1,
     }
+    assert report["write_status"] == WRITE_STATUS_CREATED
     # Two of the three cohort members were never ranked, and the summary says so
     # rather than reporting a cohort of one.
     assert report["distribution"]["recommendation_disposition"] == {
         "RECOMMENDED": 1,
-        "null": 2,
+        "null": 4,
     }
     assert (root / report["dataset_id"] / "manifest.json").is_file()
 
@@ -695,3 +863,116 @@ def test_the_manifest_identifies_its_source_without_copying_it(dataset, tmp_path
     assert source.wal_present is False
     assert source.applied_migrations[0] == "0001"
     assert "0026" in source.applied_migrations
+
+
+# --------------------------------------------------------------------------
+# the dataset is bound to the person it was built for
+# --------------------------------------------------------------------------
+
+
+def test_the_manifest_binds_the_dataset_to_the_profile_it_was_built_for(
+    operational_database, dataset
+):
+    """Identity plus a digest of what the profile declared — and no copy of it."""
+    path, identity = operational_database
+    context = dataset.manifest.profile_context
+    assert context.profile_id == identity.profile_id
+    assert context.user_id == identity.user_id
+    assert len(context.fingerprint) == 64
+    with connect_readonly_database(path) as connection:
+        assert context.fingerprint == profile_context_fingerprint(
+            connection, identity.profile_id
+        )
+    # The digest identifies the profile state; it does not republish it.
+    manifest = json.dumps(evaluation_manifest_payload(dataset.manifest))
+    assert "tester@example.invalid" not in manifest
+    assert "DATA_ENGINEERING" not in manifest
+
+
+def test_two_profiles_with_no_downstream_runs_do_not_collide(operational_database):
+    """The exact collision a personalised dataset must never allow.
+
+    Both profiles have no Matching and no Recommendation run, so every record of
+    both datasets carries `null` in all three personalised blocks and the two
+    record sets are byte-identical. Only the profile binding separates them.
+    """
+    path, identity = operational_database
+    connection = connect_database(path)
+    try:
+        # Strip the runs, so neither profile has any downstream signal at all.
+        connection.execute("DELETE FROM recommendation_profile_state")
+        connection.execute("DELETE FROM recommendation_assessments")
+        connection.execute("DELETE FROM recommendation_runs")
+        connection.execute("DELETE FROM matching_profile_state")
+        connection.execute("DELETE FROM matching_assessments")
+        connection.execute("DELETE FROM matching_runs")
+        connection.execute("DELETE FROM opportunity_eligibilities")
+        # `ensure_user_profile` opens its own transaction, so this one is closed
+        # before it is called rather than nested inside it.
+        connection.commit()
+        second = ensure_user_profile(connection, "other@example.invalid")
+        _state_preferences(
+            connection, second.profile_id, preferred_domains='["DATA_ENGINEERING"]'
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    built = {}
+    for profile_id in (identity.profile_id, second.profile_id):
+        with connect_readonly_database(path) as read_only:
+            built[profile_id] = build_evaluation_dataset(
+                read_only,
+                profile_id=profile_id,
+                database_path=path,
+                generated_at=WHEN,
+            )
+    first, other = built[identity.profile_id], built[second.profile_id]
+    # The records really are identical — that is what makes the case dangerous.
+    assert first.records == other.records
+    assert all(record.recommendation is None for record in first.records)
+    assert all(record.matching is None for record in first.records)
+    # ...and the datasets are still distinct.
+    assert (
+        first.manifest.content_fingerprint != other.manifest.content_fingerprint
+    )
+    assert first.manifest.dataset_id != other.manifest.dataset_id
+
+
+def test_a_changed_preference_moves_the_dataset_fingerprint(operational_database):
+    """An edited profile produces a new dataset over unchanged postings."""
+    path, identity = operational_database
+    with connect_readonly_database(path) as read_only:
+        before = build_evaluation_dataset(
+            read_only,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    connection = connect_database(path)
+    try:
+        connection.execute(
+            """UPDATE profile_preferences
+                  SET preferred_domains_json = '["MACHINE_LEARNING_AI"]'
+                WHERE profile_id = ?""",
+            (identity.profile_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    with connect_readonly_database(path) as read_only:
+        after = build_evaluation_dataset(
+            read_only,
+            profile_id=identity.profile_id,
+            database_path=path,
+            generated_at=WHEN,
+        )
+    assert after.records == before.records
+    assert (
+        after.manifest.profile_context.fingerprint
+        != before.manifest.profile_context.fingerprint
+    )
+    assert (
+        after.manifest.content_fingerprint != before.manifest.content_fingerprint
+    )
+    assert after.manifest.dataset_id != before.manifest.dataset_id
