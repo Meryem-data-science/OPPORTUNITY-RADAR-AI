@@ -291,12 +291,81 @@ def _is_ratio(value: object) -> bool:
     )
 
 
-def _digest(payload: Any) -> str:
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+def _is_utf8(text: str) -> bool:
+    """Whether this project's strict UTF-8 canonical encoding can carry `text`.
+
+    Not every Python `str` has one. `json.loads` accepts an escaped unpaired
+    surrogate — `"\\ud800"` is syntactically valid JSON — and hands back a
+    string that strict UTF-8 refuses to encode, so a *decoded* persisted payload
+    can hold a character the encoding the whole project fingerprints under has
+    no bytes for. A stored column can never hold one (SQLite is handed UTF-8 and
+    the write would already have failed), which is exactly why the escape is the
+    interesting case: it survives storage and only surfaces at digest time.
+    """
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _canonical_utf8(payload: Any) -> tuple[str, bytes] | None:
+    """Canonical JSON for `payload`, and the exact bytes a digest is taken over.
+
+    The audit's one canonicalization: `canonical_json(...).encode("utf-8")`
+    written once, where the two steps can fail together, instead of at each
+    digest site where the encoding could abort the whole audit over a single
+    corrupt payload. Both results are returned because both are needed — the
+    text for the canonical-form comparison, the bytes for SHA-256 — and they
+    must describe the same value.
+
+    `None` means the canonical text has no strict UTF-8 encoding. That is a
+    finding about persisted data, and it is deliberately not repaired here: no
+    `errors="ignore"`, no `errors="replace"`, no `"surrogatepass"`. Each would
+    hand back bytes this project never agreed to fingerprint — the first two by
+    losing the evidence, the third by inventing an encoding the canonical
+    contract excludes — and a digest computed over them would be a claim about
+    something that was never stored.
+    """
+    text = canonical_json(payload)
+    try:
+        return text, text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+
+
+def _digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+#: How a stored string strict UTF-8 cannot carry appears in the stable audit
+#: payload. Tagging replaces the string with a single-key *object*, and what
+#: reaches `_stable_value` is only ever one stored column value — null, an
+#: integer, a real, text or a blob — none of which can digest as an object. That
+#: disjointness is the whole reason the tag is safe, and it is why a *decoded*
+#: JSON tree is never rendered value by value: an object is exactly the shape
+#: ordinary decoded content can also have, so a tree carrying this key would
+#: digest identically to a tree carrying the character it stands in for.
+_UNENCODABLE_KEY = "__not_utf8__"
+
+
+def _escaped(value: str) -> str:
+    """A deterministic, always-encodable rendering of an unencodable string.
+
+    Every character strict UTF-8 has no bytes for is written as its own
+    `\\uXXXX` escape and every other character is kept exactly as stored. The
+    result is a pure function of the value, is always encodable, and states what
+    was found instead of replacing it — no character is dropped, none is
+    substituted, and nothing becomes a plausible-looking business string.
+    """
+    return "".join(
+        character if _is_utf8(character) else f"\\u{ord(character):04x}"
+        for character in value
+    )
 
 
 def _stable_value(value: object) -> Any:
-    """A JSON-safe, deterministic rendering of one stored column value.
+    """A JSON-safe, deterministic rendering of one stored **column** value.
 
     Everything SQLite stores in the audited TEXT and INTEGER columns is already
     JSON-safe; a BLOB left behind by a restore is not, and letting one reach
@@ -304,10 +373,23 @@ def _stable_value(value: object) -> Any:
     report. Such a value is rendered with `repr`, which is deterministic and is
     not a normalization: nothing is coerced into a plausible-looking version of
     itself, and the finding that named the value still stands beside it.
+
+    A `str` is JSON-safe but not necessarily *encodable*, and the audit
+    fingerprint is taken over these bytes, so one that strict UTF-8 refuses is
+    tagged rather than carried. SQLite cannot hand such a string back — a column
+    that could not be encoded could never have been written — so that branch
+    guards a path this build cannot reach, and it is kept only so that no future
+    caller can abort the fingerprint. It is safe precisely because the argument
+    is a stored column value: a decoded JSON tree is never rendered here, which
+    is what stops the tag from colliding with ordinary content shaped like it.
     """
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        return value if _is_utf8(value) else {_UNENCODABLE_KEY: _escaped(value)}
+    if value is None or isinstance(value, (int, float, bool)):
         return value
-    return repr(value)
+    # `repr` already escapes what UTF-8 cannot carry, and `_escaped` makes that
+    # a property of this function rather than of `repr`: the result encodes.
+    return _escaped(repr(value))
 
 
 # --------------------------------------------------------------------------
@@ -550,21 +632,39 @@ def _audit_assessment(
             )
         else:
             payload = decoded
-            if canonical_json(payload) != payload_json:
+            canonical = _canonical_utf8(payload)
+            if canonical is None:
+                # Syntactically valid JSON that decodes to a string strict UTF-8
+                # cannot carry. Neither statement below can be made honestly:
+                # the canonical form of this payload has no bytes, so there is
+                # nothing to compare its stored text against and nothing to
+                # hash. Both are skipped rather than reported as a second,
+                # invented mismatch, and the payload is reported under the code
+                # the vocabulary already has for one that cannot be read as this
+                # project's JSON. The audit is not aborted, no assessment is
+                # recomputed, and the remaining checks below still run.
                 finding(
-                    "ASSESSMENT_PAYLOAD_NOT_CANONICAL",
-                    "assessment payload is not canonical JSON",
+                    "ASSESSMENT_PAYLOAD_INVALID_JSON",
+                    "assessment payload is not representable as canonical"
+                    " UTF-8 JSON",
                 )
-            # The persisted payload *is* Phase 9A's canonical business payload,
-            # so verifying its digest means hashing what is stored — never
-            # rebuilding an assessment and re-deriving a score from it. No
-            # identity is injected: the content digest holds no profile id and
-            # no opportunity id, by construction.
-            if digest is not None and _digest(payload) != digest:
-                finding(
-                    "ASSESSMENT_FINGERPRINT_MISMATCH",
-                    "assessment fingerprint differs from the stored payload",
-                )
+            else:
+                canonical_text, canonical_bytes = canonical
+                if canonical_text != payload_json:
+                    finding(
+                        "ASSESSMENT_PAYLOAD_NOT_CANONICAL",
+                        "assessment payload is not canonical JSON",
+                    )
+                # The persisted payload *is* Phase 9A's canonical business
+                # payload, so verifying its digest means hashing what is stored
+                # — never rebuilding an assessment and re-deriving a score from
+                # it. No identity is injected: the content digest holds no
+                # profile id and no opportunity id, by construction.
+                if digest is not None and _digest(canonical_bytes) != digest:
+                    finding(
+                        "ASSESSMENT_FINGERPRINT_MISMATCH",
+                        "assessment fingerprint differs from the stored payload",
+                    )
 
     if payload is not None:
         issues.extend(
@@ -917,15 +1017,30 @@ def _audit_batch_payload(
     if not isinstance(decoded, dict):
         finding("BATCH_PAYLOAD_NOT_OBJECT", "batch payload is not a JSON object")
         return
-    if canonical_json(decoded) != batch_payload_json:
-        finding("BATCH_PAYLOAD_NOT_CANONICAL", "batch payload is not canonical JSON")
-    if stored_batch_fingerprint is not None and _digest(decoded) != (
-        stored_batch_fingerprint
-    ):
+    canonical = _canonical_utf8(decoded)
+    if canonical is None:
+        # As for an assessment payload: the canonical form of this batch has no
+        # UTF-8 bytes, so it can neither be compared with what is stored nor
+        # hashed, and both statements are skipped instead of being invented.
+        # The comparison against the stored rows below needs neither and still
+        # runs, and so does the rest of this profile's audit.
         finding(
-            "BATCH_FINGERPRINT_MISMATCH",
-            "batch fingerprint differs from the stored batch payload",
+            "BATCH_PAYLOAD_INVALID_JSON",
+            "batch payload is not representable as canonical UTF-8 JSON",
         )
+    else:
+        canonical_text, canonical_bytes = canonical
+        if canonical_text != batch_payload_json:
+            finding(
+                "BATCH_PAYLOAD_NOT_CANONICAL", "batch payload is not canonical JSON"
+            )
+        if stored_batch_fingerprint is not None and _digest(canonical_bytes) != (
+            stored_batch_fingerprint
+        ):
+            finding(
+                "BATCH_FINGERPRINT_MISMATCH",
+                "batch fingerprint differs from the stored batch payload",
+            )
     if not ranking_sound:
         return
     expected = {
@@ -1003,7 +1118,21 @@ def _audit_readiness_issues(
             "readiness_issues_json is not a JSON array",
         )
         return None
-    if canonical_json(decoded) != raw:
+    canonical = _canonical_utf8(decoded)
+    if canonical is None:
+        # The array parsed, but one of its strings decodes to something strict
+        # UTF-8 cannot carry, so it has no canonical form to be compared with.
+        # The entries below are still audited — a code, a posting and the stored
+        # order can all be judged without encoding anything — and the entry is
+        # never rewritten into a valid-looking readiness issue: this finding
+        # stands, and `_stable_value` carries the unencodable string into the
+        # audit fingerprint tagged as what it is.
+        finding(
+            "READINESS_ISSUES_INVALID_JSON",
+            None,
+            "readiness_issues_json is not representable as canonical UTF-8 JSON",
+        )
+    elif canonical[0] != raw:
         finding(
             "READINESS_ISSUES_NOT_CANONICAL",
             None,
@@ -1094,20 +1223,39 @@ class _ProfileStateAudit:
 def _readiness_identity(raw: object, entries: list[Any] | None) -> dict[str, Any]:
     """The stored readiness array's deterministic contribution to the digest.
 
-    A decodable array contributes its decoded entries **in stored order**. The
-    order is part of the state contract — `input_assembly` sorts the issues once,
-    before they are ever stored — so it is preserved here rather than sorted, for
-    the same reason the audit verifies that order instead of repairing it. Among
-    valid states the decoded value and the stored bytes determine each other,
-    canonical JSON being a bijection, so nothing is lost by carrying the
-    structure rather than the text.
+    A decodable array that *has* a canonical UTF-8 form contributes its decoded
+    entries **in stored order**. The order is part of the state contract —
+    `input_assembly` sorts the issues once, before they are ever stored — so it
+    is preserved here rather than sorted, for the same reason the audit verifies
+    that order instead of repairing it. Among valid states the decoded value and
+    the stored bytes determine each other, canonical JSON being a bijection, so
+    nothing is lost by carrying the structure rather than the text.
+
+    An array that decodes but has **no** canonical UTF-8 form contributes the
+    stored text instead, and this is the one case where carrying the structure
+    would be wrong rather than merely awkward. Rendering that tree value by
+    value means standing in for a character that cannot be encoded, and every
+    stand-in is itself a value ordinary JSON can contain: a state whose stored
+    content really is the stand-in would then digest identically to the corrupt
+    one, and two genuinely different persisted states would claim to be the same
+    state. The stored text has no stand-in — it is what SQLite actually holds,
+    two different stored texts are two different identities, and it is always
+    encodable, because a column that was not could never have been written.
 
     A value that is not a decodable array has no structure to carry, so the
     stored text itself is the identity; the findings already say what is wrong
     with it.
+
+    The three shapes carry different keys, so no one of them can digest as
+    another.
     """
     if entries is None:
         return {"decoded": False, "raw": _stable_value(raw)}
+    if _canonical_utf8(entries) is None:
+        # Asked again here rather than passed down from the finding above it:
+        # `_canonical_utf8` is a pure function of the value, so the identity
+        # branch and the finding can never disagree about the same array.
+        return {"decoded": True, "canonical_utf8": False, "raw": _stable_value(raw)}
     return {"decoded": True, "issues": entries}
 
 
@@ -1265,7 +1413,17 @@ def _matching_run_results(
     """
     try:
         report = audit_matching_profile_history(connection, profile_id)
-    except MatchingPersistenceAuditError as error:
+    except (MatchingPersistenceAuditError, sqlite3.Error) as error:
+        # Both, because Matching reads some of its rows outside its own
+        # `sqlite3.Error` boundary: schema damage there — a `matching_assessments`
+        # table a restore never recreated, say — surfaces as a raw
+        # `sqlite3.OperationalError`, and letting it out of this function would
+        # break the one promise this module's callers are given, that a failed
+        # audit is a `RecommendationPersistenceAuditError`. It is translated at
+        # this boundary rather than fixed in Matching, whose audit is its own
+        # phase's contract. Nothing wider is caught: an unexpected failure is
+        # still a bug and must still look like one, and the cause is always
+        # chained so the original error survives.
         raise RecommendationPersistenceAuditError(
             f"cannot audit the matching history of profile {profile_id}: {error}"
         ) from error
