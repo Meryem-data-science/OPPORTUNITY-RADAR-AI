@@ -17,6 +17,12 @@ venv/
 *.sqlite
 *.sqlite3
 
+# The local data space: the operational SQLite database and the evaluation
+# datasets frozen from it (Phase 10.1, data/evaluation/datasets/<dataset_id>/).
+# Those datasets hold real opportunities, real URLs and one real person's
+# eligibility decisions, so the whole directory stays out of Git.
+data/
+
 # Node.js / Next.js
 node_modules/
 .next/
