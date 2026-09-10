@@ -60,11 +60,28 @@ them on the history listing exactly as strictly as on a full run. Each public
 read is several queries and is taken as one deferred-read-transaction snapshot,
 so no caller ever sees a projection blended from two database states.
 
-Still absent, and belonging to later sub-phases: the persistence audit that
-recomputes the three recommendation digests over a whole history (9B.2b), and the
-freshness → compute → persist orchestration that writes the INCOMPLETE state
-(9B.3) the read model above already knows how to report. This package still
-exposes no HTTP route and changes no page.
+Phase 9B.2b adds `persistence_audit.py`, and it answers a third question the
+first two deliberately do not: does the persisted history still cryptographically
+and structurally contain exactly what its stored identities claim? It recomputes
+the assessment digests from the stored payloads, the batch content statement from
+the stored rows in persisted rank order, and the operational run fingerprint from
+the persisted identities — and it audits the source Matching provenance every run
+copied, through Phase 4's own **per-run** audit result. It recomputes no score, no
+disposition, no reason and no ranking, and it repairs nothing: corruption becomes
+structured findings and `ok = False`, never a raise and never a write. Where the
+read model refuses at the first unreadable value, the audit accumulates every
+finding across the whole history and returns them in one deterministic order,
+under a report fingerprint that depends on stable persisted identities and
+findings alone.
+
+Freshness stays out of all three. A historical run whose source Matching run is no
+longer the profile's current one is valid history, and no layer here compares the
+two — requiring that equality is explicitly forbidden.
+
+Still absent, and belonging to a later sub-phase: the freshness → compute →
+persist orchestration that writes the INCOMPLETE state (9B.3) the read model and
+the audit above already know how to report. This package still exposes no HTTP
+route and changes no page.
 
 **Matching v1's scoring contract is untouched**, which is what makes the
 recommendation a controlled evolution of that baseline rather than a second
@@ -92,6 +109,9 @@ recommendation score. Runs persisted before it stay readable and auditable.
     persistence_fingerprint.py  the operational identity of a stored run
     persistence.py              atomic, append-only, idempotent storage
     read_model.py               strict, read-only views of what was stored
+
+    persistence_audit.py             read-only integrity audit of a whole history
+    persistence_audit_fingerprint.py the audit report's deterministic digest
 """
 
 from services.recommendation.engine import (
@@ -174,6 +194,18 @@ from services.recommendation.persistence import (
     RecommendationStoreResult,
     store_recommendation_batch,
 )
+from services.recommendation.persistence_audit import (
+    RECOMMENDATION_PERSISTENCE_AUDIT_VERSION,
+    RecommendationPersistenceAuditError,
+    RecommendationPersistenceAuditIssue,
+    RecommendationPersistenceAuditReport,
+    RecommendationRankedAssessmentIdentity,
+    RecommendationRunAuditResult,
+    audit_recommendation_profile_history,
+)
+from services.recommendation.persistence_audit_fingerprint import (
+    recommendation_persistence_audit_fingerprint,
+)
 from services.recommendation.persistence_fingerprint import (
     RECOMMENDATION_PERSISTENCE_VERSION,
     canonical_recommendation_run_payload,
@@ -199,6 +231,7 @@ __all__ = [
     "FINE_DOMAIN_BRIDGE_VERSION",
     "RECOMMENDATION_ENGINE_VERSION",
     "RECOMMENDATION_INPUT_ASSEMBLY_VERSION",
+    "RECOMMENDATION_PERSISTENCE_AUDIT_VERSION",
     "RECOMMENDATION_PERSISTENCE_VERSION",
     "RECOMMENDATION_RULES_VERSION",
     "REQUIRED_SKILL_WEIGHT",
@@ -231,13 +264,18 @@ __all__ = [
     "RecommendationInputRecord",
     "RecommendationMatchingSnapshot",
     "RecommendationOpportunityContext",
+    "RecommendationPersistenceAuditError",
+    "RecommendationPersistenceAuditIssue",
+    "RecommendationPersistenceAuditReport",
     "RecommendationPersistenceError",
     "RecommendationProfileReadModel",
+    "RecommendationRankedAssessmentIdentity",
     "RecommendationReadError",
     "RecommendationReadinessIssue",
     "RecommendationReadinessIssueCode",
     "RecommendationReadinessStatus",
     "RecommendationReasonCode",
+    "RecommendationRunAuditResult",
     "RecommendationRunReadModel",
     "RecommendationRunSummary",
     "RecommendationSkillEvidence",
@@ -246,6 +284,7 @@ __all__ = [
     "SemanticComponent",
     "WorkModeSignal",
     "assemble_recommendation_inputs",
+    "audit_recommendation_profile_history",
     "build_domain_component",
     "build_eligibility_evidence",
     "build_fine_domain_fit",
@@ -268,6 +307,7 @@ __all__ = [
     "recommendation_assessment_fingerprint",
     "recommendation_batch_fingerprint",
     "recommendation_disposition",
+    "recommendation_persistence_audit_fingerprint",
     "recommendation_run_fingerprint",
     "store_recommendation_batch",
 ]
