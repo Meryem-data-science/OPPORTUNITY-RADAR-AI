@@ -11,6 +11,7 @@ appears anywhere in it.
 """
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -45,10 +46,12 @@ from evaluation.labeling import (
     HumanLabelError,
     LabelDiagnostics,
     append_human_label,
+    assert_selection_bindings,
     build_labelset_report,
     load_calibration_selection,
     read_frozen_dataset,
     read_label_history,
+    read_validated_label_history,
     resolve_effective_labels,
     select_calibration_sample,
     write_calibration_selection,
@@ -816,6 +819,291 @@ def test_a_labelset_manifest_states_the_protocol_is_not_frozen(
     assert payload["judged_count"] == 0
     assert payload["unjudged_count"] == 3
     assert write_labelset_manifest(report, labels_root).status == "UPDATED"
+
+
+# --------------------------------------------------------------------------
+# protocol and selector versions are never mixed (FIX 2)
+# --------------------------------------------------------------------------
+
+
+def test_a_label_from_another_protocol_is_refused_on_read(
+    frozen: Path, labels_root: Path
+):
+    """Right shape, wrong question: the row parses and is still refused."""
+    dataset = read_frozen_dataset(frozen)
+    _write_foreign_label(
+        dataset, labels_root, protocol_version="human-relevance-v1"
+    )
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+def test_a_label_from_another_protocol_never_reaches_a_digest(
+    frozen: Path, labels_root: Path
+):
+    """The transition v0 -> v1 must not be able to pool the two silently."""
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 3)
+    _write_foreign_label(
+        dataset,
+        labels_root,
+        opportunity_id=selection.opportunity_ids[0],
+        protocol_version="human-relevance-v1",
+    )
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        build_labelset_report(dataset, selection, labels_root)
+
+
+def test_a_label_from_another_protocol_blocks_a_new_judgement(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_foreign_label(
+        dataset, labels_root, protocol_version="human-relevance-v1"
+    )
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        append_human_label(
+            dataset, opportunity_id=2, relevance_grade=2, root=labels_root
+        )
+
+
+def test_a_selection_from_another_protocol_is_refused_on_read(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 3), labels_root
+    )
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    payload["protocol_version"] = "human-relevance-v1"
+    result.path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        load_calibration_selection(result.path)
+
+
+def test_a_selection_from_an_unsupported_selector_is_refused_on_read(
+    frozen: Path, labels_root: Path
+):
+    """No compatibility policy in this slice, so no silent acceptance either."""
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 3), labels_root
+    )
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    payload["selector_version"] = "calibration-selector-v9"
+    result.path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(HumanLabelError, match="selector"):
+        load_calibration_selection(result.path)
+
+
+# --------------------------------------------------------------------------
+# selection bindings are checked before anything is shown (FIX 3)
+# --------------------------------------------------------------------------
+
+
+def test_a_selection_pointing_at_another_dataset_is_refused_before_any_view(
+    tmp_path: Path, frozen: Path, labels_root: Path, capsys
+):
+    """`--selection PATH` from another dataset stops at the argument.
+
+    Not at the digest, three commands later: an annotator must never be shown a
+    posting under a lot that was drawn against a different snapshot.
+    """
+    other_dataset = build_dataset(9)
+    other = write_evaluation_dataset(other_dataset, tmp_path / "other-datasets")
+    other_view = read_frozen_dataset(other.directory)
+    foreign = write_calibration_selection(
+        select_calibration_sample(other_view, 4), tmp_path / "other-labels"
+    )
+
+    common = ["--dataset-dir", str(frozen), "--labels-root", str(labels_root)]
+    code, payload = run(
+        capsys, "show", *common, "--selection", str(foreign.path), "--next"
+    )
+    assert code == 2
+    assert "drawn from dataset" in payload["error"]
+    assert "opportunity" not in payload
+
+    for command in ("progress", "fingerprint"):
+        code, payload = run(
+            capsys, command, *common, "--selection", str(foreign.path)
+        )
+        assert code == 2
+        assert "drawn from dataset" in payload["error"]
+
+
+def test_a_selection_for_another_profile_is_refused_by_every_path(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 4)
+    foreign = replace(selection, profile_id=2)
+    with pytest.raises(HumanLabelError, match="drawn for profile"):
+        assert_selection_bindings(foreign, dataset)
+    with pytest.raises(HumanLabelError, match="drawn for profile"):
+        build_labelset_report(dataset, foreign, labels_root)
+
+
+def test_the_labelset_report_checks_the_whole_binding_not_only_the_id(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 4)
+    with pytest.raises(HumanLabelError, match="positions"):
+        build_labelset_report(
+            dataset,
+            replace(
+                selection,
+                items=tuple(
+                    replace(item, position=item.position + 1)
+                    for item in selection.items
+                ),
+            ),
+            labels_root,
+        )
+
+
+# --------------------------------------------------------------------------
+# the existing history is validated before anything is appended (FIX 4)
+# --------------------------------------------------------------------------
+
+
+def test_a_corrupt_history_stops_a_new_judgement_instead_of_gaining_one(
+    frozen: Path, labels_root: Path
+):
+    """A valid row must never be appended behind an invalid one.
+
+    That would make the corruption permanent and give it company: the file would
+    then hold one judgement that belongs here and one that does not, and no
+    later reader could tell which number came from which.
+    """
+    dataset = read_frozen_dataset(frozen)
+    _write_foreign_label(dataset, labels_root, dataset_content_fingerprint="0" * 64)
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(HumanLabelError, match="content fingerprint"):
+        append_human_label(
+            dataset, opportunity_id=5, relevance_grade=3, root=labels_root
+        )
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_a_history_judging_an_absent_opportunity_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_foreign_label(dataset, labels_root, opportunity_id=9999)
+    with pytest.raises(HumanLabelError, match="not in dataset"):
+        read_validated_label_history(dataset, labels_root)
+
+
+def _write_rows(dataset, labels_root: Path, rows: list[dict]) -> Path:
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _row(dataset, **overrides) -> dict:
+    row = {
+        "label_schema_version": HUMAN_LABEL_SCHEMA_VERSION,
+        "protocol_version": HUMAN_LABEL_PROTOCOL_VERSION,
+        "dataset_id": dataset.dataset_id,
+        "dataset_content_fingerprint": dataset.content_fingerprint,
+        "profile_id": dataset.profile_id,
+        "profile_context_fingerprint": dataset.profile_context_fingerprint,
+        "opportunity_id": 1,
+        "relevance_grade": 2,
+        "relevance_grade_name": "RELEVANT",
+        "diagnostics": {
+            "geo_judgment": None,
+            "data_ai_judgment": None,
+            "opportunity_type_judgment": None,
+        },
+        "reason_tags": [],
+        "note": None,
+        "labeled_at": "2026-03-01T10:00:00+00:00",
+        "revision": 1,
+        "relabel_reason": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_a_first_judgement_claiming_a_later_revision_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(dataset, labels_root, [_row(dataset, revision=2, relabel_reason="x")])
+    with pytest.raises(HumanLabelError, match="revision 1 was due"):
+        read_validated_label_history(dataset, labels_root)
+
+
+def test_a_gap_in_the_revision_chain_is_refused(frozen: Path, labels_root: Path):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(
+        dataset,
+        labels_root,
+        [
+            _row(dataset),
+            _row(dataset, revision=3, relabel_reason="skipped a step"),
+        ],
+    )
+    with pytest.raises(HumanLabelError, match="revision 2 was due"):
+        read_validated_label_history(dataset, labels_root)
+
+
+def test_a_correction_that_states_no_reason_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(
+        dataset,
+        labels_root,
+        [_row(dataset), _row(dataset, revision=2, relevance_grade=0)],
+    )
+    with pytest.raises(HumanLabelError, match="without stating why"):
+        read_validated_label_history(dataset, labels_root)
+
+
+def test_a_first_judgement_claiming_to_be_a_correction_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(
+        dataset, labels_root, [_row(dataset, relabel_reason="nothing to correct")]
+    )
+    with pytest.raises(HumanLabelError, match="states a relabel reason"):
+        read_validated_label_history(dataset, labels_root)
+
+
+def test_a_history_written_by_the_normal_path_always_validates(
+    frozen: Path, labels_root: Path
+):
+    """The invariants hold for every file this package itself produces."""
+    dataset = read_frozen_dataset(frozen)
+    append_human_label(
+        dataset, opportunity_id=1, relevance_grade=3, root=labels_root
+    )
+    append_human_label(
+        dataset, opportunity_id=2, relevance_grade=0, root=labels_root
+    )
+    append_human_label(
+        dataset,
+        opportunity_id=1,
+        relevance_grade=1,
+        relabel=True,
+        relabel_reason="reread the description",
+        root=labels_root,
+    )
+    history = read_validated_label_history(dataset, labels_root)
+    assert [(item.opportunity_id, item.revision) for item in history] == [
+        (1, 1),
+        (2, 1),
+        (1, 2),
+    ]
 
 
 # --------------------------------------------------------------------------

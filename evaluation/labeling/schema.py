@@ -57,6 +57,7 @@ __all__ = [
     "RELEVANCE_GRADES",
     "RELEVANCE_GRADE_NAMES",
     "RELEVANCE_RUBRIC",
+    "SUPPORTED_PROTOCOL_VERSIONS",
     "DataAiJudgment",
     "GeoJudgment",
     "HumanLabelError",
@@ -69,6 +70,7 @@ __all__ = [
     "label_diagnostics_payload",
     "normalize_note",
     "normalize_reason_tags",
+    "require_supported_protocol_version",
     "validate_relevance_grade",
 ]
 
@@ -89,6 +91,17 @@ HUMAN_LABEL_SCHEMA_VERSION = "human-label-v1"
 HUMAN_LABEL_PROTOCOL_VERSION = "human-relevance-calibration-v0"
 
 
+#: The protocol versions this build is able to *interpret*. Exactly one, and
+#: that is the policy rather than an oversight: a stored judgement means what it
+#: meant under the protocol it was made under, and this build only knows one
+#: protocol. When `human-relevance-v1` arrives it will have a different rubric
+#: and possibly different diagnostics, so a v0 label read under it would be a
+#: judgement of one question reported as a judgement of another. Widening this
+#: tuple is therefore a deliberate act that must come with a stated compatibility
+#: policy — never a side effect of bumping a version string.
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (HUMAN_LABEL_PROTOCOL_VERSION,)
+
+
 class HumanLabelError(EvaluationDatasetError):
     """Raised when a human label cannot be built, read or stored safely.
 
@@ -97,6 +110,30 @@ class HumanLabelError(EvaluationDatasetError):
     second exception, and the two failures really are the same kind of failure —
     an artefact that cannot be trusted to say what it appears to say.
     """
+
+
+def require_supported_protocol_version(value: Any, *, subject: str) -> str:
+    """Refuse an artefact produced under a protocol this build cannot interpret.
+
+    The row *shape* is checked separately, by the label schema version, and the
+    two checks are not interchangeable — which is the whole reason this function
+    exists. A `human-relevance-v1` label would almost certainly parse under
+    `human-label-v1`: same fields, same types, same JSON. What differs is the
+    question the annotator was answering. Reading such a row here and folding it
+    into a labelset digest would report judgements of one rubric as judgements
+    of another, and the digest would not show it.
+
+    So an unknown protocol stops at the boundary. Nothing is converted, nothing
+    is migrated in place and no stored row is rewritten: the artefact is left
+    exactly as it is, and this build declines to speak for it.
+    """
+    if value not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise HumanLabelError(
+            f"{subject} states protocol version {value!r}; this build reads "
+            f"{list(SUPPORTED_PROTOCOL_VERSIONS)} and will not reinterpret a "
+            "judgement made under another protocol"
+        )
+    return str(value)
 
 
 # --------------------------------------------------------------------------

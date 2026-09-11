@@ -24,6 +24,8 @@ from evaluation.dataset import (
 )
 from evaluation.labeling import (
     BLIND_VIEW_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    SUPPORTED_SELECTOR_VERSIONS,
     CALIBRATION_SELECTOR_VERSION,
     EVALUATION_RECORD_CONTRACT_FIELDS,
     FORBIDDEN_VIEW_KEY_TOKENS,
@@ -48,7 +50,9 @@ from evaluation.labeling import (
     human_label_semantic_payload,
     labelset_fingerprint,
     normalize_note,
+    assert_selection_bindings,
     normalize_reason_tags,
+    require_supported_protocol_version,
     select_calibration_sample,
     unclassified_record_fields,
     validate_relevance_grade,
@@ -725,6 +729,264 @@ def test_the_strata_are_computed_from_system_outputs_on_purpose():
         set(item.stratum) == {"recommendation_band", "qualification", "geography"}
         for item in selection.items
     )
+
+
+# --------------------------------------------------------------------------
+# the recommendation bands, which must be ordered numerically
+# --------------------------------------------------------------------------
+
+
+def ranked_dataset(ranks):
+    """One record per rank, opportunity `n` carrying `ranks[n - 1]`."""
+    records = [
+        record_payload(
+            index,
+            recommendation=record_payload(index)["recommendation"]
+            | {"rank_position": rank},
+        )
+        for index, rank in enumerate(ranks, start=1)
+    ]
+    return frozen_dataset(records)
+
+
+def bands_by_opportunity(dataset):
+    selection = select_calibration_sample(dataset, len(dataset.records))
+    return {
+        item.opportunity_id: item.stratum["recommendation_band"]
+        for item in selection.items
+    }
+
+
+def test_recommendation_ranks_are_ordered_numerically_and_not_lexically():
+    """The regression: `1, 10, 100, 11, 2, 9` is not an order over ranks.
+
+    Sorting ranks by any textual form of the number — `str`, `repr`, a canonical
+    JSON encoding — puts 10 and 100 ahead of 2, which on a real run of several
+    hundred postings scrambles the HIGH / MID / LOW thirds completely while
+    still looking plausible on a fixture of five.
+
+    Six ranks, deliberately chosen so the two orders disagree everywhere:
+
+        numeric   1, 2, 9, 10, 11, 100   ->  HIGH 1,2   MID 9,10   LOW 11,100
+        lexical   1, 10, 100, 11, 2, 9   ->  HIGH 1,10  MID 100,11 LOW 2,9
+    """
+    bands = bands_by_opportunity(ranked_dataset([1, 2, 9, 10, 11, 100]))
+    assert bands == {
+        1: "RECOMMENDED_HIGH",  # rank 1
+        2: "RECOMMENDED_HIGH",  # rank 2
+        3: "RECOMMENDED_MID",  # rank 9
+        4: "RECOMMENDED_MID",  # rank 10
+        5: "RECOMMENDED_LOW",  # rank 11
+        6: "RECOMMENDED_LOW",  # rank 100
+    }
+    # The lexical order would have put rank 10 in the top third and rank 2 in
+    # the bottom one. It does not.
+    assert bands[4] != "RECOMMENDED_HIGH"
+    assert bands[2] != "RECOMMENDED_LOW"
+
+
+def test_the_bands_follow_the_rank_and_not_the_position_in_the_file():
+    """Record order is `opportunity_id ASC`; the ranking need not agree with it."""
+    bands = bands_by_opportunity(ranked_dataset([100, 11, 10, 9, 2, 1]))
+    assert bands[6] == "RECOMMENDED_HIGH"  # rank 1
+    assert bands[5] == "RECOMMENDED_HIGH"  # rank 2
+    assert bands[1] == "RECOMMENDED_LOW"  # rank 100
+
+
+def test_a_three_digit_run_splits_into_even_thirds_by_number():
+    """The shape of the real dataset: ranks well past 99, in a shuffled file."""
+    ranks = list(range(1, 121))
+    dataset = ranked_dataset(ranks)
+    bands = bands_by_opportunity(dataset)
+    assert {bands[index] for index in range(1, 41)} == {"RECOMMENDED_HIGH"}
+    assert {bands[index] for index in range(41, 81)} == {"RECOMMENDED_MID"}
+    assert {bands[index] for index in range(81, 121)} == {"RECOMMENDED_LOW"}
+
+
+@pytest.mark.parametrize("rank", [True, False])
+def test_a_boolean_rank_is_refused_rather_than_read_as_position_one(rank):
+    """`isinstance(True, int)` is true, and `True` would sort as the top rank."""
+    with pytest.raises(HumanLabelError, match="rank_position"):
+        select_calibration_sample(ranked_dataset([rank, 2]), 2)
+
+
+@pytest.mark.parametrize("rank", ["1", 1.0, None, [1], {"rank": 1}])
+def test_a_non_integer_rank_is_refused(rank):
+    with pytest.raises(HumanLabelError, match="rank_position"):
+        select_calibration_sample(ranked_dataset([rank, 2]), 2)
+
+
+@pytest.mark.parametrize("rank", [0, -1])
+def test_a_rank_outside_the_recommendation_contract_is_refused(rank):
+    """Migration 0026: `rank_position INTEGER NOT NULL CHECK (rank_position > 0)`."""
+    with pytest.raises(HumanLabelError, match="1-based"):
+        select_calibration_sample(ranked_dataset([rank, 2]), 2)
+
+
+def test_a_recommendation_block_with_no_rank_is_refused():
+    """A present block always carries a rank; `NOT NULL` says so."""
+    recommendation = dict(record_payload(1)["recommendation"])
+    del recommendation["rank_position"]
+    dataset = frozen_dataset(
+        [record_payload(1, recommendation=recommendation), record_payload(2)]
+    )
+    with pytest.raises(HumanLabelError, match="rank_position"):
+        select_calibration_sample(dataset, 2)
+
+
+def test_two_postings_cannot_share_a_rank():
+    """`UNIQUE (run_id, rank_position)`: one position, one posting."""
+    with pytest.raises(HumanLabelError, match="both claim"):
+        select_calibration_sample(ranked_dataset([4, 4]), 2)
+
+
+def test_a_dataset_with_no_ranked_posting_is_not_an_error():
+    dataset = frozen_dataset(
+        [record_payload(index, recommendation=None) for index in (1, 2, 3)]
+    )
+    bands = bands_by_opportunity(dataset)
+    assert set(bands.values()) == {"NOT_RECOMMENDED"}
+
+
+# --------------------------------------------------------------------------
+# protocol versions are never mixed
+# --------------------------------------------------------------------------
+
+
+def test_only_the_calibration_protocol_is_interpretable_by_this_build():
+    assert SUPPORTED_PROTOCOL_VERSIONS == (HUMAN_LABEL_PROTOCOL_VERSION,)
+    assert require_supported_protocol_version(
+        HUMAN_LABEL_PROTOCOL_VERSION, subject="a label"
+    ) == HUMAN_LABEL_PROTOCOL_VERSION
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["human-relevance-v1", "human-relevance-calibration-v1", "", None, 1],
+)
+def test_another_protocol_is_refused_rather_than_reinterpreted(version):
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        require_supported_protocol_version(version, subject="a label")
+
+
+def test_a_compatible_row_shape_does_not_make_a_judgement_transferable():
+    """The failure this guard exists for, demonstrated rather than described.
+
+    A `human-relevance-v1` label under the same `human-label-v1` schema would
+    hold the same fields, the same types and the same JSON — it would parse
+    without a murmur. What differs is the rubric it answers, and a digest cannot
+    see that. So the two never meet: the shape check passes and the protocol
+    check stops it.
+    """
+    future = label(1, protocol_version="human-relevance-v1")
+    # Same shape, down to the key set: nothing structural distinguishes them.
+    assert set(human_label_payload(future)) == set(human_label_payload(label(1)))
+    assert future.label_schema_version == HUMAN_LABEL_SCHEMA_VERSION
+    # And the two would digest differently anyway, which is the point: they are
+    # answers to two different questions and must never be pooled.
+    assert labelset([future], protocol_version="human-relevance-v1") != labelset(
+        [label(1)]
+    )
+    with pytest.raises(HumanLabelError, match="another protocol"):
+        require_supported_protocol_version(
+            future.protocol_version, subject="a stored label"
+        )
+
+
+def test_only_the_v0_selector_is_supported_by_this_build():
+    assert SUPPORTED_SELECTOR_VERSIONS == (CALIBRATION_SELECTOR_VERSION,)
+
+
+# --------------------------------------------------------------------------
+# selection bindings
+# --------------------------------------------------------------------------
+
+
+def test_a_selection_drawn_from_this_dataset_binds_to_it():
+    dataset = varied_dataset()
+    assert_selection_bindings(select_calibration_sample(dataset, 5), dataset)
+
+
+def test_a_selection_drawn_from_another_dataset_is_refused():
+    dataset = varied_dataset()
+    other = replace(
+        dataset,
+        dataset_id="evaluation-dataset-v3-" + "0" * 16,
+        content_fingerprint="0" * 64,
+    )
+    selection = select_calibration_sample(other, 5)
+    with pytest.raises(HumanLabelError, match="drawn from dataset"):
+        assert_selection_bindings(selection, dataset)
+
+
+def test_a_selection_drawn_from_other_contents_is_refused():
+    dataset = varied_dataset()
+    selection = replace(
+        select_calibration_sample(dataset, 5),
+        dataset_content_fingerprint="0" * 64,
+    )
+    with pytest.raises(HumanLabelError, match="content fingerprint"):
+        assert_selection_bindings(selection, dataset)
+
+
+def test_a_selection_drawn_for_another_profile_is_refused():
+    """The strata come from personalised signals; the lot is personalised too."""
+    dataset = varied_dataset()
+    selection = select_calibration_sample(dataset, 5)
+    with pytest.raises(HumanLabelError, match="drawn for profile"):
+        assert_selection_bindings(replace(selection, profile_id=2), dataset)
+    with pytest.raises(HumanLabelError, match="profile context"):
+        assert_selection_bindings(
+            replace(selection, profile_context_fingerprint="0" * 64), dataset
+        )
+
+
+def test_a_selection_from_an_unsupported_protocol_or_selector_is_refused():
+    dataset = varied_dataset()
+    selection = select_calibration_sample(dataset, 5)
+    with pytest.raises(HumanLabelError, match="protocol version"):
+        assert_selection_bindings(
+            replace(selection, protocol_version="human-relevance-v1"), dataset
+        )
+    with pytest.raises(HumanLabelError, match="selector"):
+        assert_selection_bindings(
+            replace(selection, selector_version="calibration-selector-v9"), dataset
+        )
+    with pytest.raises(HumanLabelError, match="schema"):
+        assert_selection_bindings(
+            replace(selection, selection_schema_version="something-else"), dataset
+        )
+
+
+def test_a_selection_that_contradicts_itself_is_refused():
+    dataset = varied_dataset()
+    selection = select_calibration_sample(dataset, 5)
+    with pytest.raises(HumanLabelError, match="declares 9 items"):
+        assert_selection_bindings(
+            replace(selection, effective_sample_size=9), dataset
+        )
+    repeated = replace(selection, items=(selection.items[0], selection.items[0]))
+    with pytest.raises(HumanLabelError, match="repeats opportunity ids"):
+        assert_selection_bindings(
+            replace(repeated, effective_sample_size=2), dataset
+        )
+    renumbered = replace(
+        selection,
+        items=tuple(replace(item, position=item.position + 1) for item in selection.items),
+    )
+    with pytest.raises(HumanLabelError, match="positions"):
+        assert_selection_bindings(renumbered, dataset)
+
+
+def test_a_selection_naming_an_absent_opportunity_is_refused():
+    """The check that would otherwise fail as a blind view of nothing."""
+    dataset = varied_dataset()
+    selection = select_calibration_sample(dataset, 3)
+    stranger = replace(selection.items[0], opportunity_id=99999)
+    with pytest.raises(HumanLabelError, match="not in dataset"):
+        assert_selection_bindings(
+            replace(selection, items=(stranger, *selection.items[1:])), dataset
+        )
 
 
 # --------------------------------------------------------------------------

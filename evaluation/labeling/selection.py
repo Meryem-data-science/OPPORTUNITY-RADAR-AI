@@ -71,11 +71,17 @@ from services.collector.matching.fingerprint import canonical_json
 
 from .fingerprint import calibration_selection_fingerprint
 from .frozen import FrozenEvaluationDataset
-from .schema import HUMAN_LABEL_PROTOCOL_VERSION, HumanLabelError
+from .schema import (
+    HUMAN_LABEL_PROTOCOL_VERSION,
+    HumanLabelError,
+    require_supported_protocol_version,
+)
 
 __all__ = [
     "CALIBRATION_SELECTION_SCHEMA_VERSION",
     "CALIBRATION_SELECTOR_VERSION",
+    "SUPPORTED_SELECTOR_VERSIONS",
+    "assert_selection_bindings",
     "CalibrationSelection",
     "CalibrationSelectionItem",
     "select_calibration_sample",
@@ -90,6 +96,14 @@ CALIBRATION_SELECTOR_VERSION = "calibration-selector-v0"
 
 #: The shape of the selection artefact on disk.
 CALIBRATION_SELECTION_SCHEMA_VERSION = "evaluation-calibration-selection-v0"
+
+#: The selector versions this build can work with. Exactly one, deliberately:
+#: a lot drawn by a different algorithm is a different instrument, and reading
+#: one back here would mean reporting a sample this code cannot reproduce. There
+#: is no compatibility policy in this slice, and inventing one silently — by
+#: accepting any version whose file happens to parse — would be the expensive
+#: kind of convenience.
+SUPPORTED_SELECTOR_VERSIONS: tuple[str, ...] = (CALIBRATION_SELECTOR_VERSION,)
 
 _RECOMMENDED_HIGH = "RECOMMENDED_HIGH"
 _RECOMMENDED_MID = "RECOMMENDED_MID"
@@ -147,30 +161,80 @@ def _digest(*parts: Any) -> str:
     return hashlib.sha256(canonical_json(list(parts)).encode("utf-8")).hexdigest()
 
 
+def _rank_position(recommendation: Mapping[str, Any], opportunity_id: int) -> int:
+    """The posting's rank in the current Recommendation run, validated as a number.
+
+    Phase 9A's own contract, from migration `0026`:
+
+        rank_position INTEGER NOT NULL CHECK (rank_position > 0)
+        UNIQUE (run_id, rank_position)
+
+    so a *present* recommendation block always carries a positive integer rank,
+    and no two postings in one run share one. Anything else — a null, a string,
+    a float, a zero, a boolean — is not a rank this build can place in a band,
+    and it is refused rather than coerced: a stratum silently built from a
+    mis-read rank would put a posting in the wrong third of the lot and nobody
+    would ever see it happen.
+
+    `bool` is refused before `int` because `isinstance(True, int)` is true in
+    Python and `True` would otherwise pass as rank 1 — the top of the ranking.
+    """
+    rank = recommendation.get("rank_position")
+    if isinstance(rank, bool) or not isinstance(rank, int):
+        raise HumanLabelError(
+            f"opportunity {opportunity_id} carries a recommendation whose "
+            f"rank_position is {rank!r} ({type(rank).__name__}); the "
+            "Recommendation contract stores a positive integer and this build "
+            "refuses to guess what a different value meant"
+        )
+    if rank <= 0:
+        raise HumanLabelError(
+            f"opportunity {opportunity_id} carries rank_position {rank}; the "
+            "Recommendation contract stores 1-based ranks"
+        )
+    return rank
+
+
 def _recommendation_bands(
     records: Sequence[Mapping[str, Any]],
 ) -> dict[int, str]:
     """Map every opportunity id to its band among the ranked postings.
 
     The split is by *position among the ranked records of this dataset*, not by
-    the raw `rank_position` value: a run that starts its ranks at 0, skips
-    numbers, or ranks only part of the cohort still splits into three even
-    thirds. A dataset with no recommendation run at all puts every posting in
-    `NOT_RECOMMENDED`, which is the truthful answer rather than a degenerate one.
+    the raw `rank_position` value: a run that ranked only part of the cohort
+    still splits into three even thirds.
+
+    The order is **numeric**, on `(rank_position, opportunity_id)`. It has to be
+    said explicitly because the obvious shortcut is wrong in a way that is
+    invisible on a small fixture: ordering ranks by any textual form of the
+    number — `str`, `repr` or a canonical JSON encoding — sorts them
+    lexically, so a real run of 394 postings comes out `1, 10, 100, 11, 2, ...`
+    and the HIGH / MID / LOW thirds stop meaning what they say. Every rank is
+    validated as a positive integer first, and duplicates are refused, so the
+    pair is already a total order and no tie-break over a textual key is needed.
     """
-    ranked: list[tuple[Any, int]] = []
+    ranked: list[tuple[int, int]] = []
     bands: dict[int, str] = {}
+    seen: dict[int, int] = {}
     for record in records:
         opportunity_id = int(record["opportunity_id"])
         recommendation = record.get("recommendation")
         if not isinstance(recommendation, Mapping):
             bands[opportunity_id] = _NOT_RECOMMENDED
             continue
-        ranked.append((recommendation.get("rank_position"), opportunity_id))
+        rank = _rank_position(recommendation, opportunity_id)
+        if rank in seen:
+            # `UNIQUE (run_id, rank_position)` says this cannot happen inside
+            # one run, so a repeat means the dataset mixes runs or was edited.
+            raise HumanLabelError(
+                f"opportunities {seen[rank]} and {opportunity_id} both claim "
+                f"rank_position {rank}; a Recommendation run ranks each "
+                "position once"
+            )
+        seen[rank] = opportunity_id
+        ranked.append((rank, opportunity_id))
 
-    # Sorted by rank, then by id so a run that repeated a rank still yields one
-    # total order rather than whichever order the file happened to hold.
-    ranked.sort(key=lambda item: (canonical_json(item[0]), item[1]))
+    ranked.sort()
     total = len(ranked)
     if total:
         first_cut = -(-total // 3)  # ceil(total / 3)
@@ -362,3 +426,94 @@ def select_calibration_sample(
         items=items,
         selection_fingerprint=fingerprint,
     )
+
+
+def assert_selection_bindings(
+    selection: CalibrationSelection, dataset: FrozenEvaluationDataset
+) -> None:
+    """Refuse a lot that was not drawn from this dataset, for this person, now.
+
+    The **one** place this is decided, called on every path that uses a stored
+    selection — resolving one on the command line, walking to the next unjudged
+    posting, reporting progress, digesting a labelset. Before anything is shown
+    and before anything is written, not afterwards: a `--selection` pointing at
+    another dataset's lot must be refused while it is still an argument, not
+    discovered three commands later when a digest comes out wrong.
+
+    What is checked, and each for its own reason:
+
+    * the **dataset id and content fingerprint** — a lot names postings by id,
+      and ids only mean something inside the snapshot they were drawn from;
+    * the **profile id and profile context fingerprint** — the strata were
+      computed from personalised signals, so a lot drawn for one profile state
+      is not a lot for another even over identical postings;
+    * the **protocol and selector versions** — a lot drawn by an algorithm this
+      build does not implement cannot be reproduced or reasoned about here;
+    * the **internal consistency** of the lot itself — declared size, unique
+      ids, positions `1..N` in order;
+    * that every selected id is **actually in the dataset** — the one check that
+      would otherwise fail much later, as a blind view of a posting that does
+      not exist.
+    """
+    if selection.dataset_id != dataset.dataset_id:
+        raise HumanLabelError(
+            f"the calibration selection was drawn from dataset "
+            f"{selection.dataset_id}, not {dataset.dataset_id}"
+        )
+    if selection.dataset_content_fingerprint != dataset.content_fingerprint:
+        raise HumanLabelError(
+            "the calibration selection was drawn from content fingerprint "
+            f"{selection.dataset_content_fingerprint}, not "
+            f"{dataset.content_fingerprint}"
+        )
+    if selection.profile_id != dataset.profile_id:
+        raise HumanLabelError(
+            f"the calibration selection was drawn for profile "
+            f"{selection.profile_id}, not {dataset.profile_id}"
+        )
+    if selection.profile_context_fingerprint != dataset.profile_context_fingerprint:
+        raise HumanLabelError(
+            "the calibration selection was drawn against profile context "
+            f"fingerprint {selection.profile_context_fingerprint}, not "
+            f"{dataset.profile_context_fingerprint}"
+        )
+    require_supported_protocol_version(
+        selection.protocol_version, subject="the calibration selection"
+    )
+    if selection.selector_version not in SUPPORTED_SELECTOR_VERSIONS:
+        raise HumanLabelError(
+            f"the calibration selection was drawn by selector "
+            f"{selection.selector_version!r}; this build implements "
+            f"{list(SUPPORTED_SELECTOR_VERSIONS)} and has no compatibility "
+            "policy for another"
+        )
+    if selection.selection_schema_version != CALIBRATION_SELECTION_SCHEMA_VERSION:
+        raise HumanLabelError(
+            f"the calibration selection states schema "
+            f"{selection.selection_schema_version!r}; this build reads "
+            f"{CALIBRATION_SELECTION_SCHEMA_VERSION!r}"
+        )
+
+    ids = selection.opportunity_ids
+    if selection.effective_sample_size != len(ids):
+        raise HumanLabelError(
+            f"the calibration selection declares {selection.effective_sample_size} "
+            f"items and holds {len(ids)}"
+        )
+    if len(set(ids)) != len(ids):
+        duplicates = sorted({value for value in ids if ids.count(value) > 1})
+        raise HumanLabelError(
+            f"the calibration selection repeats opportunity ids: {duplicates}"
+        )
+    positions = [item.position for item in selection.items]
+    if positions != list(range(1, len(ids) + 1)):
+        raise HumanLabelError(
+            "the calibration selection states positions "
+            f"{positions}, not 1..{len(ids)} in order"
+        )
+    missing = [value for value in ids if not dataset.contains(value)]
+    if missing:
+        raise HumanLabelError(
+            f"the calibration selection names opportunities {missing}, which "
+            f"are not in dataset {dataset.dataset_id}"
+        )

@@ -60,6 +60,7 @@ from .schema import (
 )
 from .selection import (
     CalibrationSelection,
+    assert_selection_bindings,
     select_calibration_sample,
 )
 from .storage import (
@@ -239,13 +240,29 @@ def _dataset_identity(dataset: FrozenEvaluationDataset) -> dict[str, Any]:
 def _resolve_selection(
     dataset: FrozenEvaluationDataset, argument: str | None, root: str
 ) -> CalibrationSelection:
-    """Find the lot a command should work against, or refuse to guess.
+    """Find the lot a command should work against, verify it, or refuse to guess.
 
     One stored selection and no argument is unambiguous, so it is allowed. More
     than one is a question only the operator can answer, and answering it here —
     by taking the newest, say — would silently bind a set of judgements to a lot
     they were not drawn for.
+
+    Whatever is found goes through `assert_selection_bindings` before it is
+    returned, so a `--selection` pointing at another dataset's or another
+    profile's lot is refused here — while it is still an argument — and not
+    several steps later by whichever command happened to notice. Every path that
+    uses a stored selection goes through this function, which is why the check
+    lives in it.
     """
+    selection = _load_selection(dataset, argument, root)
+    assert_selection_bindings(selection, dataset)
+    return selection
+
+
+def _load_selection(
+    dataset: FrozenEvaluationDataset, argument: str | None, root: str
+) -> CalibrationSelection:
+    """Locate the stored lot named by `--selection`, or the only one there is."""
     if argument:
         candidate = Path(argument)
         if candidate.is_file():

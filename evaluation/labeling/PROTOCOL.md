@@ -114,7 +114,15 @@ varied. Each record is assigned a stratum:
 
 * **recommendation band** — `RECOMMENDED_HIGH` / `RECOMMENDED_MID` /
   `RECOMMENDED_LOW`, by position among the ranked postings of this dataset
-  (thirds), or `NOT_RECOMMENDED` for a posting the run never ranked;
+  (thirds), or `NOT_RECOMMENDED` for a posting the run never ranked. The order
+  is **numeric**, on `(rank_position, opportunity_id)`: ordering ranks by any
+  textual form of the number would give `1, 10, 100, 11, 2, …` and scramble the
+  thirds on any run with more than nine postings. Every `rank_position` on a
+  present recommendation block is validated against the Phase 9A contract
+  (migration `0026`: `INTEGER NOT NULL CHECK (rank_position > 0)`,
+  `UNIQUE (run_id, rank_position)`) — a boolean, a string, a null, a
+  non-positive value or a repeated rank stops the draw with a `HumanLabelError`
+  rather than being coerced into a band;
 * **qualification bucket** — the persisted verdict verbatim (`CORE_TARGET`,
   `ADJACENT_TARGET`, `UNCERTAIN`, `OUT_OF_SCOPE`) or `QUALIFICATION_ABSENT`
   when the classifier never read the posting;
@@ -137,6 +145,55 @@ The draw:
 
 **Same dataset + same selector version + same N → same ids in the same order.**
 No tie is broken by file order, SQL order or set iteration order.
+
+## 5b. Version policy — nothing is ever mixed
+
+This build interprets **exactly one** protocol version
+(`human-relevance-calibration-v0`) and **exactly one** selector version
+(`calibration-selector-v0`). There is no compatibility policy, and that is a
+decision rather than an omission.
+
+The label *schema* version and the *protocol* version are checked separately and
+are not interchangeable. A future `human-relevance-v1` label would almost
+certainly parse under `human-label-v1` — same fields, same types, same JSON —
+and differ only in the question the annotator was answering. So every stored
+label and every stored selection is refused on read if its `protocol_version` is
+not the one above, and every stored selection is refused if its
+`selector_version` is not the one above.
+
+Refused means refused: nothing is converted, nothing is migrated in place, and
+no stored row is ever rewritten. When `human-relevance-v1` is declared, widening
+these lists will be a deliberate act carrying a stated compatibility policy.
+
+## 5c. Selection bindings — checked before anything is shown
+
+`assert_selection_bindings(selection, dataset)` is the single primitive, called
+on every path that uses a stored lot: resolving `--selection`, `show --next`,
+`progress`, `fingerprint`, and `build_labelset_report`. It verifies:
+
+* `dataset_id` and dataset content fingerprint;
+* `profile_id` and profile context fingerprint;
+* protocol version, selector version and selection schema version;
+* `effective_sample_size == len(items)`, unique ids, positions `1..N` in order;
+* every selected id is actually present in the frozen dataset.
+
+A `--selection` pointing at another dataset's or another profile's lot is
+refused **while it is still an argument** — before a single opportunity is
+displayed — not later by whichever command happened to notice.
+
+## 5d. The existing history is validated before anything is written
+
+Before a judgement is appended or a labelset reported, the whole of
+`labels.jsonl` is read and checked. Per row: label schema, protocol version, and
+the four bindings (dataset id, content fingerprint, profile id, profile context
+fingerprint), plus the requirement that the opportunity is in the frozen
+dataset. Per opportunity, in file order: revisions run `1, 2, 3, …` with no gap
+and no repeat, revision 1 claims no relabel reason, and every later revision
+states one.
+
+One bad row stops the write. A valid judgement is never appended behind an
+invalid one — that would make the corruption permanent and give it company —
+and nothing is dropped, repaired, renumbered or quarantined.
 
 ## 6. Traceability
 

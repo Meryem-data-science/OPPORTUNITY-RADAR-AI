@@ -82,12 +82,15 @@ from .schema import (
     human_label_payload,
     normalize_note,
     normalize_reason_tags,
+    require_supported_protocol_version,
     validate_relevance_grade,
 )
 from .selection import (
     CALIBRATION_SELECTION_SCHEMA_VERSION,
+    SUPPORTED_SELECTOR_VERSIONS,
     CalibrationSelection,
     CalibrationSelectionItem,
+    assert_selection_bindings,
 )
 
 __all__ = [
@@ -106,7 +109,9 @@ __all__ = [
     "list_calibration_selections",
     "load_calibration_selection",
     "read_label_history",
+    "read_validated_label_history",
     "resolve_effective_labels",
+    "validate_label_history",
     "write_calibration_selection",
     "write_labelset_manifest",
 ]
@@ -304,6 +309,16 @@ def load_calibration_selection(path: str | Path) -> CalibrationSelection:
         )
         for item in items_payload
     )
+    require_supported_protocol_version(
+        payload.get("protocol_version"), subject=str(path)
+    )
+    selector_version = payload.get("selector_version")
+    if selector_version not in SUPPORTED_SELECTOR_VERSIONS:
+        raise HumanLabelError(
+            f"{path} was drawn by selector {selector_version!r}; this build "
+            f"implements {list(SUPPORTED_SELECTOR_VERSIONS)} and has no "
+            "compatibility policy for another"
+        )
     selection = CalibrationSelection(
         selection_schema_version=str(schema_version),
         selector_version=str(payload["selector_version"]),
@@ -349,6 +364,14 @@ def _parse_label(payload: Mapping[str, Any], *, path: Path, line: int) -> HumanR
             f"{path} line {line} states label schema {schema_version!r}; "
             f"this build reads {HUMAN_LABEL_SCHEMA_VERSION!r}"
         )
+    # The shape being readable is not the same fact as the judgement being
+    # interpretable. A row written under a future `human-relevance-v1` would
+    # parse perfectly here — same fields, same types — and would then be
+    # digested as though its grade answered this rubric's question. It does not,
+    # so it stops here, unconverted and unrewritten.
+    require_supported_protocol_version(
+        payload.get("protocol_version"), subject=f"{path} line {line}"
+    )
 
     def _enum(name: str, enum_class):
         raw = payload.get("diagnostics", {}).get(name)
@@ -418,6 +441,76 @@ def read_label_history(
             raise HumanLabelError(f"{path} line {number} is not a JSON object")
         labels.append(_parse_label(payload, path=path, line=number))
     return tuple(labels)
+
+
+def validate_label_history(
+    history: Sequence[HumanRelevanceLabel], dataset: FrozenEvaluationDataset
+) -> None:
+    """Refuse a labels file that is not entirely about this dataset, in order.
+
+    Called **before** a new judgement is resolved or written, and before a
+    labelset is reported, because the alternative is worse than it looks: a
+    file holding one row bound to another snapshot, or a revision chain with a
+    hole in it, would otherwise quietly keep that row and gain a valid one
+    behind it. The file would then be half-trustworthy, which for an audit trail
+    means untrustworthy — and the corruption would be discovered, if ever, by
+    whoever later tried to explain a number computed from it.
+
+    So a bad row stops the write. Nothing is dropped, repaired, renumbered or
+    quarantined: this code does not get to decide which of somebody's recorded
+    judgements were real.
+
+    Checked per row: the four bindings (dataset id, content fingerprint, profile
+    id, profile context fingerprint) and that the opportunity is actually in the
+    frozen dataset. Checked per opportunity, in file order: revisions run
+    `1, 2, 3, ...` with no gap and no repeat, revision 1 claims no relabel
+    reason, and every later revision states one.
+    """
+    revisions: dict[int, int] = {}
+    for position, label in enumerate(history, start=1):
+        _assert_bindings(label, dataset)
+        if not dataset.contains(label.opportunity_id):
+            raise HumanLabelError(
+                f"label row {position} judges opportunity "
+                f"{label.opportunity_id}, which is not in dataset "
+                f"{dataset.dataset_id}"
+            )
+        if isinstance(label.revision, bool) or not isinstance(label.revision, int):
+            raise HumanLabelError(
+                f"label row {position} states a non-integer revision "
+                f"{label.revision!r}"
+            )
+        expected = revisions.get(label.opportunity_id, 0) + 1
+        if label.revision != expected:
+            raise HumanLabelError(
+                f"label row {position} states revision {label.revision} for "
+                f"opportunity {label.opportunity_id}, where revision "
+                f"{expected} was due; the label file is corrupt"
+            )
+        revisions[label.opportunity_id] = label.revision
+        if label.revision == 1 and label.relabel_reason:
+            raise HumanLabelError(
+                f"label row {position} is a first judgement of opportunity "
+                f"{label.opportunity_id} but states a relabel reason"
+            )
+        if label.revision > 1 and not label.relabel_reason:
+            raise HumanLabelError(
+                f"label row {position} corrects opportunity "
+                f"{label.opportunity_id} without stating why"
+            )
+
+
+def read_validated_label_history(
+    dataset: FrozenEvaluationDataset, root: str | Path = DEFAULT_LABEL_ROOT
+) -> tuple[HumanRelevanceLabel, ...]:
+    """The audit trail of this dataset, refused whole if any row is wrong.
+
+    The one way the rest of this package reads labels. Reading and validating
+    are one call so that no path can accidentally take the unchecked one.
+    """
+    history = read_label_history(dataset.dataset_id, root)
+    validate_label_history(history, dataset)
+    return history
 
 
 def resolve_effective_labels(
@@ -492,7 +585,10 @@ def append_human_label(
         )
 
     directory = dataset_label_directory(dataset.dataset_id, root)
-    history = read_label_history(dataset.dataset_id, root)
+    # Read and validate the whole file first. A judgement appended behind a row
+    # that does not belong here would make the corruption permanent and give it
+    # company.
+    history = read_validated_label_history(dataset, root)
     effective = resolve_effective_labels(history)
     previous = effective.get(opportunity_id)
 
@@ -578,21 +674,9 @@ def build_labelset_report(
     under `judged_outside_selection` so nothing goes missing silently — but they
     do not enter this lot's digest.
     """
-    if selection.dataset_id != dataset.dataset_id:
-        raise HumanLabelError(
-            f"the selection belongs to dataset {selection.dataset_id}, not "
-            f"{dataset.dataset_id}"
-        )
-    if selection.dataset_content_fingerprint != dataset.content_fingerprint:
-        raise HumanLabelError(
-            "the selection was drawn from a different content fingerprint than "
-            "the dataset it is being reported against"
-        )
-
-    history = read_label_history(dataset.dataset_id, root)
+    assert_selection_bindings(selection, dataset)
+    history = read_validated_label_history(dataset, root)
     effective = resolve_effective_labels(history)
-    for label in effective.values():
-        _assert_bindings(label, dataset)
 
     selected = selection.opportunity_ids
     selected_set = set(selected)
