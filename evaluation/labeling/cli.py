@@ -80,7 +80,9 @@ from .storage import (
 __all__ = ["main", "parse_args"]
 
 #: Printed by `verify` and `progress` so nobody has to read this package's
-#: source to learn that the rubric is still a draft.
+#: source to learn which rubric these labels answer. The distinction it states
+#: is the one that matters operationally: the final rubric is frozen, and this
+#: history is not written under it.
 _PROTOCOL_STATUS = (
     "CALIBRATION — labels here are recorded under "
     "human-relevance-calibration-v0. The final rubric human-relevance-v1 is "

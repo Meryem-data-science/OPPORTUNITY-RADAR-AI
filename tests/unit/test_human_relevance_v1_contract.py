@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+import evaluation.labeling as labeling_package
+import evaluation.labeling.schema as labeling_schema
 from evaluation.labeling import (
     CALIBRATION_V0_PROVENANCE,
     FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION,
@@ -72,6 +74,83 @@ def test_the_reader_does_not_yet_interpret_v1():
     """No label carries v1, so a row claiming it does not belong in any file."""
     assert SUPPORTED_PROTOCOL_VERSIONS == (HUMAN_LABEL_PROTOCOL_VERSION,)
     assert FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION not in SUPPORTED_PROTOCOL_VERSIONS
+
+
+# --------------------------------------------------------------------------
+# the public docstrings must agree with the freeze
+# --------------------------------------------------------------------------
+#
+# A docstring that contradicts the code it heads is worse than no docstring: it
+# is the version a reader trusts. Before the freeze these two said the protocol
+# was not frozen and the rubric had never been applied to a real posting, which
+# stopped being true the moment `rubric.py` landed.
+#
+# Pinned here are the *claims*, not the prose. A rewrite is free to say all of
+# this differently; what it may not do is drop the distinction or reinstate a
+# statement the freeze made false.
+
+_DOCUMENTED_MODULES = (
+    ("evaluation.labeling", labeling_package),
+    ("evaluation.labeling.schema", labeling_schema),
+)
+
+#: Statements that were true before the freeze and are false after it.
+_SUPERSEDED_CLAIMS = (
+    "protocol is not frozen",
+    "never been applied",
+    "can only be declared",
+    "still a draft",
+    "not yet been calibrated",
+)
+
+
+@pytest.mark.parametrize(("name", "module"), _DOCUMENTED_MODULES)
+def test_the_public_docstring_states_both_protocol_versions(name, module):
+    """Both versions named, so neither can be mistaken for the other."""
+    doc = module.__doc__ or ""
+    assert HUMAN_LABEL_PROTOCOL_VERSION in doc, name
+    assert FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION in doc, name
+
+
+@pytest.mark.parametrize(("name", "module"), _DOCUMENTED_MODULES)
+def test_the_public_docstring_says_v0_is_what_the_writer_records(name, module):
+    doc = (module.__doc__ or "").lower()
+    assert "writer records" in doc, name
+    assert "reader interprets" in doc, name
+
+
+#: The claim that must never be lost — the definition is frozen, the labels are
+#: not — in any of the ways a rewrite might reasonably word it. Pinned as a set
+#: rather than as one sentence so the prose stays free and the statement does not.
+_NO_V1_LABEL_CLAIMS = (
+    "no label carries it",
+    "no real v1 label exists",
+    "no label carries the frozen",
+)
+
+
+@pytest.mark.parametrize(("name", "module"), _DOCUMENTED_MODULES)
+def test_the_public_docstring_says_no_label_carries_the_frozen_version(
+    name, module
+):
+    """The definition is frozen; the stored judgements were not made under it."""
+    doc = (module.__doc__ or "").lower()
+    assert any(claim in doc for claim in _NO_V1_LABEL_CLAIMS), name
+
+
+@pytest.mark.parametrize(("name", "module"), _DOCUMENTED_MODULES)
+def test_the_public_docstring_no_longer_calls_the_protocol_unfrozen(name, module):
+    doc = (module.__doc__ or "").lower()
+    for claim in _SUPERSEDED_CLAIMS:
+        assert claim not in doc, f"{name}: {claim!r}"
+
+
+def test_the_package_docstring_records_the_calibration_as_ai_assisted():
+    """The round happened, and what it is not is said where a reader will look."""
+    doc = (labeling_package.__doc__ or "").lower()
+    assert "ai-assisted" in doc
+    assert "human validation" in doc
+    assert "independent human benchmark" in doc
 
 
 # --------------------------------------------------------------------------

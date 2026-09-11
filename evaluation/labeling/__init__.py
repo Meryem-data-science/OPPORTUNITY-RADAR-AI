@@ -31,11 +31,27 @@ error analysis, no dashboard, no migration, no evaluation table in the database,
 and no change to any production module. Those belong to Phase 10.3 and after,
 and each of them starts from a labelset produced here.
 
-**What is deliberately not settled.** `HUMAN_LABEL_PROTOCOL_VERSION` is
-`human-relevance-calibration-v0`. The rubric in `schema.py` has never been
-applied to a real posting by a real person; a `human-relevance-v1` can only be
-declared after a small lot has actually been annotated and its ambiguous cases
-reviewed. Every artefact this package writes carries the `v0` and says so.
+**Where the two protocol versions stand.**
+
+* `human-relevance-calibration-v0` (`schema.HUMAN_LABEL_PROTOCOL_VERSION`) is
+  what the writer records and the reader interprets, and every label that exists
+  was made under it. Its calibration round has been **run for real**, on the
+  operator's machine: twelve judgements, AI-assisted with final human validation
+  of every grade, one explicit relabel. `rubric.CALIBRATION_V0_PROVENANCE`
+  records its digests and counts, and says out loud what that round is not — it
+  is not an independent human benchmark, an inter-annotator study or a
+  gold-standard holdout;
+* `human-relevance-v1` (`rubric.FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION`) is the
+  **semantic contract frozen** by that round: relevance judged on what is
+  actually actionable for the profile and preferences the dataset is bound to,
+  with hard constraints declared by that profile, and with UNKNOWN never
+  collapsing into a contradiction.
+
+**No real v1 label exists, and none can yet.** The writer still stamps `v0`,
+`SUPPORTED_PROTOCOL_VERSIONS` still holds only `v0`, and a row claiming v1 is
+refused on read — so a frozen definition can never quietly become a rewritten
+history. A real v1 benchmark needs a labelset stored separately from the
+calibration history; building that separation is future work, not this slice's.
 """
 
 from .blind import (

@@ -23,12 +23,20 @@ Three rules shape everything below, and two of them are inherited from Phase
   object onto the half of it that *is* the judgement, so "what the file says"
   and "what the labelset digest covers" cannot drift apart.
 
-**The protocol is not frozen.** `HUMAN_LABEL_PROTOCOL_VERSION` is deliberately a
-`calibration-v0`: the rubric below has never been applied to a real posting by a
-real person. A `human-relevance-v1` can only be declared after a small lot has
-actually been annotated on the operator's machine and the ambiguous cases have
-been reviewed. Until then, every artefact this package writes says `v0` out
-loud so no later measurement can mistake a draft rubric for a settled one.
+**Two protocol versions, and this module owns one of them.**
+`HUMAN_LABEL_PROTOCOL_VERSION` is `human-relevance-calibration-v0`: the protocol
+the writer records and the reader interprets, and the one every label that
+exists was made under. A real calibration round has been run under it on the
+operator's machine.
+
+The *semantic* contract frozen after that round is a different string and lives
+in `rubric.py` — `FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION`,
+`human-relevance-v1`. **No label carries it**, because none has been made under
+it: freezing a definition and producing judgements under it are two different
+acts. `SUPPORTED_PROTOCOL_VERSIONS` below therefore still holds only `v0`, so a
+row claiming v1 is refused on read rather than mixed into a calibration history.
+Separating a real v1 labelset from that history is a storage question, and it is
+future work.
 
 The dependency direction, which is the architectural point of the slice:
 
