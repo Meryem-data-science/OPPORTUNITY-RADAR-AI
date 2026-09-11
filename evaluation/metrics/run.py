@@ -9,8 +9,21 @@ What is built, in the order a run needs it:
 
     the evaluation universe   from the frozen dataset, whole or as a fixed pool
     the ranking               projected from the frozen dataset, or declared
-    the label coverage        from Phase 10.2's own validated label history
+    the label coverage        the answers of one verified calibration lot, with
+                              Phase 10.2's labelset digest recomputed over them
     the run contract          all of the above, bound and digested
+
+**Nothing declares its own identity.** Every fingerprint an artefact carries is
+recomputed here before it is believed, and so is the *structure* it claims:
+`schema.validate_evaluation_universe_structure` and
+`schema.validate_evaluation_ranking_structure` are applied by the builders and
+by the verifiers alike, so an artefact this package sealed and an artefact
+somebody reconstructed are held to one contract. A digest recomputed over an
+invalid structure is a valid digest, which is why the digest alone was never
+enough. The same rule reaches the evidence: a `LabelCoverage` holds the labels
+its digest covers, `verify_label_coverage` recomputes that digest from them, and
+`build_evaluation_run` takes such a coverage rather than a protocol string and a
+fingerprint that might describe nothing.
 
 **Fail closed, never repair.** A universe naming a posting the dataset does not
 hold, a ranking whose positions repeat, a labelset made for another profile, a
@@ -43,12 +56,16 @@ from dataclasses import replace
 from typing import Any
 
 from evaluation.labeling import (
+    SUPPORTED_SELECTOR_VERSIONS,
+    CalibrationSelection,
     FrozenEvaluationDataset,
     HumanRelevanceLabel,
+    assert_selection_bindings,
+    canonical_label_order,
+    labelset_fingerprint,
     require_supported_protocol_version,
     resolve_effective_labels,
     validate_label_history,
-    validate_relevance_grade,
 )
 
 from .fingerprint import (
@@ -78,6 +95,8 @@ from .schema import (
     canonical_opportunity_ids,
     require_evidence_class,
     require_supported_metric_contract_version,
+    validate_evaluation_ranking_structure,
+    validate_evaluation_universe_structure,
     validate_fingerprint,
     validate_opportunity_id,
     validate_rank_position,
@@ -91,6 +110,7 @@ __all__ = [
     "build_label_coverage",
     "ranking_from_frozen_dataset",
     "verify_evaluation_run",
+    "verify_label_coverage",
 ]
 
 
@@ -99,15 +119,25 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 
-def _duplicates(values: Sequence[int]) -> list[int]:
-    """The repeated values, in one pass and in ascending order."""
-    seen: set[int] = set()
-    repeated: set[int] = set()
-    for value in values:
-        if value in seen:
-            repeated.add(value)
-        seen.add(value)
-    return sorted(repeated)
+#: A syntactically valid digest used only to structurally validate a draft
+#: whose real fingerprint has not been computed yet. It never leaves a builder:
+#: the object returned always carries the digest of its own semantic payload.
+_PLACEHOLDER_FINGERPRINT = "0" * 64
+
+
+def _sealed_universe(draft: EvaluationUniverse) -> EvaluationUniverse:
+    """Validate a drafted universe structurally, then seal it with its digest.
+
+    The invariants are `schema.validate_evaluation_universe_structure`'s, not a
+    second copy of them living in this builder: the verifier re-establishes
+    exactly the same ones on any universe it is later handed, so an artefact
+    this package built and an artefact somebody reconstructed are held to one
+    contract.
+    """
+    validate_evaluation_universe_structure(
+        replace(draft, fingerprint=_PLACEHOLDER_FINGERPRINT)
+    )
+    return replace(draft, fingerprint=evaluation_universe_fingerprint(draft))
 
 
 def build_evaluation_universe(
@@ -132,9 +162,12 @@ def build_evaluation_universe(
     artefact, in a report — can be checked against the members rather than
     believed. A mismatch is refused; it is never the members that get adjusted.
 
-    Refused, each with its own message: a non-integer or non-positive id, a
-    duplicate, an id the frozen dataset does not hold, an empty pool, and a
-    declared size that disagrees with the membership.
+    The generic invariants — non-empty, well-formed ids, no duplicate, canonical
+    order, a size that equals the membership — belong to
+    `validate_evaluation_universe_structure`, applied by `_sealed_universe`.
+    What stays here is what needs the *dataset*: that every member is actually
+    in the frozen snapshot, and that a universe calling itself the whole cohort
+    is one.
     """
     if opportunity_ids is None:
         members = dataset.opportunity_ids
@@ -147,26 +180,13 @@ def build_evaluation_universe(
             EvaluationUniverseKind.FIXED_BENCHMARK_POOL if kind is None else kind
         )
 
-    if not isinstance(resolved_kind, EvaluationUniverseKind):
-        raise EvaluationBindingError(
-            f"{resolved_kind!r} is not an evaluation universe kind"
-        )
-
+    # Each id is validated before anything sorts them: a list holding a string
+    # or a `None` cannot be ordered at all, and the error a caller deserves is
+    # about the value they passed rather than about comparing `str` to `int`.
     validated = [
         validate_opportunity_id(value, subject="an evaluation universe member")
         for value in members
     ]
-    if not validated:
-        raise EvaluationBindingError(
-            "an evaluation universe holds at least one opportunity; an empty "
-            "universe cannot be the denominator of anything"
-        )
-    duplicates = _duplicates(validated)
-    if duplicates:
-        raise EvaluationBindingError(
-            f"the evaluation universe repeats opportunity ids: {duplicates}; "
-            "a duplicated member would be counted twice in every denominator"
-        )
     held = set(dataset.opportunity_ids)
     missing = sorted(value for value in validated if value not in held)
     if missing:
@@ -192,18 +212,17 @@ def build_evaluation_universe(
             f"a {size}-opportunity subset of it"
         )
 
-    draft = EvaluationUniverse(
-        universe_version=EVALUATION_UNIVERSE_VERSION,
-        kind=resolved_kind,
-        dataset_id=dataset.dataset_id,
-        dataset_content_fingerprint=dataset.content_fingerprint,
-        opportunity_ids=ordered,
-        size=size,
-        # Computed from the draft one line below. The empty string is never
-        # observable: the draft does not leave this function.
-        fingerprint="",
+    return _sealed_universe(
+        EvaluationUniverse(
+            universe_version=EVALUATION_UNIVERSE_VERSION,
+            kind=resolved_kind,
+            dataset_id=dataset.dataset_id,
+            dataset_content_fingerprint=dataset.content_fingerprint,
+            opportunity_ids=ordered,
+            size=size,
+            fingerprint="",
+        )
     )
-    return replace(draft, fingerprint=evaluation_universe_fingerprint(draft))
 
 
 # --------------------------------------------------------------------------
@@ -211,12 +230,27 @@ def build_evaluation_universe(
 # --------------------------------------------------------------------------
 
 
-def _ranking_with_fingerprint(
+def _sealed_ranking(
     *,
     source: RankingSource,
     dataset: FrozenEvaluationDataset,
     entries: tuple[EvaluationRankingEntry, ...],
 ) -> EvaluationRanking:
+    """Validate a drafted ranking structurally and against the dataset, then seal it.
+
+    The generic invariants — non-empty, unique well-formed ids, unique positive
+    positions contiguous from 1 in stored order, a valid source and profile —
+    belong to `schema.validate_evaluation_ranking_structure`, which the verifier
+    applies to any ranking it is later handed. What is added here is the one
+    check that needs the snapshot: every ranked posting is in it.
+
+    Contiguity from 1 is the chosen contract rather than an accident of the
+    data: "the top K" has to mean the same thing in every run, and it does not
+    when positions can have holes in them. A ranking whose *upstream* positions
+    do have holes is still representable — `ranking_from_frozen_dataset` numbers
+    the evaluation positions and keeps the upstream ones on each entry — but a
+    caller stating positions directly states contiguous ones.
+    """
     draft = EvaluationRanking(
         ranking_version=EVALUATION_RANKING_VERSION,
         source=source,
@@ -227,69 +261,21 @@ def _ranking_with_fingerprint(
         entries=entries,
         fingerprint="",
     )
-    return replace(draft, fingerprint=evaluation_ranking_fingerprint(draft))
-
-
-def _validated_entries(
-    entries: Sequence[EvaluationRankingEntry], dataset: FrozenEvaluationDataset
-) -> tuple[EvaluationRankingEntry, ...]:
-    """The ranking invariants, established once.
-
-    Contiguity from 1 is the chosen contract rather than an accident of the
-    data: "the top K" has to mean the same thing in every run, and it does not
-    when positions can have holes in them. A ranking whose upstream positions
-    *do* have holes is still representable — `ranking_from_frozen_dataset`
-    numbers the evaluation positions and keeps the upstream ones on each entry
-    — but a caller stating positions directly states contiguous ones.
-    """
-    if not entries:
-        raise EvaluationBindingError(
-            "an evaluation ranking holds at least one ranked opportunity; "
-            "there is no top K of an empty list"
-        )
-    positions: list[int] = []
-    ids: list[int] = []
-    for entry in entries:
-        positions.append(
-            validate_rank_position(
-                entry.rank_position, subject="an evaluation ranking position"
-            )
-        )
-        ids.append(
-            validate_opportunity_id(
-                entry.opportunity_id, subject="a ranked opportunity"
-            )
-        )
-        if entry.source_rank_position is not None:
-            validate_rank_position(
-                entry.source_rank_position,
-                subject="an upstream rank position",
-            )
-    duplicate_positions = _duplicates(positions)
-    if duplicate_positions:
-        raise EvaluationBindingError(
-            f"the ranking repeats rank positions: {duplicate_positions}; two "
-            "postings cannot both be nth"
-        )
-    duplicate_ids = _duplicates(ids)
-    if duplicate_ids:
-        raise EvaluationBindingError(
-            f"the ranking repeats opportunity ids: {duplicate_ids}; one posting "
-            "occupies one position"
-        )
-    if positions != list(range(1, len(positions) + 1)):
-        raise EvaluationBindingError(
-            f"the ranking states positions {positions}, not the canonical "
-            f"contiguous {list(range(1, len(positions) + 1))} in order"
-        )
+    validate_evaluation_ranking_structure(
+        replace(draft, fingerprint=_PLACEHOLDER_FINGERPRINT)
+    )
     held = set(dataset.opportunity_ids)
-    missing = sorted(value for value in ids if value not in held)
+    missing = sorted(
+        entry.opportunity_id
+        for entry in entries
+        if entry.opportunity_id not in held
+    )
     if missing:
         raise EvaluationBindingError(
             f"the ranking names opportunities absent from dataset "
             f"{dataset.dataset_id}: {missing}"
         )
-    return tuple(entries)
+    return replace(draft, fingerprint=evaluation_ranking_fingerprint(draft))
 
 
 def build_evaluation_ranking(
@@ -299,12 +285,8 @@ def build_evaluation_ranking(
     source: RankingSource = RankingSource.DECLARED_OFFLINE_RANKING,
 ) -> EvaluationRanking:
     """A ranking stated directly in evaluation positions, or a refusal."""
-    if not isinstance(source, RankingSource):
-        raise EvaluationBindingError(f"{source!r} is not a ranking source")
-    return _ranking_with_fingerprint(
-        source=source,
-        dataset=dataset,
-        entries=_validated_entries(tuple(entries), dataset),
+    return _sealed_ranking(
+        source=source, dataset=dataset, entries=tuple(entries)
     )
 
 
@@ -363,9 +345,14 @@ def ranking_from_frozen_dataset(
             f"dataset {dataset.dataset_id} froze no recommendation position; "
             "there is no ranking in it to evaluate"
         )
-    source_positions = [position for position, _ in ranked]
-    duplicates = _duplicates(source_positions)
-    if duplicates:
+    seen: set[int] = set()
+    repeated: set[int] = set()
+    for position, _ in ranked:
+        if position in seen:
+            repeated.add(position)
+        seen.add(position)
+    if repeated:
+        duplicates = sorted(repeated)
         raise EvaluationBindingError(
             f"dataset {dataset.dataset_id} froze duplicate recommendation rank "
             f"positions {duplicates}; Phase 9A makes them unique within a run, "
@@ -380,10 +367,10 @@ def ranking_from_frozen_dataset(
         )
         for index, (position, opportunity_id) in enumerate(ranked, start=1)
     )
-    return _ranking_with_fingerprint(
+    return _sealed_ranking(
         source=RankingSource.FROZEN_DATASET_RECOMMENDATION,
         dataset=dataset,
-        entries=_validated_entries(entries, dataset),
+        entries=entries,
     )
 
 
@@ -420,36 +407,83 @@ def build_label_coverage(
     dataset: FrozenEvaluationDataset,
     history: Sequence[HumanRelevanceLabel],
     *,
-    labelset_fingerprint: str,
+    selection: CalibrationSelection,
+    expected_labelset_fingerprint: str | None = None,
 ) -> LabelCoverage:
-    """Which opportunities carry an effective judgement, read through Phase 10.2.
+    """The judgements of one calibration lot, with their digest **recomputed**.
 
-    The revision chain is **not** reinterpreted here. `validate_label_history`
-    refuses a history that is not entirely about this dataset or whose revisions
-    do not run `1, 2, 3, ...`, and `resolve_effective_labels` decides which row
-    is current. Both are Phase 10.2's, and a second opinion about what "the
-    latest valid judgement" means is precisely the kind of divergence that ends
-    with two slices disagreeing about a number neither can explain.
+    The lot is not decoration. Phase 10.2's labelset fingerprint is a digest of
+    the effective judgements *of one selection* — `build_labelset_report` leaves
+    judgements recorded outside the lot out of the digest on purpose, reporting
+    them separately — so a labelset is identified by a lot and its answers
+    together. A coverage built from every effective label while carrying a
+    digest computed over one lot would hand the gates grades that the run's
+    labelset fingerprint does not cover, which is the Phase 10 rule inverted:
+    the artefact's declared identity would be trusted instead of recomputed.
 
-    Nothing is written. No label is created, converted, migrated or graded, and
-    an opportunity with no row simply does not appear in the result.
+    So the identity is derived here rather than accepted, in Phase 10.2's own
+    terms and through Phase 10.2's own primitives:
+
+    1. `assert_selection_bindings` — the lot is verified against this frozen
+       dataset, which includes **redrawing** it: a file can name any postings it
+       likes, and only redrawing shows whether the declared selector would have
+       named them;
+    2. `validate_label_history` — the whole history is refused unless every row
+       is about this dataset and every revision chain is intact;
+    3. `resolve_effective_labels` — the current judgement of each opportunity,
+       by Phase 10.2's definition and not a second one;
+    4. the in-lot judgements are separated from the rest;
+    5. `labelset_fingerprint` — recomputed over exactly those, with the schema
+       and protocol the rows themselves state, the dataset and profile bindings
+       of the frozen snapshot, and the lot's selector version and digest.
+
+    `expected_labelset_fingerprint` is what a caller *believed* the labelset to
+    be — from a stored labelset manifest, a report, a command line. It is
+    compared against the recomputed value and never substituted for it: a
+    mismatch fails closed.
+
+    Nothing is written and nothing is discarded. Judgements outside the lot stay
+    in Phase 10.2's history exactly as they are; they are named in
+    `judged_outside_selection` and they do not enter this labelset.
     """
-    validate_fingerprint(labelset_fingerprint, subject="the labelset fingerprint")
+    assert_selection_bindings(selection, dataset)
     validate_label_history(history, dataset)
     effective = resolve_effective_labels(history)
 
-    protocols = {label.protocol_version for label in effective.values()}
-    schemas = {label.label_schema_version for label in effective.values()}
-    if not protocols:
-        # An empty labelset states no rubric, so binding a run to one would
-        # mean inventing the protocol its judgements were made under — and a
-        # run bound to an invented protocol is a run whose evidence class means
-        # nothing. A round with nothing judged yet is a real state; it is
-        # simply not a state a metric run can be assembled from.
-        raise EvaluationBindingError(
-            "the labelset holds no judgement, so it states no label protocol; "
-            "a metric run cannot be bound to evidence that does not exist"
+    selected = selection.opportunity_ids
+    selected_set = set(selected)
+    # In the lot's own order, exactly as `build_labelset_report` walks it. The
+    # digest canonicalises by opportunity id, so the order cannot move it; the
+    # agreement is kept anyway, because two functions computing one digest
+    # should not differ even in ways that happen not to matter.
+    in_lot = tuple(
+        effective[opportunity_id]
+        for opportunity_id in selected
+        if opportunity_id in effective
+    )
+    outside = tuple(
+        sorted(
+            opportunity_id
+            for opportunity_id in effective
+            if opportunity_id not in selected_set
         )
+    )
+    if not in_lot:
+        # An empty labelset states no rubric, so binding a run to one would mean
+        # inventing the protocol its judgements were made under — and a run
+        # bound to an invented protocol is a run whose evidence class means
+        # nothing. A lot with nothing judged yet is a real state; it is simply
+        # not a state a metric run can be assembled from.
+        raise EvaluationBindingError(
+            f"no judgement in this history belongs to lot "
+            f"{selection.selection_fingerprint}, so the labelset holds nothing "
+            "and states no label protocol; a metric run cannot be bound to "
+            f"evidence that does not exist ({len(outside)} judgement(s) were "
+            "recorded outside the lot and are not part of it)"
+        )
+
+    protocols = {item.protocol_version for item in in_lot}
+    schemas = {item.label_schema_version for item in in_lot}
     if len(protocols) > 1:
         raise EvaluationBindingError(
             f"the labelset mixes label protocols {sorted(protocols)}; "
@@ -465,10 +499,31 @@ def build_label_coverage(
     )
     schema_version = next(iter(schemas))
 
-    grades = {
-        opportunity_id: validate_relevance_grade(label.relevance_grade)
-        for opportunity_id, label in sorted(effective.items())
-    }
+    recomputed = labelset_fingerprint(
+        label_schema_version=schema_version,
+        protocol_version=protocol_version,
+        dataset_id=dataset.dataset_id,
+        dataset_content_fingerprint=dataset.content_fingerprint,
+        profile_id=dataset.profile_id,
+        profile_context_fingerprint=dataset.profile_context_fingerprint,
+        selector_version=selection.selector_version,
+        selection_fingerprint=selection.selection_fingerprint,
+        labels=in_lot,
+    )
+    if expected_labelset_fingerprint is not None:
+        validate_fingerprint(
+            expected_labelset_fingerprint,
+            subject="the expected labelset fingerprint",
+        )
+        if expected_labelset_fingerprint != recomputed:
+            raise EvaluationBindingError(
+                f"the labelset was expected to be "
+                f"{expected_labelset_fingerprint} but the judgements of lot "
+                f"{selection.selection_fingerprint} digest to {recomputed}; "
+                "refusing to measure against a labelset that is not what it "
+                "says it is"
+            )
+
     return LabelCoverage(
         label_schema_version=schema_version,
         label_protocol_version=protocol_version,
@@ -476,9 +531,74 @@ def build_label_coverage(
         dataset_content_fingerprint=dataset.content_fingerprint,
         profile_id=dataset.profile_id,
         profile_context_fingerprint=dataset.profile_context_fingerprint,
-        labelset_fingerprint=labelset_fingerprint,
-        grades=grades,
+        selector_version=selection.selector_version,
+        selection_fingerprint=selection.selection_fingerprint,
+        labels=canonical_label_order(in_lot),
+        judged_outside_selection=outside,
+        labelset_fingerprint=recomputed,
     )
+
+
+def verify_label_coverage(coverage: LabelCoverage) -> str:
+    """Recompute a coverage's labelset digest from its own labels, or refuse it.
+
+    The same principle the universe and the ranking are held to, applied to the
+    evidence: a `LabelCoverage` that somebody reconstructed — from a stored
+    artefact, by hand, by editing one grade — carries a fingerprint field like
+    any other, and a fingerprint field that is only ever read is not a check.
+
+    Called by the run builder and by every availability gate, so no path reads a
+    grade out of a coverage whose declared identity has not been re-established
+    from the judgements it actually holds.
+    """
+    if not isinstance(coverage, LabelCoverage):
+        raise EvaluationBindingError(f"{coverage!r} is not a label coverage")
+    require_supported_protocol_version(
+        coverage.label_protocol_version, subject="the labelset"
+    )
+    validate_fingerprint(
+        coverage.labelset_fingerprint, subject="the labelset fingerprint"
+    )
+    validate_fingerprint(
+        coverage.selection_fingerprint, subject="the selection fingerprint"
+    )
+    if coverage.selector_version not in SUPPORTED_SELECTOR_VERSIONS:
+        raise MetricContractError(
+            f"the labelset was drawn by selector "
+            f"{coverage.selector_version!r}; this build reads "
+            f"{list(SUPPORTED_SELECTOR_VERSIONS)}"
+        )
+    if not coverage.labels:
+        raise EvaluationBindingError(
+            "the labelset holds no judgement; a metric run cannot be bound to "
+            "evidence that does not exist"
+        )
+    overlap = sorted(
+        set(coverage.judged_outside_selection) & set(coverage.grades)
+    )
+    if overlap:
+        raise EvaluationBindingError(
+            f"opportunities {overlap} are reported both inside and outside the "
+            "lot; a judgement is in one labelset or in none"
+        )
+    recomputed = labelset_fingerprint(
+        label_schema_version=coverage.label_schema_version,
+        protocol_version=coverage.label_protocol_version,
+        dataset_id=coverage.dataset_id,
+        dataset_content_fingerprint=coverage.dataset_content_fingerprint,
+        profile_id=coverage.profile_id,
+        profile_context_fingerprint=coverage.profile_context_fingerprint,
+        selector_version=coverage.selector_version,
+        selection_fingerprint=coverage.selection_fingerprint,
+        labels=coverage.labels,
+    )
+    if recomputed != coverage.labelset_fingerprint:
+        raise EvaluationBindingError(
+            f"the label coverage claims labelset {coverage.labelset_fingerprint} "
+            f"but the judgements it holds digest to {recomputed}; refusing a "
+            "labelset that is not what it says it is"
+        )
+    return recomputed
 
 
 # --------------------------------------------------------------------------
@@ -491,9 +611,8 @@ def build_evaluation_run(
     dataset: FrozenEvaluationDataset,
     universe: EvaluationUniverse,
     ranking: EvaluationRanking,
+    coverage: LabelCoverage,
     evidence_class: EvidenceClass | str,
-    label_protocol_version: str,
-    labelset_fingerprint: str,
     metric_contract_version: str = METRIC_CONTRACT_VERSION,
     provenance: EvaluationRunProvenance | None = None,
 ) -> EvaluationRunContract:
@@ -503,7 +622,13 @@ def build_evaluation_run(
     corresponds to a way a measurement can be quietly wrong:
 
     * the **metric contract version** — rules this build does not implement;
-    * the **evidence class** — a claim the labels behind it cannot support;
+    * the **labelset** — recomputed from the judgements the coverage holds, so
+      the run's `labelset_fingerprint` always names evidence that exists. The
+      lot the labelset was drawn from is bound transitively: Phase 10.2's
+      labelset digest already covers the selector version and the selection
+      fingerprint, so naming the labelset names the question it answers;
+    * the **evidence class** — a claim the labels behind it cannot support,
+      decided about that verified labelset identity;
     * the **label protocol** — a rubric this build cannot interpret;
     * the **nested fingerprints** — recomputed, never believed;
     * the **dataset binding** of the universe and of the ranking — a universe or
@@ -518,14 +643,22 @@ def build_evaluation_run(
     contract_version = require_supported_metric_contract_version(
         metric_contract_version
     )
-    validate_fingerprint(labelset_fingerprint, subject="the labelset fingerprint")
+    # The labelset identity is *derived from verified evidence*, never accepted
+    # as an argument. There is deliberately no parameter here that would let a
+    # caller bind a run to a syntactically valid digest with no judgements
+    # behind it: `verify_label_coverage` recomputes the digest from the labels
+    # the coverage holds, and the protocol and fingerprint below are read off
+    # the object that survived it.
+    resolved_labelset_fingerprint = verify_label_coverage(coverage)
     protocol_version = require_supported_protocol_version(
-        label_protocol_version, subject="the metric run"
+        coverage.label_protocol_version, subject="the metric run"
     )
+    # ...and the evidence class is therefore decided about a labelset that is
+    # known to exist and known to be the one named.
     resolved_class = require_evidence_class(
         evidence_class,
         label_protocol_version=protocol_version,
-        labelset_fingerprint=labelset_fingerprint,
+        labelset_fingerprint=resolved_labelset_fingerprint,
     )
 
     verify_evaluation_universe_fingerprint(universe)
@@ -564,6 +697,28 @@ def build_evaluation_run(
             f"{ranking.profile_context_fingerprint}, not "
             f"{dataset.profile_context_fingerprint}"
         )
+    if coverage.dataset_id != dataset.dataset_id:
+        raise EvaluationBindingError(
+            f"the labels were made against dataset {coverage.dataset_id}, not "
+            f"{dataset.dataset_id}"
+        )
+    if coverage.dataset_content_fingerprint != dataset.content_fingerprint:
+        raise EvaluationBindingError(
+            "the labels were made against content fingerprint "
+            f"{coverage.dataset_content_fingerprint}, not "
+            f"{dataset.content_fingerprint}"
+        )
+    if coverage.profile_id != dataset.profile_id:
+        raise EvaluationBindingError(
+            f"the labels were made for profile {coverage.profile_id}, not "
+            f"{dataset.profile_id}"
+        )
+    if coverage.profile_context_fingerprint != dataset.profile_context_fingerprint:
+        raise EvaluationBindingError(
+            "the labels were made against profile context "
+            f"{coverage.profile_context_fingerprint}, not "
+            f"{dataset.profile_context_fingerprint}"
+        )
     assert_ranking_within_universe(ranking, universe)
 
     draft = EvaluationRunContract(
@@ -577,7 +732,7 @@ def build_evaluation_run(
         universe=universe,
         ranking=ranking,
         label_protocol_version=protocol_version,
-        labelset_fingerprint=labelset_fingerprint,
+        labelset_fingerprint=resolved_labelset_fingerprint,
         run_fingerprint="",
         provenance=provenance or EvaluationRunProvenance(),
     )
@@ -590,16 +745,48 @@ def verify_evaluation_run(run: EvaluationRunContract) -> str:
     For a run that arrived from somewhere else — a stored artefact, another
     process, a caller that built the dataclass by hand. It repeats the checks
     `build_evaluation_run` made, without the frozen dataset: the contract
-    versions, the evidence class, the nested digests recomputed, the internal
-    agreement between the run and its nested artefacts, `ranking ⊆ universe`,
-    and finally the run's own digest.
+    versions, the evidence class, the nested artefacts **re-established
+    structurally and re-digested**, the internal agreement between the run and
+    those artefacts, `ranking ⊆ universe`, and finally the run's own digest.
+
+    "Re-established structurally" is the part that a digest check alone does not
+    give. Recomputing a fingerprint over an artefact only proves it has not
+    moved since somebody digested it — and an artefact that was invalid when it
+    was digested, or that was edited and then re-digested, has a perfectly valid
+    fingerprint. So `verify_evaluation_universe_fingerprint` and
+    `verify_evaluation_ranking_fingerprint` re-check the invariants first, and
+    a universe with a repeated member or a ranking with two firsts is refused
+    here however carefully its digests were recomputed.
+
+    What this cannot re-establish is the labelset: a run carries its digest and
+    its protocol, not the judgements themselves. That binding is made once, at
+    build time, from a `LabelCoverage` whose digest `verify_label_coverage`
+    recomputed from the labels it holds — which is why there is no builder path
+    that accepts a bare fingerprint.
     """
+    if not isinstance(run, EvaluationRunContract):
+        raise EvaluationBindingError(f"{run!r} is not an evaluation run")
     require_supported_metric_contract_version(run.metric_contract_version)
     if run.run_schema_version != EVALUATION_RUN_SCHEMA_VERSION:
         raise MetricContractError(
             f"unsupported evaluation run schema version: "
             f"{run.run_schema_version!r} (this build reads "
             f"{EVALUATION_RUN_SCHEMA_VERSION!r})"
+        )
+    if not isinstance(run.dataset_id, str) or not run.dataset_id:
+        raise EvaluationBindingError("the evaluation run states no dataset_id")
+    validate_fingerprint(
+        run.dataset_content_fingerprint,
+        subject="the run's dataset content fingerprint",
+    )
+    validate_fingerprint(
+        run.profile_context_fingerprint,
+        subject="the run's profile context fingerprint",
+    )
+    if isinstance(run.profile_id, bool) or not isinstance(run.profile_id, int):
+        raise EvaluationBindingError(
+            f"the evaluation run states a non-integer profile_id "
+            f"{run.profile_id!r}"
         )
     validate_fingerprint(
         run.labelset_fingerprint, subject="the labelset fingerprint"

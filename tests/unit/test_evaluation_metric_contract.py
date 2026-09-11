@@ -26,10 +26,13 @@ from evaluation.labeling import (
     HUMAN_LABEL_PROTOCOL_VERSION,
     HUMAN_LABEL_SCHEMA_VERSION,
     RELEVANCE_GRADE_NAMES,
+    CalibrationSelection,
     FrozenEvaluationDataset,
     HumanLabelError,
     HumanRelevanceLabel,
     LabelDiagnostics,
+    labelset_fingerprint,
+    select_calibration_sample,
 )
 from evaluation.metrics import (
     EVALUATION_RANKING_VERSION,
@@ -75,8 +78,11 @@ from evaluation.metrics import (
     require_evidence_class,
     top_k_judged_coverage,
     universe_judged_coverage,
+    validate_evaluation_ranking_structure,
+    validate_evaluation_universe_structure,
     validate_k,
     verify_evaluation_run,
+    verify_label_coverage,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +90,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DATASET_CONTENT_FINGERPRINT = "a" * 64
 DATASET_ID = "evaluation-dataset-v3-" + DATASET_CONTENT_FINGERPRINT[:16]
 PROFILE_CONTEXT_FINGERPRINT = "9" * 64
-LABELSET_FINGERPRINT = "b" * 64
 
 
 # --------------------------------------------------------------------------
@@ -176,8 +181,24 @@ def label(
     )
 
 
+def whole_lot(dataset: FrozenEvaluationDataset) -> CalibrationSelection:
+    """A calibration lot covering the whole dataset.
+
+    Phase 10.2 draws a *stratified* lot, so a lot smaller than the cohort holds
+    postings nobody chose by hand. Most tests here want to decide which postings
+    are judged rather than which are selected, so they select everything and
+    then judge a subset — which is also the state a real round is in for most of
+    its life: a lot drawn, and part of it answered.
+    """
+    return select_calibration_sample(dataset, sample_size=len(dataset.records))
+
+
 def coverage_of(
-    grades: Mapping[int, int], dataset: FrozenEvaluationDataset
+    grades: Mapping[int, int],
+    dataset: FrozenEvaluationDataset,
+    *,
+    selection: CalibrationSelection | None = None,
+    expected_labelset_fingerprint: str | None = None,
 ) -> LabelCoverage:
     return build_label_coverage(
         dataset,
@@ -185,7 +206,8 @@ def coverage_of(
             label(opportunity_id, grade, dataset=dataset)
             for opportunity_id, grade in sorted(grades.items())
         ],
-        labelset_fingerprint=LABELSET_FINGERPRINT,
+        selection=whole_lot(dataset) if selection is None else selection,
+        expected_labelset_fingerprint=expected_labelset_fingerprint,
     )
 
 
@@ -193,6 +215,7 @@ def run_over(
     dataset: FrozenEvaluationDataset,
     *,
     universe_ids: Sequence[int] | None = None,
+    coverage: LabelCoverage | None = None,
     **kwargs: Any,
 ):
     universe = build_evaluation_universe(dataset, universe_ids)
@@ -201,9 +224,8 @@ def run_over(
         dataset=dataset,
         universe=universe,
         ranking=ranking,
+        coverage=coverage_of({1: 2}, dataset) if coverage is None else coverage,
         evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-        label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-        labelset_fingerprint=LABELSET_FINGERPRINT,
         **kwargs,
     )
 
@@ -394,7 +416,7 @@ def test_an_empty_ranking_is_refused(dataset):
 
 
 def test_coverage_reuses_the_phase_10_2_revision_interpretation(dataset):
-    """The latest revision is the effective judgement — Phase 10.2's rule, not ours."""
+    """The latest revision is the effective judgement: Phase 10.2's rule, reused."""
     coverage = build_label_coverage(
         dataset,
         [
@@ -408,7 +430,7 @@ def test_coverage_reuses_the_phase_10_2_revision_interpretation(dataset):
             ),
             label(2, 1, dataset=dataset),
         ],
-        labelset_fingerprint=LABELSET_FINGERPRINT,
+        selection=whole_lot(dataset),
     )
     assert coverage.grade(1) == 3
     assert coverage.grade(2) == 1
@@ -423,15 +445,13 @@ def test_a_broken_revision_chain_is_refused_by_phase_10_2(dataset):
                 label(1, 0, dataset=dataset),
                 label(1, 3, dataset=dataset, revision=3, relabel_reason="why"),
             ],
-            labelset_fingerprint=LABELSET_FINGERPRINT,
+            selection=whole_lot(dataset),
         )
 
 
 def test_a_labelset_with_no_judgement_cannot_bind_a_run(dataset):
     with pytest.raises(EvaluationBindingError, match="no judgement"):
-        build_label_coverage(
-            dataset, [], labelset_fingerprint=LABELSET_FINGERPRINT
-        )
+        build_label_coverage(dataset, [], selection=whole_lot(dataset))
 
 
 def test_a_label_protocol_this_build_cannot_interpret_is_refused(dataset):
@@ -446,7 +466,7 @@ def test_a_label_protocol_this_build_cannot_interpret_is_refused(dataset):
                     protocol_version=FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION,
                 )
             ],
-            labelset_fingerprint=LABELSET_FINGERPRINT,
+            selection=whole_lot(dataset),
         )
 
 
@@ -462,9 +482,7 @@ def test_a_labelset_mixing_two_protocols_is_refused(dataset):
         ),
     ]
     with pytest.raises(EvaluationMetricsError, match="mixes label protocols"):
-        build_label_coverage(
-            dataset, labels, labelset_fingerprint=LABELSET_FINGERPRINT
-        )
+        build_label_coverage(dataset, labels, selection=whole_lot(dataset))
 
 
 # --------------------------------------------------------------------------
@@ -473,7 +491,8 @@ def test_a_labelset_mixing_two_protocols_is_refused(dataset):
 
 
 def test_a_run_binds_everything_a_metric_would_depend_on(dataset):
-    run = run_over(dataset)
+    coverage = coverage_of({1: 2}, dataset)
+    run = run_over(dataset, coverage=coverage)
     assert run.run_schema_version == EVALUATION_RUN_SCHEMA_VERSION
     assert run.metric_contract_version == METRIC_CONTRACT_VERSION
     assert run.evidence_class is EvidenceClass.DIAGNOSTIC_CALIBRATION
@@ -483,7 +502,9 @@ def test_a_run_binds_everything_a_metric_would_depend_on(dataset):
     assert run.universe.fingerprint
     assert run.ranking.fingerprint
     assert run.label_protocol_version == HUMAN_LABEL_PROTOCOL_VERSION
-    assert run.labelset_fingerprint == LABELSET_FINGERPRINT
+    # Derived from the verified coverage, never accepted as an argument.
+    assert run.labelset_fingerprint == coverage.labelset_fingerprint
+    assert run.labelset_fingerprint == verify_label_coverage(coverage)
     assert verify_evaluation_run(run) == run.run_fingerprint
 
 
@@ -494,9 +515,8 @@ def test_a_universe_built_for_another_dataset_is_refused(dataset):
             dataset=dataset,
             universe=build_evaluation_universe(other),
             ranking=ranking_from_frozen_dataset(dataset),
+            coverage=coverage_of({1: 2}, dataset),
             evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-            label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-            labelset_fingerprint=LABELSET_FINGERPRINT,
         )
 
 
@@ -507,9 +527,8 @@ def test_a_moved_dataset_content_fingerprint_is_refused(dataset):
             dataset=dataset,
             universe=build_evaluation_universe(dataset),
             ranking=ranking_from_frozen_dataset(other),
+            coverage=coverage_of({1: 2}, dataset),
             evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-            label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-            labelset_fingerprint=LABELSET_FINGERPRINT,
         )
 
 
@@ -520,9 +539,8 @@ def test_a_ranking_produced_for_another_profile_context_is_refused(dataset):
             dataset=dataset,
             universe=build_evaluation_universe(dataset),
             ranking=ranking_from_frozen_dataset(other),
+            coverage=coverage_of({1: 2}, dataset),
             evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-            label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-            labelset_fingerprint=LABELSET_FINGERPRINT,
         )
 
 
@@ -536,15 +554,31 @@ def test_an_unsupported_metric_contract_version_is_refused(dataset):
         run_over(dataset, metric_contract_version="evaluation-metric-contract-v9")
 
 
-def test_a_malformed_labelset_fingerprint_is_refused(dataset):
-    with pytest.raises(EvaluationBindingError, match="SHA-256"):
+def test_a_run_cannot_be_bound_to_a_bare_fingerprint(dataset):
+    """The builder takes verified evidence, not a string that looks like one.
+
+    Blocker A in one line: there is no parameter here through which a caller can
+    name a labelset that has no judgements behind it, and a forged digest on an
+    otherwise well-formed coverage does not survive recomputation either.
+    """
+    coverage = coverage_of({1: 2, 2: 3}, dataset)
+    with pytest.raises(TypeError):
         build_evaluation_run(
             dataset=dataset,
             universe=build_evaluation_universe(dataset),
             ranking=ranking_from_frozen_dataset(dataset),
             evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
             label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-            labelset_fingerprint="not-a-digest",
+            labelset_fingerprint="d" * 64,
+        )
+    with pytest.raises(EvaluationBindingError, match="SHA-256"):
+        run_over(
+            dataset,
+            coverage=replace(coverage, labelset_fingerprint="not-a-digest"),
+        )
+    with pytest.raises(EvaluationBindingError, match="judgements it holds"):
+        run_over(
+            dataset, coverage=replace(coverage, labelset_fingerprint="d" * 64)
         )
 
 
@@ -556,10 +590,15 @@ def test_a_forged_run_fingerprint_does_not_survive_recomputation(dataset):
 
 
 def test_a_forged_universe_fingerprint_does_not_survive_recomputation(dataset):
+    """A structurally valid universe whose members were edited under its digest."""
     run = run_over(dataset)
-    forged = replace(run, universe=replace(run.universe, size=3))
+    narrowed = replace(
+        run.universe,
+        opportunity_ids=run.universe.opportunity_ids[:-1],
+        size=run.universe.size - 1,
+    )
     with pytest.raises(EvaluationBindingError, match="claims fingerprint"):
-        verify_evaluation_run(forged)
+        verify_evaluation_run(replace(run, universe=narrowed))
 
 
 def test_a_forged_ranking_fingerprint_does_not_survive_recomputation(dataset):
@@ -613,9 +652,8 @@ def test_a_changed_ranking_order_changes_the_ranking_and_run_fingerprints(datase
         dataset=dataset,
         universe=run.universe,
         ranking=swapped,
+        coverage=coverage_of({1: 2}, dataset),
         evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-        label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-        labelset_fingerprint=LABELSET_FINGERPRINT,
     )
     assert reordered.run_fingerprint != run.run_fingerprint
 
@@ -627,16 +665,11 @@ def test_a_changed_universe_changes_the_run_fingerprint(dataset):
     assert pool.run_fingerprint != whole.run_fingerprint
 
 
-def test_a_changed_labelset_fingerprint_changes_the_run_fingerprint(dataset):
-    run = run_over(dataset)
-    other = build_evaluation_run(
-        dataset=dataset,
-        universe=run.universe,
-        ranking=run.ranking,
-        evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-        label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-        labelset_fingerprint="d" * 64,
-    )
+def test_a_changed_labelset_changes_the_run_fingerprint(dataset):
+    """A different judgement is a different labelset is a different measurement."""
+    run = run_over(dataset, coverage=coverage_of({1: 2}, dataset))
+    other = run_over(dataset, coverage=coverage_of({1: 3}, dataset))
+    assert other.labelset_fingerprint != run.labelset_fingerprint
     assert other.run_fingerprint != run.run_fingerprint
 
 
@@ -731,8 +764,8 @@ def test_effective_k_never_invents_a_position(dataset):
 
 
 def test_a_fully_judged_top_k_makes_precision_available_and_nothing_else(dataset):
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 13), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
     precision = precision_at_k_availability(run, coverage, 10)
     assert precision.available
     assert precision.reason is None
@@ -748,16 +781,16 @@ def test_a_fully_judged_top_k_makes_precision_available_and_nothing_else(dataset
 
 def test_an_available_metric_cannot_be_turned_into_a_result(dataset):
     """Availability is not a score, and this slice refuses to let it become one."""
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 13), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
     availability = precision_at_k_availability(run, coverage, 10)
     with pytest.raises(MetricContractError, match="computes no metric"):
         availability.as_result()
 
 
 def test_an_unavailable_metric_converts_to_an_n_a_result(dataset):
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 13), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
     result = ndcg_at_k_availability(run, coverage, 10).as_result()
     assert result.status is MetricStatus.N_A
     assert result.value is None
@@ -772,11 +805,15 @@ def test_a_recall_denominator_is_refused_over_a_partly_judged_universe(dataset):
 
 
 def test_labels_from_another_labelset_make_every_metric_unavailable(dataset):
-    run = run_over(dataset)
-    coverage = replace(
-        coverage_of(dict.fromkeys(range(1, 21), 3), dataset),
-        labelset_fingerprint="c" * 64,
+    """Two real labelsets over one dataset: a different lot is a different question."""
+    grades = dict.fromkeys(range(1, 21), 3)
+    run = run_over(dataset, coverage=coverage_of(grades, dataset))
+    coverage = coverage_of(
+        grades,
+        dataset,
+        selection=select_calibration_sample(dataset, sample_size=6),
     )
+    assert coverage.labelset_fingerprint != run.labelset_fingerprint
     for gate in (
         precision_at_k_availability,
         recall_at_k_availability,
@@ -788,22 +825,19 @@ def test_labels_from_another_labelset_make_every_metric_unavailable(dataset):
 
 
 def test_labels_made_for_another_profile_are_refused_outright(dataset):
-    """A different labelset is an answerless question; a different profile is a wrong one."""
+    """A different labelset is an unanswerable question; a different profile is
+    a wrong one."""
     run = run_over(dataset)
-    coverage = replace(
-        coverage_of(dict.fromkeys(range(1, 21), 3), dataset),
-        profile_context_fingerprint="4" * 64,
-    )
+    other = ranked_dataset(profile_context_fingerprint="4" * 64)
+    coverage = coverage_of(dict.fromkeys(range(1, 21), 3), other)
     with pytest.raises(EvaluationBindingError, match="profile context"):
         precision_at_k_availability(run, coverage, 10)
 
 
 def test_labels_made_against_another_dataset_are_refused_outright(dataset):
     run = run_over(dataset)
-    coverage = replace(
-        coverage_of(dict.fromkeys(range(1, 21), 3), dataset),
-        dataset_id="evaluation-dataset-v3-" + "f" * 16,
-    )
+    other = ranked_dataset(dataset_id="evaluation-dataset-v3-" + "c" * 16)
+    coverage = coverage_of(dict.fromkeys(range(1, 21), 3), other)
     with pytest.raises(EvaluationBindingError, match="made against dataset"):
         recall_at_k_availability(run, coverage, 10)
 
@@ -849,6 +883,270 @@ def test_a_diagnostic_run_needs_a_protocol_this_build_interprets():
         )
 
 
+# --------------------------------------------------------------------------
+# Blocker A: a labelset identity is recomputed, never accepted
+# --------------------------------------------------------------------------
+
+
+def test_the_labelset_digest_is_the_phase_10_2_one_recomputed(dataset):
+    """Not a parallel digest: Phase 10.2's own function, over the same domain."""
+    selection = whole_lot(dataset)
+    labels = [label(1, 3, dataset=dataset), label(2, 0, dataset=dataset)]
+    coverage = build_label_coverage(dataset, labels, selection=selection)
+    assert coverage.labelset_fingerprint == labelset_fingerprint(
+        label_schema_version=HUMAN_LABEL_SCHEMA_VERSION,
+        protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
+        dataset_id=dataset.dataset_id,
+        dataset_content_fingerprint=dataset.content_fingerprint,
+        profile_id=dataset.profile_id,
+        profile_context_fingerprint=dataset.profile_context_fingerprint,
+        selector_version=selection.selector_version,
+        selection_fingerprint=selection.selection_fingerprint,
+        labels=labels,
+    )
+
+
+def test_judgements_outside_the_lot_do_not_enter_the_labelset(dataset):
+    """The defect: a digest over lot A, exposed beside grades that are not in A.
+
+    Phase 10.2 leaves out-of-lot judgements out of the labelset digest and
+    reports them separately. A coverage that exposed them anyway would hand the
+    gates grades the run's labelset fingerprint does not cover.
+    """
+    small = select_calibration_sample(dataset, sample_size=4)
+    inside = set(small.opportunity_ids)
+    outside = sorted(set(range(1, 21)) - inside)[:3]
+    labels = [
+        label(opportunity_id, 3, dataset=dataset)
+        for opportunity_id in sorted(inside) + outside
+    ]
+    coverage = build_label_coverage(dataset, labels, selection=small)
+
+    assert set(coverage.grades) == inside
+    assert coverage.judged_outside_selection == tuple(outside)
+    for opportunity_id in outside:
+        assert not coverage.is_judged(opportunity_id)
+        with pytest.raises(UnjudgedOpportunityError):
+            coverage.grade(opportunity_id)
+    # And the digest is the one Phase 10.2 computes over the lot alone: adding
+    # judgements outside it does not move the labelset's identity.
+    in_lot_only = [
+        item for item in labels if item.opportunity_id in inside
+    ]
+    assert coverage.labelset_fingerprint == build_label_coverage(
+        dataset, in_lot_only, selection=small
+    ).labelset_fingerprint
+
+
+def test_an_expected_labelset_fingerprint_is_compared_and_never_substituted(
+    dataset,
+):
+    grades = {1: 3, 2: 2}
+    honest = coverage_of(grades, dataset)
+    assert (
+        coverage_of(
+            grades,
+            dataset,
+            expected_labelset_fingerprint=honest.labelset_fingerprint,
+        ).labelset_fingerprint
+        == honest.labelset_fingerprint
+    )
+    with pytest.raises(EvaluationBindingError, match="expected to be"):
+        coverage_of(
+            grades, dataset, expected_labelset_fingerprint="e" * 64
+        )
+    with pytest.raises(EvaluationBindingError, match="SHA-256"):
+        coverage_of(grades, dataset, expected_labelset_fingerprint="nope")
+
+
+def test_a_coverage_whose_grades_were_edited_under_its_digest_is_refused(dataset):
+    """The whole point of recomputing: an edited grade changes the identity."""
+    coverage = coverage_of({1: 0, 2: 0}, dataset)
+    tampered = replace(
+        coverage,
+        labels=(
+            replace(coverage.labels[0], relevance_grade=3),
+            coverage.labels[1],
+        ),
+    )
+    assert tampered.grade(1) == 3
+    with pytest.raises(EvaluationBindingError, match="judgements it holds"):
+        verify_label_coverage(tampered)
+    run = run_over(dataset, coverage=coverage)
+    with pytest.raises(EvaluationBindingError, match="judgements it holds"):
+        precision_at_k_availability(run, tampered, 10)
+    with pytest.raises(EvaluationBindingError, match="judgements it holds"):
+        run_over(dataset, coverage=tampered)
+
+
+def test_a_coverage_cannot_hold_two_judgements_of_one_opportunity(dataset):
+    coverage = coverage_of({1: 3, 2: 0}, dataset)
+    with pytest.raises(EvaluationBindingError, match="appears twice"):
+        replace(coverage, labels=(coverage.labels[0], coverage.labels[0]))
+
+
+def test_a_coverage_cannot_claim_a_judgement_is_both_in_and_out_of_the_lot(
+    dataset,
+):
+    coverage = coverage_of({1: 3, 2: 0}, dataset)
+    with pytest.raises(EvaluationBindingError, match="both inside and outside"):
+        verify_label_coverage(replace(coverage, judged_outside_selection=(1,)))
+
+
+def test_a_lot_drawn_from_another_dataset_is_refused(dataset):
+    """Phase 10.2's own selection-binding check, applied before anything is read."""
+    other = ranked_dataset(dataset_id="evaluation-dataset-v3-" + "c" * 16)
+    with pytest.raises(HumanLabelError):
+        build_label_coverage(
+            dataset,
+            [label(1, 3, dataset=dataset)],
+            selection=whole_lot(other),
+        )
+
+
+def test_a_lot_with_no_judgement_in_it_cannot_bind_a_run(dataset):
+    """Judging only outside the lot is not judging the lot."""
+    small = select_calibration_sample(dataset, sample_size=3)
+    outside = sorted(set(range(1, 21)) - set(small.opportunity_ids))[:2]
+    with pytest.raises(EvaluationBindingError, match="belongs to lot"):
+        build_label_coverage(
+            dataset,
+            [label(opportunity_id, 2, dataset=dataset) for opportunity_id in outside],
+            selection=small,
+        )
+
+
+# --------------------------------------------------------------------------
+# Blocker B: structure is re-established, not inferred from a valid digest
+# --------------------------------------------------------------------------
+
+
+def resealed_universe(run, **changes):
+    """A universe mutated and re-digested, inside a run that is also re-digested.
+
+    The adversary this models is not a corrupted file — it is a caller that
+    built an invalid artefact and computed perfectly good fingerprints over it.
+    """
+    universe = replace(run.universe, **changes)
+    universe = replace(
+        universe, fingerprint=evaluation_universe_fingerprint(universe)
+    )
+    forged = replace(run, universe=universe)
+    return replace(forged, run_fingerprint=evaluation_run_fingerprint(forged))
+
+
+def resealed_ranking(run, **changes):
+    ranking = replace(run.ranking, **changes)
+    ranking = replace(ranking, fingerprint=evaluation_ranking_fingerprint(ranking))
+    forged = replace(run, ranking=ranking)
+    return replace(forged, run_fingerprint=evaluation_run_fingerprint(forged))
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"opportunity_ids": (1, 1, 2), "size": 3}, "repeats opportunity ids"),
+        ({"opportunity_ids": (2, 1, 3), "size": 3}, "canonical order"),
+        ({"opportunity_ids": (1, 2, 3), "size": 4}, "declares size"),
+        ({"opportunity_ids": (), "size": 0}, "at least one opportunity"),
+        ({"opportunity_ids": (1, True), "size": 2}, "opportunity id"),
+        ({"opportunity_ids": (0, 1), "size": 2}, "positive opportunity id"),
+        ({"opportunity_ids": (1, 2), "size": True}, "non-integer size"),
+        ({"kind": "FROZEN_DATASET_COHORT"}, "universe kind"),
+        ({"dataset_content_fingerprint": "nope"}, "SHA-256"),
+    ],
+)
+def test_a_structurally_invalid_universe_is_refused_however_it_is_digested(
+    dataset, changes, message
+):
+    run = run_over(dataset)
+    with pytest.raises(EvaluationMetricsError, match=message):
+        verify_evaluation_run(resealed_universe(run, **changes))
+
+
+def test_an_unsupported_universe_version_is_refused_after_re_digesting(dataset):
+    run = run_over(dataset)
+    with pytest.raises(MetricContractError, match="universe version"):
+        verify_evaluation_run(
+            resealed_universe(run, universe_version="evaluation-universe-v2")
+        )
+
+
+def entries(*pairs):
+    return tuple(
+        EvaluationRankingEntry(rank_position=position, opportunity_id=identifier)
+        for position, identifier in pairs
+    )
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"entries": entries((1, 5), (1, 6))}, "repeats rank positions"),
+        ({"entries": entries((1, 5), (2, 5))}, "repeats opportunity ids"),
+        ({"entries": entries((1, 5), (3, 6))}, "canonical contiguous"),
+        ({"entries": entries((2, 5), (1, 6))}, "canonical contiguous"),
+        ({"entries": ()}, "at least one ranked opportunity"),
+        ({"entries": entries((True, 5))}, "rank position"),
+        ({"entries": entries((1, True))}, "opportunity id"),
+        ({"source": "FROZEN_DATASET_RECOMMENDATION"}, "ranking source"),
+        ({"profile_id": True}, "non-integer profile_id"),
+        ({"profile_context_fingerprint": "nope"}, "SHA-256"),
+    ],
+)
+def test_a_structurally_invalid_ranking_is_refused_however_it_is_digested(
+    dataset, changes, message
+):
+    run = run_over(dataset)
+    with pytest.raises(EvaluationMetricsError, match=message):
+        verify_evaluation_run(resealed_ranking(run, **changes))
+
+
+def test_an_unsupported_ranking_version_is_refused_after_re_digesting(dataset):
+    run = run_over(dataset)
+    with pytest.raises(MetricContractError, match="ranking version"):
+        verify_evaluation_run(
+            resealed_ranking(run, ranking_version="evaluation-ranking-v2")
+        )
+
+
+def test_an_invalid_source_rank_position_is_refused_after_re_digesting(dataset):
+    run = run_over(dataset)
+    broken = (replace(run.ranking.entries[0], source_rank_position=0),) + (
+        run.ranking.entries[1:]
+    )
+    with pytest.raises(EvaluationBindingError, match="upstream rank position"):
+        verify_evaluation_run(resealed_ranking(run, entries=broken))
+
+
+def test_a_re_digested_ranking_leaving_the_universe_is_still_refused(dataset):
+    """A valid ranking, validly digested, over postings the universe excludes."""
+    run = run_over(dataset, universe_ids=list(range(1, 13)))
+    outside = replace(
+        run.ranking.entries[-1], opportunity_id=20, source_rank_position=None
+    )
+    with pytest.raises(EvaluationBindingError, match="outside the evaluation universe"):
+        verify_evaluation_run(
+            resealed_ranking(run, entries=run.ranking.entries[:-1] + (outside,))
+        )
+
+
+def test_the_builders_and_the_verifier_hold_one_contract(dataset):
+    """The validators are shared, so neither side can be lenient alone."""
+    run = run_over(dataset)
+    assert validate_evaluation_universe_structure(run.universe) is run.universe
+    assert validate_evaluation_ranking_structure(run.ranking) is run.ranking
+    with pytest.raises(EvaluationBindingError):
+        validate_evaluation_universe_structure(run.ranking)
+    with pytest.raises(EvaluationBindingError):
+        validate_evaluation_ranking_structure(run.universe)
+
+
+def test_a_run_that_is_not_a_run_is_refused():
+    with pytest.raises(EvaluationBindingError, match="not an evaluation run"):
+        verify_evaluation_run({"run_schema_version": EVALUATION_RUN_SCHEMA_VERSION})
+
+
 # ====================================================================
 # the regressions this slice exists to prevent
 # ====================================================================
@@ -874,10 +1172,10 @@ def test_1_an_unjudged_opportunity_never_becomes_grade_zero(dataset):
 
 
 def test_2_one_unjudged_item_in_the_top_ten_makes_precision_unavailable(dataset):
-    run = run_over(dataset)
     grades = dict.fromkeys(range(1, 13), 2)
     del grades[7]
     coverage = coverage_of(grades, dataset)
+    run = run_over(dataset, coverage=coverage)
     availability = precision_at_k_availability(run, coverage, 10)
     assert not availability.available
     assert availability.reason is MetricUnavailableReason.TOP_K_NOT_FULLY_JUDGED
@@ -892,8 +1190,8 @@ def test_3_a_judged_top_ten_is_not_enough_for_ndcg_or_recall(dataset):
     NDCG is a ratio against the ideal ordering and Recall is a fraction of a
     total, and both of those live in the rest of the universe.
     """
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 11), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
     assert precision_at_k_availability(run, coverage, 10).available
 
     ndcg = ndcg_at_k_availability(run, coverage, 10)
@@ -908,8 +1206,8 @@ def test_3_a_judged_top_ten_is_not_enough_for_ndcg_or_recall(dataset):
 
 def test_4_a_fully_judged_universe_with_nothing_relevant_has_no_recall(dataset):
     """The denominator is known, and it is zero. That is not a recall of 0.0."""
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 21), 1), dataset)
+    run = run_over(dataset, coverage=coverage)
     recall = recall_at_k_availability(run, coverage, 10)
     assert not recall.available
     assert recall.reason is MetricUnavailableReason.NO_RELEVANT_ITEMS
@@ -919,9 +1217,9 @@ def test_4_a_fully_judged_universe_with_nothing_relevant_has_no_recall(dataset):
 
 
 def test_5_a_fully_judged_universe_with_relevant_items_opens_every_gate(dataset):
-    run = run_over(dataset)
     grades = {index: (3 if index <= 4 else 0) for index in range(1, 21)}
     coverage = coverage_of(grades, dataset)
+    run = run_over(dataset, coverage=coverage)
     availabilities = [
         precision_at_k_availability(run, coverage, 10),
         recall_at_k_availability(run, coverage, 10),
@@ -938,8 +1236,8 @@ def test_5_a_fully_judged_universe_with_relevant_items_opens_every_gate(dataset)
 
 
 def test_6_a_boolean_k_is_refused_by_every_gate(dataset):
-    run = run_over(dataset)
     coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
     for gate in (
         precision_at_k_availability,
         recall_at_k_availability,

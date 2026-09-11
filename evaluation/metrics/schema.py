@@ -46,15 +46,20 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
-from evaluation.dataset import EvaluationDatasetError
+from evaluation.dataset import (
+    EVALUATION_CANONICAL_ORDER,
+    EvaluationDatasetError,
+)
 from evaluation.labeling import (
     CALIBRATION_V0_PROVENANCE,
     RELEVANCE_GRADE_NAMES,
     SUPPORTED_PROTOCOL_VERSIONS,
+    HumanRelevanceLabel,
 )
 
 __all__ = [
@@ -98,6 +103,8 @@ __all__ = [
     "metric_support_payload",
     "require_evidence_class",
     "require_supported_metric_contract_version",
+    "validate_evaluation_ranking_structure",
+    "validate_evaluation_universe_structure",
     "validate_fingerprint",
     "validate_k",
     "validate_opportunity_id",
@@ -596,25 +603,216 @@ def evaluation_ranking_payload(ranking: EvaluationRanking) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# structural validation, established once and re-checked on every read
+# --------------------------------------------------------------------------
+#
+# These are the invariants the universe and the ranking *claim*, written once
+# so that the builders and the verifiers cannot drift into two opinions of
+# them. That split matters more than it looks: a digest check alone only proves
+# that an artefact has not changed since somebody digested it. An artefact that
+# was assembled wrong, or edited and then re-digested, has a perfectly valid
+# fingerprint over an invalid structure — a universe with a repeated member, a
+# ranking with two firsts — and every metric over it would be arithmetically
+# fine and quietly wrong. So the structure is re-established from the object
+# itself, every time one is verified, and never inferred from the fact that it
+# was built by this package once.
+
+
+def validate_evaluation_universe_structure(universe: Any) -> EvaluationUniverse:
+    """Re-establish every invariant a universe claims, or refuse it."""
+    if not isinstance(universe, EvaluationUniverse):
+        raise EvaluationBindingError(
+            f"{universe!r} is not an evaluation universe"
+        )
+    if universe.universe_version != EVALUATION_UNIVERSE_VERSION:
+        raise MetricContractError(
+            f"unsupported evaluation universe version: "
+            f"{universe.universe_version!r} (this build reads "
+            f"{EVALUATION_UNIVERSE_VERSION!r})"
+        )
+    if not isinstance(universe.kind, EvaluationUniverseKind):
+        raise EvaluationBindingError(
+            f"{universe.kind!r} is not an evaluation universe kind"
+        )
+    if not isinstance(universe.dataset_id, str) or not universe.dataset_id:
+        raise EvaluationBindingError("the evaluation universe states no dataset_id")
+    validate_fingerprint(
+        universe.dataset_content_fingerprint,
+        subject="the universe's dataset content fingerprint",
+    )
+    if not isinstance(universe.opportunity_ids, tuple):
+        raise EvaluationBindingError(
+            "the evaluation universe's members are not an immutable sequence"
+        )
+    if not universe.opportunity_ids:
+        raise EvaluationBindingError(
+            "an evaluation universe holds at least one opportunity; an empty "
+            "universe cannot be the denominator of anything"
+        )
+    seen: set[int] = set()
+    repeated: set[int] = set()
+    for value in universe.opportunity_ids:
+        validate_opportunity_id(value, subject="an evaluation universe member")
+        if value in seen:
+            repeated.add(value)
+        seen.add(value)
+    if repeated:
+        raise EvaluationBindingError(
+            f"the evaluation universe repeats opportunity ids: "
+            f"{sorted(repeated)}; a duplicated member would be counted twice in "
+            "every denominator"
+        )
+    if list(universe.opportunity_ids) != sorted(universe.opportunity_ids):
+        raise EvaluationBindingError(
+            "the evaluation universe's members are not in the canonical order "
+            f"({EVALUATION_CANONICAL_ORDER}); a universe is a set, and it is "
+            "held in the one order two equal universes are guaranteed to agree "
+            "on"
+        )
+    if isinstance(universe.size, bool) or not isinstance(universe.size, int):
+        raise EvaluationBindingError(
+            f"the evaluation universe states a non-integer size "
+            f"{universe.size!r}"
+        )
+    if universe.size != len(universe.opportunity_ids):
+        raise EvaluationBindingError(
+            f"the evaluation universe declares size {universe.size!r} and holds "
+            f"{len(universe.opportunity_ids)} opportunities"
+        )
+    validate_fingerprint(
+        universe.fingerprint, subject="the evaluation universe fingerprint"
+    )
+    return universe
+
+
+def validate_evaluation_ranking_structure(ranking: Any) -> EvaluationRanking:
+    """Re-establish every invariant a ranking claims, or refuse it."""
+    if not isinstance(ranking, EvaluationRanking):
+        raise EvaluationBindingError(f"{ranking!r} is not an evaluation ranking")
+    if ranking.ranking_version != EVALUATION_RANKING_VERSION:
+        raise MetricContractError(
+            f"unsupported evaluation ranking version: "
+            f"{ranking.ranking_version!r} (this build reads "
+            f"{EVALUATION_RANKING_VERSION!r})"
+        )
+    if not isinstance(ranking.source, RankingSource):
+        raise EvaluationBindingError(f"{ranking.source!r} is not a ranking source")
+    if not isinstance(ranking.dataset_id, str) or not ranking.dataset_id:
+        raise EvaluationBindingError("the evaluation ranking states no dataset_id")
+    validate_fingerprint(
+        ranking.dataset_content_fingerprint,
+        subject="the ranking's dataset content fingerprint",
+    )
+    if isinstance(ranking.profile_id, bool) or not isinstance(
+        ranking.profile_id, int
+    ):
+        raise EvaluationBindingError(
+            f"the evaluation ranking states a non-integer profile_id "
+            f"{ranking.profile_id!r}"
+        )
+    if ranking.profile_id <= 0:
+        raise EvaluationBindingError(
+            f"the evaluation ranking states a non-positive profile_id "
+            f"{ranking.profile_id!r}"
+        )
+    validate_fingerprint(
+        ranking.profile_context_fingerprint,
+        subject="the ranking's profile context fingerprint",
+    )
+    if not isinstance(ranking.entries, tuple):
+        raise EvaluationBindingError(
+            "the evaluation ranking's entries are not an immutable sequence"
+        )
+    if not ranking.entries:
+        raise EvaluationBindingError(
+            "an evaluation ranking holds at least one ranked opportunity; "
+            "there is no top K of an empty list"
+        )
+    positions: list[int] = []
+    seen_ids: set[int] = set()
+    repeated_ids: set[int] = set()
+    seen_positions: set[int] = set()
+    repeated_positions: set[int] = set()
+    for entry in ranking.entries:
+        if not isinstance(entry, EvaluationRankingEntry):
+            raise EvaluationBindingError(
+                f"{entry!r} is not an evaluation ranking entry"
+            )
+        position = validate_rank_position(
+            entry.rank_position, subject="an evaluation ranking position"
+        )
+        opportunity_id = validate_opportunity_id(
+            entry.opportunity_id, subject="a ranked opportunity"
+        )
+        if entry.source_rank_position is not None:
+            validate_rank_position(
+                entry.source_rank_position, subject="an upstream rank position"
+            )
+        if position in seen_positions:
+            repeated_positions.add(position)
+        if opportunity_id in seen_ids:
+            repeated_ids.add(opportunity_id)
+        seen_positions.add(position)
+        seen_ids.add(opportunity_id)
+        positions.append(position)
+    if repeated_positions:
+        raise EvaluationBindingError(
+            f"the ranking repeats rank positions: {sorted(repeated_positions)}; "
+            "two postings cannot both be nth"
+        )
+    if repeated_ids:
+        raise EvaluationBindingError(
+            f"the ranking repeats opportunity ids: {sorted(repeated_ids)}; one "
+            "posting occupies one position"
+        )
+    if positions != list(range(1, len(positions) + 1)):
+        raise EvaluationBindingError(
+            f"the ranking states positions {positions}, not the canonical "
+            f"contiguous {list(range(1, len(positions) + 1))} in order"
+        )
+    validate_fingerprint(
+        ranking.fingerprint, subject="the evaluation ranking fingerprint"
+    )
+    return ranking
+
+
+# --------------------------------------------------------------------------
 # the label coverage view
 # --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class LabelCoverage:
-    """Which opportunities carry an effective judgement, and which grade.
+    """Exactly the judgements one labelset identifies, and nothing else.
 
     A read-only projection of Phase 10.2's label history, built by
     `run.build_label_coverage` through that package's own
-    `validate_label_history` and `resolve_effective_labels`. There is no second
-    interpretation of what "the current judgement" means: the append-only
-    revision chain is Phase 10.2's contract and this slice reads it, it does not
-    restate it.
+    `assert_selection_bindings`, `validate_label_history` and
+    `resolve_effective_labels`. There is no second interpretation of what "the
+    current judgement" means: the append-only revision chain is Phase 10.2's
+    contract and this slice reads it, it does not restate it.
 
-    `grades` holds **only judged opportunities**. There is no entry for an
-    unjudged one — not a `None`, not a `0`, not a sentinel — so the difference
-    between "judged 0" and "nobody looked" is a difference in the keys of a
-    mapping rather than a convention somebody has to remember.
+    **`labels` is the labelset, not merely some labels.** Phase 10.2's labelset
+    digest covers the effective judgements *of one calibration lot* — its
+    `build_labelset_report` deliberately leaves judgements recorded outside the
+    lot out of the digest and reports them separately — so a coverage built from
+    every effective label while carrying a digest computed over one lot would
+    expose grades the fingerprint does not cover. That is the failure this shape
+    prevents: `labels` holds exactly the in-selection effective judgements the
+    recomputed `labelset_fingerprint` covers, and `judged_outside_selection`
+    names the rest so nothing goes missing silently. Those outside judgements
+    remain in Phase 10.2's history untouched; they simply are not this labelset.
+
+    The digest is never taken on trust either: `run.verify_label_coverage`
+    recomputes it from these labels and these bindings, and the run builder and
+    every gate call it before reading a single grade.
+
+    `grades` is derived from `labels` rather than stored beside them — two
+    fields that could disagree would eventually disagree — and holds **only
+    judged opportunities**. There is no entry for an unjudged one: not a `None`,
+    not a `0`, not a sentinel. The difference between "judged 0" and "nobody
+    looked" is a difference in the keys of a mapping rather than a convention
+    somebody has to remember.
     """
 
     label_schema_version: str
@@ -623,8 +821,33 @@ class LabelCoverage:
     dataset_content_fingerprint: str
     profile_id: int
     profile_context_fingerprint: str
+    #: Which lot the judgements answer. Both are inside Phase 10.2's labelset
+    #: digest domain, so binding a run to the labelset fingerprint binds it to
+    #: the lot as well, transitively and without a second field on the run.
+    selector_version: str
+    selection_fingerprint: str
+    #: The effective judgements of the selected postings, in canonical order.
+    labels: tuple[HumanRelevanceLabel, ...]
+    #: Effective judgements recorded outside the lot. Reported, never counted.
+    judged_outside_selection: tuple[int, ...]
     labelset_fingerprint: str
-    grades: Mapping[int, int]
+    #: Derived in `__post_init__` from `labels`; never passed in.
+    grades: Mapping[int, int] = field(
+        init=False, repr=False, default=MappingProxyType({})
+    )
+
+    def __post_init__(self) -> None:
+        grades: dict[int, int] = {}
+        for item in self.labels:
+            if item.opportunity_id in grades:
+                raise EvaluationBindingError(
+                    f"opportunity {item.opportunity_id} appears twice in the "
+                    "labelset; a coverage holds one effective judgement per "
+                    "opportunity, and two would mean the caller passed the raw "
+                    "history rather than the resolved state"
+                )
+            grades[item.opportunity_id] = item.relevance_grade
+        object.__setattr__(self, "grades", MappingProxyType(grades))
 
     def is_judged(self, opportunity_id: int) -> bool:
         return opportunity_id in self.grades

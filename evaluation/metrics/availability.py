@@ -75,6 +75,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
+from .run import verify_label_coverage
 from .schema import (
     EvaluationBindingError,
     EvaluationRanking,
@@ -209,7 +210,17 @@ def _check_label_bindings(
     declares — and raises before returning at all if they are not even about
     the same thing.
 
-    Two layers, deliberately different in kind. A coverage built over another
+    Three steps. The bindings that say what the labels are *about* are compared
+    first, because a coverage legitimately built over another dataset or another
+    profile state deserves to be told so in those words. Then
+    `verify_label_coverage` recomputes the declared labelset digest from the
+    judgements the coverage actually holds — reading a grade out of a coverage
+    whose identity has only been *asserted* would make the last step theatre,
+    one unverified string compared against another. Only then is the labelset
+    identity compared.
+
+    The first two steps and the third are deliberately different in kind. A
+    coverage built over another
     dataset or another profile state is a **structurally wrong artefact** and
     raises: the question itself does not typecheck. A coverage over the right
     dataset whose labelset digest or protocol is not the one the run declares is
@@ -239,6 +250,7 @@ def _check_label_bindings(
             f"{coverage.profile_context_fingerprint}, not "
             f"{run.profile_context_fingerprint}"
         )
+    verify_label_coverage(coverage)
     return (
         coverage.labelset_fingerprint != run.labelset_fingerprint
         or coverage.label_protocol_version != run.label_protocol_version

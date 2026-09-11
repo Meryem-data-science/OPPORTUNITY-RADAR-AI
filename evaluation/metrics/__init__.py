@@ -56,6 +56,16 @@ by name. Nothing here migrates, converts, duplicates or rewrites a v0 label, and
 no v1 label is written: a real benchmark needs a separately stored labelset that
 does not exist yet.
 
+**Nothing declares its own identity.** A universe, a ranking and a run each
+carry a fingerprint field, and every one of them is recomputed before it is
+believed — together with the *structure* it claims, because a digest taken over
+an invalid artefact is a valid digest. A label coverage is held to the same
+rule: it holds exactly the effective judgements of one verified calibration lot,
+its labelset digest is recomputed from those judgements through Phase 10.2's own
+`labelset_fingerprint`, and a run can only be bound to a coverage that survived
+that. There is no builder path that accepts a bare fingerprint string with no
+labels behind it.
+
 ## What a result may say
 
 `COMPUTED` or `N_A`, with a stable reason code from a closed vocabulary and a
@@ -94,6 +104,7 @@ from .run import (
     build_label_coverage,
     ranking_from_frozen_dataset,
     verify_evaluation_run,
+    verify_label_coverage,
 )
 from .schema import (
     BINARY_RELEVANCE_GRADE_NAME,
@@ -135,6 +146,8 @@ from .schema import (
     metric_support_payload,
     require_evidence_class,
     require_supported_metric_contract_version,
+    validate_evaluation_ranking_structure,
+    validate_evaluation_universe_structure,
     validate_fingerprint,
     validate_k,
     validate_opportunity_id,
@@ -202,6 +215,8 @@ __all__ = [
     "require_supported_metric_contract_version",
     "top_k_judged_coverage",
     "universe_judged_coverage",
+    "validate_evaluation_ranking_structure",
+    "validate_evaluation_universe_structure",
     "validate_fingerprint",
     "validate_k",
     "validate_opportunity_id",
@@ -210,4 +225,5 @@ __all__ = [
     "verify_evaluation_run",
     "verify_evaluation_run_fingerprint",
     "verify_evaluation_universe_fingerprint",
+    "verify_label_coverage",
 ]

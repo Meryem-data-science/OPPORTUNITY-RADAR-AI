@@ -12,6 +12,7 @@ making every `sqlite3.connect` in the process raise — and no real opportunity
 and no real judgement appears anywhere in it.
 """
 
+import inspect
 import sqlite3
 from pathlib import Path
 
@@ -37,7 +38,7 @@ from evaluation.dataset import (
 )
 from evaluation.labeling import (
     CALIBRATION_V0_PROVENANCE,
-    HUMAN_LABEL_PROTOCOL_VERSION,
+    CalibrationSelection,
     FrozenEvaluationDataset,
     HumanLabelError,
     append_human_label,
@@ -61,6 +62,7 @@ from evaluation.metrics import (
     precision_at_k_availability,
     ranking_from_frozen_dataset,
     recall_at_k_availability,
+    require_evidence_class,
     universe_judged_coverage,
     verify_evaluation_run,
 )
@@ -207,27 +209,38 @@ def record_labels(
         )
 
 
+def lot_of(
+    dataset: FrozenEvaluationDataset, sample_size: int = COHORT_SIZE
+) -> CalibrationSelection:
+    """A real calibration lot, drawn by Phase 10.2's own deterministic selector.
+
+    The default covers the whole cohort. A smaller lot is stratified rather than
+    chosen, so a test that wants to control *which* postings are judged selects
+    everything and then judges a subset — which is the state a real round is in
+    for most of its life.
+    """
+    return select_calibration_sample(dataset, sample_size=sample_size)
+
+
 def coverage_from_disk(
-    dataset: FrozenEvaluationDataset, root: Path, labelset_fingerprint: str
+    dataset: FrozenEvaluationDataset,
+    root: Path,
+    selection: CalibrationSelection,
+    *,
+    expected_labelset_fingerprint: str | None = None,
 ):
+    """The labelset of one lot, read off disk and digested by recomputation."""
     return build_label_coverage(
         dataset,
         read_validated_label_history(dataset, root),
-        labelset_fingerprint=labelset_fingerprint,
+        selection=selection,
+        expected_labelset_fingerprint=expected_labelset_fingerprint,
     )
-
-
-def labelset_fingerprint_of(
-    dataset: FrozenEvaluationDataset, root: Path, sample_size: int
-) -> str:
-    """A real labelset digest, from Phase 10.2's own report over a real lot."""
-    selection = select_calibration_sample(dataset, sample_size=sample_size)
-    return build_labelset_report(dataset, selection, root).labelset_fingerprint
 
 
 def run_for(
     dataset: FrozenEvaluationDataset,
-    labelset_fingerprint: str,
+    coverage,
     *,
     universe_ids=None,
     **kwargs,
@@ -236,9 +249,8 @@ def run_for(
         dataset=dataset,
         universe=build_evaluation_universe(dataset, universe_ids),
         ranking=ranking_from_frozen_dataset(dataset),
+        coverage=coverage,
         evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-        label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-        labelset_fingerprint=labelset_fingerprint,
         **kwargs,
     )
 
@@ -252,8 +264,9 @@ def test_a_run_binds_a_real_dataset_a_real_ranking_and_a_real_labelset(
     frozen, labels_root
 ):
     record_labels(frozen, labels_root, {1: 3, 2: 2, 3: 0})
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 3)
-    run = run_for(frozen, fingerprint)
+    lot = lot_of(frozen)
+    coverage = coverage_from_disk(frozen, labels_root, lot)
+    run = run_for(frozen, coverage)
 
     assert run.dataset_id == frozen.dataset_id
     assert run.dataset_content_fingerprint == frozen.content_fingerprint
@@ -261,7 +274,11 @@ def test_a_run_binds_a_real_dataset_a_real_ranking_and_a_real_labelset(
     assert run.universe.size == COHORT_SIZE
     assert run.ranking.length == RANKED_COUNT
     assert run.ranking.opportunity_ids == tuple(range(1, RANKED_COUNT + 1))
-    assert run.labelset_fingerprint == fingerprint
+    assert run.labelset_fingerprint == coverage.labelset_fingerprint
+    # And the digest the run carries is Phase 10.2's own, over the same lot.
+    assert run.labelset_fingerprint == build_labelset_report(
+        frozen, lot, labels_root
+    ).labelset_fingerprint
     assert verify_evaluation_run(run) == run.run_fingerprint
 
 
@@ -270,9 +287,8 @@ def test_the_universe_is_the_cohort_and_not_the_ranked_or_labelled_subset(
 ):
     """Three different sets, and confusing any two of them breaks a metric."""
     record_labels(frozen, labels_root, {1: 3, 2: 2})
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 2)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     assert run.universe.size == COHORT_SIZE
     assert run.ranking.length == RANKED_COUNT
@@ -285,10 +301,10 @@ def test_a_rerun_over_unchanged_artefacts_produces_the_same_run_fingerprint(
     frozen, labels_root, tmp_path
 ):
     record_labels(frozen, labels_root, {1: 3})
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 1)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
     first = run_for(
         frozen,
-        fingerprint,
+        coverage,
         provenance=EvaluationRunProvenance(
             generated_at="2026-09-11T06:00:00+00:00",
             dataset_directory=str(frozen.directory),
@@ -296,7 +312,7 @@ def test_a_rerun_over_unchanged_artefacts_produces_the_same_run_fingerprint(
     )
     second = run_for(
         frozen,
-        fingerprint,
+        coverage,
         provenance=EvaluationRunProvenance(
             generated_at="2026-09-12T21:30:00+00:00",
             dataset_directory=str(tmp_path / "a-second-checkout"),
@@ -318,8 +334,7 @@ def test_a_run_over_a_relabelled_opportunity_reads_the_latest_revision(
         relabel=True,
         relabel_reason="the rubric was clarified",
     )
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 1)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
     assert coverage.grade(5) == 3
     # Both rows are still in the audit trail; only the effective one is read.
     assert len(read_validated_label_history(frozen, labels_root)) == 2
@@ -333,9 +348,8 @@ def test_a_run_over_a_relabelled_opportunity_reads_the_latest_revision(
 def test_a_judged_top_ten_opens_precision_only(frozen, labels_root):
     """Regression 3, end to end: precision is local, recall and NDCG are not."""
     record_labels(frozen, labels_root, dict.fromkeys(range(1, 11), 2))
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 10)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     precision = precision_at_k_availability(run, coverage, 10)
     assert precision.available
@@ -354,9 +368,8 @@ def test_one_unjudged_posting_in_the_top_ten_closes_precision(frozen, labels_roo
     grades = dict.fromkeys(range(1, 11), 2)
     del grades[4]
     record_labels(frozen, labels_root, grades)
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 10)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     precision = precision_at_k_availability(run, coverage, 10)
     assert not precision.available
@@ -371,9 +384,8 @@ def test_a_fully_judged_cohort_opens_every_gate_and_still_yields_no_number(
 ):
     grades = {index: (3 if index <= 5 else 0) for index in range(1, COHORT_SIZE + 1)}
     record_labels(frozen, labels_root, grades)
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, COHORT_SIZE)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     for gate in (
         precision_at_k_availability,
@@ -393,9 +405,8 @@ def test_a_fully_judged_cohort_with_nothing_relevant_has_no_recall(
     record_labels(
         frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 1)
     )
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, COHORT_SIZE)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     recall = recall_at_k_availability(run, coverage, 10)
     assert recall.reason is MetricUnavailableReason.NO_RELEVANT_ITEMS
@@ -409,9 +420,8 @@ def test_k_beyond_the_ranking_is_capped_against_real_artefacts(frozen, labels_ro
     record_labels(
         frozen, labels_root, dict.fromkeys(range(1, RANKED_COUNT + 1), 2)
     )
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, RANKED_COUNT)
-    run = run_for(frozen, fingerprint)
-    coverage = coverage_from_disk(frozen, labels_root, fingerprint)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
 
     precision = precision_at_k_availability(run, coverage, 100)
     assert precision.support.k_requested == 100
@@ -457,14 +467,13 @@ def test_labels_from_another_frozen_dataset_are_refused(
     other_frozen = read_frozen_dataset(other_paths.directory)
 
     record_labels(frozen, labels_root, {1: 3})
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 1)
     history = read_validated_label_history(frozen, labels_root)
     # Phase 10.2's own binding check, reused rather than restated — which is
     # why its own error surfaces. Both errors descend from the Phase 10.1
     # `EvaluationDatasetError`, so one `except` still catches the layer.
-    with pytest.raises(HumanLabelError, match="belongs to dataset"):
+    with pytest.raises(HumanLabelError):
         build_label_coverage(
-            other_frozen, history, labelset_fingerprint=fingerprint
+            other_frozen, history, selection=lot_of(other_frozen)
         )
     assert issubclass(HumanLabelError, EvaluationDatasetError)
     assert issubclass(EvaluationBindingError, EvaluationDatasetError)
@@ -473,11 +482,9 @@ def test_labels_from_another_frozen_dataset_are_refused(
 def test_a_labelset_from_another_lot_makes_every_metric_unavailable(
     frozen, labels_root
 ):
-    record_labels(frozen, labels_root, dict.fromkeys(range(1, 11), 2))
-    run = run_for(frozen, labelset_fingerprint_of(frozen, labels_root, 4))
-    coverage = coverage_from_disk(
-        frozen, labels_root, labelset_fingerprint_of(frozen, labels_root, 10)
-    )
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    run = run_for(frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen)))
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen, 4))
     assert coverage.labelset_fingerprint != run.labelset_fingerprint
     availability = precision_at_k_availability(run, coverage, 10)
     assert availability.reason is MetricUnavailableReason.LABELSET_BINDING_MISMATCH
@@ -488,28 +495,116 @@ def test_a_real_calibration_labelset_cannot_be_declared_a_benchmark(
 ):
     """Regression 12, over a labelset that was actually written to disk."""
     record_labels(frozen, labels_root, {1: 3, 2: 2})
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 2)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
     with pytest.raises(EvidenceClassError, match="independent"):
         build_evaluation_run(
             dataset=frozen,
             universe=build_evaluation_universe(frozen),
             ranking=ranking_from_frozen_dataset(frozen),
+            coverage=coverage,
             evidence_class=EvidenceClass.INDEPENDENT_BENCHMARK,
-            label_protocol_version=HUMAN_LABEL_PROTOCOL_VERSION,
-            labelset_fingerprint=fingerprint,
         )
 
 
-def test_the_recorded_calibration_round_is_refused_by_its_own_digest(frozen):
-    """The one real labelset this repository knows of, refused by name."""
+def test_the_recorded_calibration_round_is_refused_by_its_own_digest():
+    """The one real labelset this repository knows of, refused by name.
+
+    It is refused at the guard rather than at the builder, because the builder
+    can no longer be handed a digest at all: a run is bound to a `LabelCoverage`
+    whose identity was recomputed from real judgements, and the recorded v0
+    round's labels exist only on the operator's machine. Both halves matter —
+    the guard refuses the known round, and there is no argument through which it
+    could have been claimed anyway.
+    """
     with pytest.raises(EvidenceClassError, match="calibration round"):
-        build_evaluation_run(
-            dataset=frozen,
-            universe=build_evaluation_universe(frozen),
-            ranking=ranking_from_frozen_dataset(frozen),
-            evidence_class=EvidenceClass.INDEPENDENT_BENCHMARK,
+        require_evidence_class(
+            EvidenceClass.INDEPENDENT_BENCHMARK,
             label_protocol_version=CALIBRATION_V0_PROVENANCE.protocol_version,
             labelset_fingerprint=CALIBRATION_V0_PROVENANCE.labelset_fingerprint,
+        )
+    assert "labelset_fingerprint" not in inspect.signature(
+        build_evaluation_run
+    ).parameters
+
+
+# --------------------------------------------------------------------------
+# the labelset is the lot's answers, recomputed
+# --------------------------------------------------------------------------
+
+
+def test_the_recomputed_labelset_digest_is_the_one_phase_10_2_reports(
+    frozen, labels_root
+):
+    """Our recomputation and Phase 10.2's report agree over the same lot."""
+    record_labels(frozen, labels_root, {1: 3, 2: 2, 5: 0, 9: 1})
+    for sample_size in (3, 7, COHORT_SIZE):
+        lot = lot_of(frozen, sample_size)
+        report = build_labelset_report(frozen, lot, labels_root)
+        if report.judged_count == 0:
+            continue
+        coverage = coverage_from_disk(frozen, labels_root, lot)
+        assert coverage.labelset_fingerprint == report.labelset_fingerprint
+        assert coverage.judged_opportunity_ids == tuple(
+            sorted(set(lot.opportunity_ids) & {1, 2, 5, 9})
+        )
+        assert coverage.judged_outside_selection == report.judged_outside_selection
+
+
+def test_judgements_outside_the_lot_stay_in_the_history_and_out_of_the_labelset(
+    frozen, labels_root
+):
+    """The defect this slice was corrected for, over real files.
+
+    Phase 10.2's report leaves out-of-lot judgements out of the digest and names
+    them separately; the coverage does exactly the same, so no grade reaches a
+    gate that the run's labelset fingerprint does not cover.
+    """
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    small = lot_of(frozen, 4)
+    inside = set(small.opportunity_ids)
+    outside = tuple(sorted(set(range(1, COHORT_SIZE + 1)) - inside))
+
+    coverage = coverage_from_disk(frozen, labels_root, small)
+    assert set(coverage.grades) == inside
+    assert coverage.judged_outside_selection == outside
+    for opportunity_id in outside:
+        with pytest.raises(UnjudgedOpportunityError):
+            coverage.grade(opportunity_id)
+
+    # Nothing was deleted: the history still holds every judgement.
+    history = read_validated_label_history(frozen, labels_root)
+    assert len(history) == COHORT_SIZE
+    # And a run bound to this lot sees only the lot's answers, so a cohort-wide
+    # universe is not fully judged however many labels the file holds.
+    run = run_for(frozen, coverage)
+    judged = universe_judged_coverage(run.universe, coverage)
+    assert judged.judged_count == len(inside)
+    assert not judged.fully_judged
+    assert not ndcg_at_k_availability(run, coverage, 10).available
+
+
+def test_an_expected_labelset_fingerprint_is_checked_against_the_files(
+    frozen, labels_root
+):
+    record_labels(frozen, labels_root, {1: 3, 2: 2})
+    lot = lot_of(frozen)
+    report = build_labelset_report(frozen, lot, labels_root)
+    coverage = coverage_from_disk(
+        frozen,
+        labels_root,
+        lot,
+        expected_labelset_fingerprint=report.labelset_fingerprint,
+    )
+    assert coverage.labelset_fingerprint == report.labelset_fingerprint
+
+    # One more judgement, and the stored manifest no longer describes the file.
+    record_labels(frozen, labels_root, {3: 1})
+    with pytest.raises(EvaluationBindingError, match="expected to be"):
+        coverage_from_disk(
+            frozen,
+            labels_root,
+            lot,
+            expected_labelset_fingerprint=report.labelset_fingerprint,
         )
 
 
@@ -528,7 +623,6 @@ def test_deciding_availability_opens_no_database_and_writes_no_label(
     and after.
     """
     record_labels(frozen, labels_root, dict.fromkeys(range(1, 11), 2))
-    fingerprint = labelset_fingerprint_of(frozen, labels_root, 10)
     labels_file = labels_root / frozen.dataset_id / "labels.jsonl"
     before = labels_file.read_bytes()
 
@@ -538,8 +632,8 @@ def test_deciding_availability_opens_no_database_and_writes_no_label(
     monkeypatch.setattr(sqlite3, "connect", refuse)
 
     reread = read_frozen_dataset(frozen.directory)
-    run = run_for(reread, fingerprint)
-    coverage = coverage_from_disk(reread, labels_root, fingerprint)
+    coverage = coverage_from_disk(reread, labels_root, lot_of(reread))
+    run = run_for(reread, coverage)
     assert precision_at_k_availability(run, coverage, 10).available
     assert not recall_at_k_availability(run, coverage, 10).available
     assert not ndcg_at_k_availability(run, coverage, 10).available

@@ -66,6 +66,14 @@ Following Phase 10.1, a stored object's self-declared fingerprint is never
 trusted: `verify_*_fingerprint` below recomputes it from the canonical semantic
 projection, and `run.py` calls them before a run is built rather than after a
 number has been reported.
+
+Recomputation alone is not enough, so the universe and ranking verifiers
+**re-establish the structure first**, through the validators in `schema.py`. A
+digest proves only that an artefact has not changed since somebody digested it;
+an artefact that was invalid when it was digested, or that was edited and then
+re-digested, carries a perfectly valid fingerprint over a universe with a
+repeated member or a ranking with two firsts. Both halves are checked, in that
+order, every time.
 """
 
 from __future__ import annotations
@@ -83,6 +91,8 @@ from .schema import (
     evaluation_ranking_payload,
     evaluation_run_payload,
     evaluation_universe_payload,
+    validate_evaluation_ranking_structure,
+    validate_evaluation_universe_structure,
 )
 
 __all__ = [
@@ -125,7 +135,16 @@ def evaluation_universe_fingerprint(universe: EvaluationUniverse) -> str:
 
 
 def verify_evaluation_universe_fingerprint(universe: EvaluationUniverse) -> str:
-    """Recompute the digest and refuse a universe that misstates its own."""
+    """Re-establish the structure, then recompute the digest, or refuse.
+
+    Both halves, in that order, because either alone is insufficient. A digest
+    check catches an artefact that changed after it was digested; a structural
+    check catches one that was wrong when it was digested. A universe with a
+    repeated member whose fingerprint was recomputed over the repetition passes
+    the first and fails the second, and it is the second that keeps a
+    denominator honest.
+    """
+    validate_evaluation_universe_structure(universe)
     recomputed = evaluation_universe_fingerprint(universe)
     if recomputed != universe.fingerprint:
         raise EvaluationBindingError(
@@ -154,7 +173,13 @@ def evaluation_ranking_fingerprint(ranking: EvaluationRanking) -> str:
 
 
 def verify_evaluation_ranking_fingerprint(ranking: EvaluationRanking) -> str:
-    """Recompute the digest and refuse a ranking that misstates its own."""
+    """Re-establish the structure, then recompute the digest, or refuse.
+
+    As above: a ranking with two firsts, re-digested, is a valid fingerprint
+    over an invalid ordering, and every "top K" taken from it would be a
+    different set from the one it claims to be.
+    """
+    validate_evaluation_ranking_structure(ranking)
     recomputed = evaluation_ranking_fingerprint(ranking)
     if recomputed != ranking.fingerprint:
         raise EvaluationBindingError(
