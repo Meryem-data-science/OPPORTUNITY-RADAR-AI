@@ -74,6 +74,7 @@ from evaluation.metrics import (
     require_evidence_class,
     universe_judged_coverage,
     verify_evaluation_run,
+    verify_metric_run_context,
     verify_evaluation_run_structure,
     verify_label_coverage,
 )
@@ -714,10 +715,67 @@ def test_a_universe_naming_a_posting_the_snapshot_does_not_hold_is_refused(
         )
 
 
+def test_a_hand_built_context_is_verified_by_the_gate_itself(
+    frozen, labels_root
+):
+    """Real files, `build_metric_run_context` bypassed, gate still refuses.
+
+    `MetricRunContext` is a public dataclass, so the test constructs one
+    directly around a re-digested invalid run. Nothing in this test calls a
+    verifier; the gate does, which is what makes the verification unavoidable.
+    """
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
+
+    members = run.universe.opportunity_ids[:-1] + (999,)
+    universe = replace(
+        run.universe,
+        kind=EvaluationUniverseKind.FIXED_BENCHMARK_POOL,
+        opportunity_ids=members,
+        size=len(members),
+    )
+    universe = replace(
+        universe, fingerprint=evaluation_universe_fingerprint(universe)
+    )
+    forged = replace(run, universe=universe)
+    forged = replace(forged, run_fingerprint=evaluation_run_fingerprint(forged))
+
+    context = MetricRunContext(dataset=frozen, run=forged, coverage=coverage)
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+            gate(context, 10)
+
+
+def test_a_hand_built_context_cannot_override_a_real_labelset_mismatch(
+    frozen, labels_root
+):
+    """Two real labelsets over one dataset, bundled by hand: still N_A."""
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    run = run_for(frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen)))
+    other_lot = coverage_from_disk(frozen, labels_root, lot_of(frozen, 4))
+    assert other_lot.labelset_fingerprint != run.labelset_fingerprint
+
+    context = MetricRunContext(dataset=frozen, run=run, coverage=other_lot)
+    assert verify_metric_run_context(context) is False
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        availability = gate(context, 10)
+        assert not availability.available
+        assert availability.reason is MetricUnavailableReason.LABELSET_BINDING_MISMATCH
+
+
 def test_a_gate_cannot_be_reached_with_a_re_sealed_invalid_run(
     frozen, labels_root
 ):
-    """No verifier is called here: the gate's argument simply cannot be built."""
+    """The builder refuses the same forgery, before any gate is reached."""
     record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
     run = run_for(frozen, coverage)

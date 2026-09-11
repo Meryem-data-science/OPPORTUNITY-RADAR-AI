@@ -63,8 +63,13 @@ names a real posting, because a SHA-256 identifies content it does not hold. The
 dataset-bound verifiers — `verify_evaluation_run(run, dataset)`,
 `verify_label_coverage(coverage, dataset)` — take the verified frozen dataset
 and ask it: every universe and ranking id is in the cohort, and the calibration
-lot is redrawn by Phase 10.2's own selector. `build_metric_run_context` runs all
-of it, and is the only source of the context an availability gate accepts.
+lot is redrawn by Phase 10.2's own selector. `verify_metric_run_context` runs all of
+it over a context bundle — the dataset, the run and the coverage — and **every
+availability gate calls it first**. A `MetricRunContext` is a public dataclass,
+so holding one proves nothing and nothing is inferred from it; the verification
+is unavoidable because the gate performs it, not because the argument is hard to
+construct. The labelset-match state the gates use is that verifier's return
+value, derived from two verified artefacts rather than set by a caller.
 
 **Nothing declares its own identity.** A universe, a ranking and a run each
 carry a fingerprint field, and every one of them is recomputed before it is
@@ -120,6 +125,7 @@ from .run import (
     verify_evaluation_run_structure,
     verify_label_coverage,
     verify_label_coverage_structure,
+    verify_metric_run_context,
 )
 from .schema import (
     BINARY_RELEVANCE_GRADE_NAME,
@@ -252,4 +258,5 @@ __all__ = [
     "verify_evaluation_universe_fingerprint",
     "verify_label_coverage",
     "verify_label_coverage_structure",
+    "verify_metric_run_context",
 ]

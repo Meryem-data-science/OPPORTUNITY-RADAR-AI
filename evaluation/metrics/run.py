@@ -120,6 +120,7 @@ __all__ = [
     "verify_evaluation_run_structure",
     "verify_label_coverage",
     "verify_label_coverage_structure",
+    "verify_metric_run_context",
 ]
 
 
@@ -1085,36 +1086,45 @@ def verify_evaluation_run(
 
 
 # --------------------------------------------------------------------------
-# the verified context an availability gate decides in
+# the context an availability gate decides in, and its verification
 # --------------------------------------------------------------------------
 
 
-def build_metric_run_context(
-    *,
-    dataset: FrozenEvaluationDataset,
-    run: EvaluationRunContract,
-    coverage: LabelCoverage,
-) -> MetricRunContext:
-    """Verify a run and its evidence together, and hand back the proof.
+def verify_metric_run_context(context: MetricRunContext) -> bool:
+    """Re-establish a whole availability decision's inputs, and say what they are.
 
-    The only way to obtain a `MetricRunContext`, and therefore the only way to
-    reach an availability gate. That is the design: the gates used to take a
-    run, which meant they took an object anybody could construct with valid
-    fingerprints over an invalid structure, and the only defence was a sentence
-    in a docstring telling callers to verify first. A sentence is not a defence.
+    Returns the **derived** labelset-match state: whether the coverage is the
+    labelset the run declares, decided from the two verified artefacts and never
+    read from a field a caller could set.
 
-    Verified here, in order: the run in full against the frozen dataset, the
-    coverage in full against the same dataset — lot redrawn included — and then
-    that the labels and the run are about the same snapshot and the same person.
+    This is the function that makes verification unavoidable. A
+    `MetricRunContext` is a public dataclass and anybody can construct one — so
+    nothing is inferred from the fact that one exists. Every gate calls this
+    before reading a ranking, a universe, a grade or a labelset identity, and it
+    redoes the work from scratch:
 
-    The one difference that is *not* an error: the coverage may be a different
-    *labelset* from the one the run declares. That is a well-formed question
-    this evidence cannot answer rather than a broken artefact, so it is recorded
-    as `labelset_matches=False` and the gates report
-    `N_A / LABELSET_BINDING_MISMATCH`.
+    1. the argument really is a context bundle;
+    2. `verify_evaluation_run(run, dataset)` — the full, dataset-bound run
+       verification: contract versions, structure, digests, membership;
+    3. `verify_label_coverage(coverage, dataset)` — the full, dataset-bound
+       evidence verification, lot redrawn by Phase 10.2's own selector;
+    4. the run and the coverage agree about the snapshot and the person;
+    5. the labelset-match state, derived last, from artefacts that have passed
+       everything above.
+
+    It costs a re-verification per gate, which is the intended trade: three
+    digests over a few hundred labels is cheap, and a decision that silently
+    trusted its inputs is not.
     """
-    verify_evaluation_run(run, dataset)
-    verify_label_coverage(coverage, dataset)
+    if not isinstance(context, MetricRunContext):
+        raise EvaluationBindingError(
+            f"{context!r} is not a metric run context; an availability decision "
+            "is made about a frozen dataset, a run and a labelset together"
+        )
+    verify_evaluation_run(context.run, context.dataset)
+    verify_label_coverage(context.coverage, context.dataset)
+    run = context.run
+    coverage = context.coverage
     for name, on_run, on_coverage in (
         ("dataset_id", run.dataset_id, coverage.dataset_id),
         (
@@ -1134,11 +1144,29 @@ def build_metric_run_context(
                 f"the labels were made against {name} {on_coverage!r} and the "
                 f"run measures {on_run!r}"
             )
-    return MetricRunContext(
-        run=run,
-        coverage=coverage,
-        labelset_matches=(
-            coverage.labelset_fingerprint == run.labelset_fingerprint
-            and coverage.label_protocol_version == run.label_protocol_version
-        ),
+    # Derived here, from two verified artefacts, and returned rather than
+    # stored: there is no boolean anywhere a caller could set to make a
+    # different labelset look like the right one.
+    return (
+        coverage.labelset_fingerprint == run.labelset_fingerprint
+        and coverage.label_protocol_version == run.label_protocol_version
     )
+
+
+def build_metric_run_context(
+    *,
+    dataset: FrozenEvaluationDataset,
+    run: EvaluationRunContract,
+    coverage: LabelCoverage,
+) -> MetricRunContext:
+    """Bundle a run with its evidence, verified, ready for the gates.
+
+    The convenient constructor, and nothing more than that: it assembles the
+    context and runs `verify_metric_run_context` over it, so a caller finds out
+    here rather than at the first gate. It is **not** a privileged path — the
+    gates verify whatever they are given, so a context built by hand is equally
+    safe and equally checked.
+    """
+    context = MetricRunContext(dataset=dataset, run=run, coverage=coverage)
+    verify_metric_run_context(context)
+    return context

@@ -36,6 +36,7 @@ from evaluation.labeling import (
     labelset_fingerprint,
     select_calibration_sample,
 )
+from evaluation.dataset import EvaluationDatasetError
 from evaluation.metrics import (
     EVALUATION_RANKING_VERSION,
     EVALUATION_RUN_SCHEMA_VERSION,
@@ -58,6 +59,7 @@ from evaluation.metrics import (
     MetricContractError,
     MetricName,
     MetricResult,
+    MetricRunContext,
     MetricStatus,
     MetricSupport,
     MetricUnavailableReason,
@@ -91,6 +93,7 @@ from evaluation.metrics import (
     verify_evaluation_run_structure,
     verify_label_coverage,
     verify_label_coverage_structure,
+    verify_metric_run_context,
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -1465,8 +1468,8 @@ def test_a_gate_cannot_be_reached_with_a_re_sealed_invalid_run(dataset, forge):
         )
 
 
-def test_a_gate_takes_a_context_and_not_a_run(dataset):
-    """Stated as a signature, not as a docstring asking callers to be careful."""
+def test_a_gate_refuses_anything_that_is_not_a_context(dataset):
+    """Refused by the gate's own verifier, in this package's own vocabulary."""
     coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
     run = run_over(dataset, coverage=coverage)
     for gate in (
@@ -1474,10 +1477,161 @@ def test_a_gate_takes_a_context_and_not_a_run(dataset):
         recall_at_k_availability,
         ndcg_at_k_availability,
     ):
-        parameters = list(inspect.signature(gate).parameters)
-        assert parameters == ["context", "k"]
-        with pytest.raises(AttributeError):
+        assert list(inspect.signature(gate).parameters) == ["context", "k"]
+        with pytest.raises(EvaluationBindingError, match="not a metric run context"):
             gate(run, 10)
+        with pytest.raises(EvaluationBindingError, match="not a metric run context"):
+            gate(None, 10)
+
+
+# --------------------------------------------------------------------------
+# a hand-built context is allowed to exist, and proves nothing
+# --------------------------------------------------------------------------
+
+
+def test_the_context_carries_no_caller_supplied_verdict():
+    """There is no boolean to set, and nothing to overwrite after the fact.
+
+    `labelset_matches` is a derived property, not a constructor field: the shape
+    that used to let a forged context assert its own conclusion is gone, and the
+    gates take the value the verifier returns rather than reading the property
+    at all.
+    """
+    parameters = list(inspect.signature(MetricRunContext).parameters)
+    assert parameters == ["dataset", "run", "coverage"]
+    assert "labelset_matches" not in parameters
+    assert isinstance(MetricRunContext.__dict__["labelset_matches"], property)
+
+
+def test_a_hand_built_context_around_an_invalid_run_is_refused_by_every_gate(
+    dataset,
+):
+    """Blocker: `build_metric_run_context` is bypassed entirely.
+
+    The run is forged into an invalid structure and every fingerprint — the
+    universe's and the enclosing run's — is recomputed around it. The context is
+    then constructed directly. No verifier is called by this test; the gates
+    call one, which is the whole point.
+    """
+    coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
+    forged = resealed_universe(run, opportunity_ids=(1, 1, 2), size=3)
+    context = MetricRunContext(dataset=dataset, run=forged, coverage=coverage)
+
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        with pytest.raises(EvaluationMetricsError, match="repeats opportunity ids"):
+            gate(context, 10)
+
+
+def test_a_hand_built_context_around_an_absent_opportunity_is_refused(dataset):
+    """The same, for the membership hole only the snapshot can see."""
+    coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
+    members = run.universe.opportunity_ids[:-1] + (999,)
+    forged = resealed_universe(
+        run,
+        kind=EvaluationUniverseKind.FIXED_BENCHMARK_POOL,
+        opportunity_ids=members,
+        size=len(members),
+    )
+    context = MetricRunContext(dataset=dataset, run=forged, coverage=coverage)
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+            gate(context, 10)
+
+
+def test_a_hand_built_context_cannot_override_a_labelset_mismatch(dataset):
+    """The second half of the blocker: no flag can make a foreign labelset fit.
+
+    The run is bound to labelset A; the coverage is a perfectly valid labelset B
+    over the same dataset and profile. The context is built by hand, and the
+    conclusion is still `N_A / LABELSET_BINDING_MISMATCH` — because the gates use
+    what the verifier derives from the two artefacts, and there is no field to
+    contradict it with.
+    """
+    grades = dict.fromkeys(range(1, 21), 3)
+    run = run_over(dataset, coverage=coverage_of(grades, dataset))
+    other_lot = coverage_of(
+        grades,
+        dataset,
+        selection=select_calibration_sample(dataset, sample_size=6),
+    )
+    assert other_lot.labelset_fingerprint != run.labelset_fingerprint
+
+    context = MetricRunContext(dataset=dataset, run=run, coverage=other_lot)
+    assert not context.labelset_matches
+    assert verify_metric_run_context(context) is False
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        availability = gate(context, 10)
+        assert not availability.available
+        assert availability.reason is MetricUnavailableReason.LABELSET_BINDING_MISMATCH
+
+    # And the property cannot be overwritten to say otherwise either.
+    with pytest.raises((AttributeError, FrozenInstanceError)):
+        context.labelset_matches = True
+
+
+def test_a_hand_built_context_for_another_dataset_is_refused(dataset):
+    """Direct construction does not bypass the dataset and profile bindings."""
+    coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
+    run = run_over(dataset, coverage=coverage)
+    other = ranked_dataset(dataset_id="evaluation-dataset-v3-" + "c" * 16)
+
+    with pytest.raises(EvaluationDatasetError):
+        precision_at_k_availability(
+            MetricRunContext(dataset=other, run=run, coverage=coverage), 10
+        )
+    other_coverage = coverage_of(dict.fromkeys(range(1, 21), 2), other)
+    with pytest.raises(EvaluationDatasetError):
+        ndcg_at_k_availability(
+            MetricRunContext(dataset=dataset, run=run, coverage=other_coverage), 10
+        )
+    profile_other = ranked_dataset(profile_context_fingerprint="4" * 64)
+    with pytest.raises(EvaluationDatasetError):
+        recall_at_k_availability(
+            MetricRunContext(
+                dataset=profile_other,
+                run=run,
+                coverage=coverage_of({1: 2}, profile_other),
+            ),
+            10,
+        )
+
+
+def test_a_hand_built_context_around_verified_artefacts_behaves_exactly_as_built(
+    dataset,
+):
+    """Symmetry: the builder is a convenience, not a privilege.
+
+    A context assembled by hand around artefacts that *are* sound decides
+    exactly what the builder's context decides. Verification is what differs
+    between contexts, not provenance.
+    """
+    grades = {index: (3 if index <= 4 else 0) for index in range(1, 21)}
+    coverage = coverage_of(grades, dataset)
+    run = run_over(dataset, coverage=coverage)
+    built = build_metric_run_context(dataset=dataset, run=run, coverage=coverage)
+    by_hand = MetricRunContext(dataset=dataset, run=run, coverage=coverage)
+
+    for gate in (
+        precision_at_k_availability,
+        recall_at_k_availability,
+        ndcg_at_k_availability,
+    ):
+        assert gate(built, 10) == gate(by_hand, 10)
+        assert gate(built, 10).available
 
 
 def test_the_builders_and_the_verifier_hold_one_contract(dataset):

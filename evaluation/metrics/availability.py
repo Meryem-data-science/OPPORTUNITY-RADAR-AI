@@ -8,13 +8,15 @@ Phase 10.3a builds the gate and Phase 10.3b walks through it.
 The gates are pure and deterministic: same artefacts in, same decision out, no
 file read, no clock, no database, no randomness.
 
-**They take a verified context, never a bare run.** A `MetricRunContext` comes
-only from `run.build_metric_run_context`, which requires the frozen dataset and
-fully verifies both the run and the label coverage against it first — structure,
-digests, dataset membership, the calibration lot redrawn. So a reconstructed run
-carrying perfectly recomputed fingerprints over an invalid universe or ranking
-cannot reach a gate at all; it fails where it is assembled, without any caller
-having to remember to call a verifier.
+**They verify their own inputs, every time.** A gate takes a
+`MetricRunContext` — the frozen dataset, the run and the label coverage
+together — and its first act is `verify_metric_run_context`, which re-establishes
+the run and the evidence against that dataset from scratch: structure, digests,
+dataset membership, the calibration lot redrawn. Nothing is inferred from the
+type of the argument, because `MetricRunContext` is a public dataclass anybody
+can construct; a context assembled by hand around a re-digested invalid run is
+refused by the gate itself, and there is no caller-supplied flag that can make a
+foreign labelset look like the run's.
 
 ## What is counted, and why counting it is not a metric
 
@@ -83,6 +85,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
+from .run import verify_metric_run_context
 from .schema import (
     EvaluationBindingError,
     EvaluationRanking,
@@ -207,16 +210,17 @@ def top_k_judged_coverage(
 # the gates
 # --------------------------------------------------------------------------
 #
-# Every gate takes a `MetricRunContext` and never a bare run, and that is not a
-# convenience: a `MetricRunContext` can only come from
-# `run.build_metric_run_context`, which requires the verified frozen dataset and
-# runs the full verification of both the run and the coverage before it returns.
-# A gate that accepted an `EvaluationRunContract` would read `run.ranking` and
-# `run.universe` out of an object anybody can build — the dataclass is public,
-# and its fingerprints can be recomputed over an invalid structure — with
-# nothing but a docstring asking callers to verify first. This way the
-# verification is not something a caller remembers to do; it is the only way to
-# obtain the argument.
+# Every gate begins with `verify_metric_run_context`, and that call — not the
+# type of the argument — is what makes verification unavoidable.
+#
+# A `MetricRunContext` is a public dataclass: `MetricRunContext(...)` is a
+# constructor call anybody can make, so holding one proves nothing and the gates
+# infer nothing from it. What the context *is* is a bundle carrying the frozen
+# dataset alongside the run and the coverage, which is exactly what is needed to
+# re-establish both from scratch. So the first thing every gate does is redo the
+# full dataset-bound verification of the run and of the evidence, and the
+# labelset-match state it then uses is the value that verifier **returns** —
+# derived from two verified artefacts, never a boolean a caller could set.
 
 
 def _support(
@@ -264,9 +268,11 @@ def precision_at_k_availability(
     Available only when every position of the effective top K carries a
     judgement. An unjudged item there cannot be counted as a hit and must not be
     counted as a miss, and there is no third option that is honest.
+
+    The context is fully re-verified first, however it was obtained.
     """
     k_requested = validate_k(k)
-    if not context.labelset_matches:
+    if not verify_metric_run_context(context):
         return _binding_mismatch_availability(
             MetricName.PRECISION_AT_K, context, k_requested
         )
@@ -294,9 +300,11 @@ def recall_at_k_availability(
     Available only when the declared universe is closed and fully judged, so the
     total number of relevant items is a fact rather than a lower bound, and only
     when that total is not zero.
+
+    The context is fully re-verified first, however it was obtained.
     """
     k_requested = validate_k(k)
-    if not context.labelset_matches:
+    if not verify_metric_run_context(context):
         return _binding_mismatch_availability(
             MetricName.RECALL_AT_K, context, k_requested
         )
@@ -337,9 +345,11 @@ def ndcg_at_k_availability(
     top K is deliberately **not** sufficient: the ideal ordering is drawn from
     the best grades anywhere in the comparison universe, so an unjudged tail
     understates the IDCG and therefore overstates the ratio.
+
+    The context is fully re-verified first, however it was obtained.
     """
     k_requested = validate_k(k)
-    if not context.labelset_matches:
+    if not verify_metric_run_context(context):
         return _binding_mismatch_availability(
             MetricName.NDCG_AT_K, context, k_requested
         )

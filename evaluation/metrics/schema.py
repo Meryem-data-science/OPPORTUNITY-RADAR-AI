@@ -60,6 +60,7 @@ from evaluation.labeling import (
     RELEVANCE_GRADE_NAMES,
     SUPPORTED_PROTOCOL_VERSIONS,
     CalibrationSelection,
+    FrozenEvaluationDataset,
     HumanLabelError,
     HumanRelevanceLabel,
     validate_relevance_grade,
@@ -1268,31 +1269,42 @@ def evaluation_run_payload(
 
 @dataclass(frozen=True)
 class MetricRunContext:
-    """A run, its evidence, and the proof that both were checked together.
+    """Everything one availability decision is about, in one argument.
 
-    The availability gates take **this** and never a bare run, and that is the
-    whole reason the type exists. A gate that accepted an
-    `EvaluationRunContract` would be reading `run.ranking` and `run.universe`
-    out of an object anybody can construct: the dataclass is public, its
-    fingerprints can be recomputed over an invalid structure, and a comment
-    telling callers to verify first is not a check. Making the context the only
-    thing a gate accepts moves that from a convention to a type.
+    **Not a proof token.** An earlier version of this type claimed that holding
+    one meant the run and the evidence had been verified, because only
+    `run.build_metric_run_context` produced it. That claim was false: this is a
+    public dataclass, and `MetricRunContext(...)` is a constructor call anybody
+    can make. Worse, it carried a caller-supplied `labelset_matches` boolean, so
+    a forged context could assert that a labelset it was not bound to was the
+    right one and walk past `LABELSET_BINDING_MISMATCH`. Python dataclass
+    construction is not a capability boundary and pretending otherwise put the
+    whole guarantee on an assumption.
 
-    It is produced solely by `run.build_metric_run_context`, which requires the
-    verified `FrozenEvaluationDataset` and runs the full, dataset-bound
-    verification of the run and of the coverage before returning. Holding one is
-    therefore holding a statement that has been established, not asserted.
+    So the type makes no claim at all now. It is a **bundle**: the frozen
+    dataset, the run, and the coverage — everything needed to verify itself.
+    Constructing one by hand is allowed and harmless, because it establishes
+    nothing: every gate calls `run.verify_metric_run_context` before reading a
+    ranking, a universe, a grade or a labelset identity, and that verifier
+    re-establishes the run and the coverage against the dataset from scratch.
+    Verification is unavoidable because the gate performs it, not because the
+    argument is hard to build.
 
-    `labelset_matches` is the one disagreement that is *not* an error. A
-    coverage over the right dataset and profile whose labelset identity is not
-    the one the run declares is a well-formed question this evidence cannot
-    answer, and the gates report it as `N_A / LABELSET_BINDING_MISMATCH` rather
-    than refusing to be constructed.
+    `labelset_matches` is **derived** from the run and the coverage — equal
+    labelset fingerprints and equal label protocols — and is not a field. There
+    is no boolean a caller can set to change a conclusion. It is a property here
+    for readability; the gates use the value `verify_metric_run_context`
+    returns, computed after both artefacts have been verified.
+
+    A labelset difference is the one disagreement that is not an error: a
+    coverage over the right dataset and profile whose identity is not the one
+    the run declares is a well-formed question this evidence cannot answer, so
+    the gates report `N_A / LABELSET_BINDING_MISMATCH` rather than refusing.
     """
 
+    dataset: FrozenEvaluationDataset
     run: EvaluationRunContract
     coverage: LabelCoverage
-    labelset_matches: bool
 
     @property
     def universe(self) -> EvaluationUniverse:
@@ -1301,6 +1313,21 @@ class MetricRunContext:
     @property
     def ranking(self) -> EvaluationRanking:
         return self.run.ranking
+
+    @property
+    def labelset_matches(self) -> bool:
+        """Is the evidence the labelset the run declares? Derived, never set.
+
+        Readable without verification because it is only a comparison of what
+        the two objects say; the gates do not take it from here, they take the
+        value `verify_metric_run_context` returns once both have been
+        re-established against the dataset.
+        """
+        return (
+            self.coverage.labelset_fingerprint == self.run.labelset_fingerprint
+            and self.coverage.label_protocol_version
+            == self.run.label_protocol_version
+        )
 
 
 def canonical_opportunity_ids(values: Sequence[int]) -> tuple[int, ...]:
