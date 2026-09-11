@@ -82,9 +82,11 @@ __all__ = ["main", "parse_args"]
 #: Printed by `verify` and `progress` so nobody has to read this package's
 #: source to learn that the rubric is still a draft.
 _PROTOCOL_STATUS = (
-    "CALIBRATION — this protocol is not frozen. A human-relevance-v1 can only "
-    "be declared after a real calibration round has been annotated and its "
-    "ambiguous cases reviewed."
+    "CALIBRATION — labels here are recorded under "
+    "human-relevance-calibration-v0. The final rubric human-relevance-v1 is "
+    "frozen (see PROTOCOL.md), but no label carries it and this build does not "
+    "read one: a calibration history and a v1 benchmark are not the same "
+    "artefact and are never mixed."
 )
 
 

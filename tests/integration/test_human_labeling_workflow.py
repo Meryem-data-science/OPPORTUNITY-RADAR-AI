@@ -38,6 +38,7 @@ from evaluation.dataset import (
 )
 from evaluation.labeling import (
     CALIBRATION_SELECTOR_VERSION,
+    FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION,
     HUMAN_LABEL_PROTOCOL_VERSION,
     HUMAN_LABEL_SCHEMA_VERSION,
     RELEVANCE_GRADE_NAMES,
@@ -818,7 +819,10 @@ def test_a_labelset_manifest_states_the_protocol_is_not_frozen(
     result = write_labelset_manifest(report, labels_root)
     payload = json.loads(result.path.read_text(encoding="utf-8"))
     assert payload["protocol_version"] == "human-relevance-calibration-v0"
-    assert "not frozen" in payload["protocol_status"]
+    # The manifest says which rubric produced these judgements and that the
+    # frozen one did not: a calibration artefact must not read as a benchmark.
+    assert "CALIBRATION" in payload["protocol_status"]
+    assert "no label carries it" in payload["protocol_status"]
     assert payload["judged_count"] == 0
     assert payload["unjudged_count"] == 3
     assert write_labelset_manifest(report, labels_root).status == "UPDATED"
@@ -1476,6 +1480,148 @@ def test_the_cli_refuses_a_selection_the_selector_would_not_have_drawn(
 
 
 # --------------------------------------------------------------------------
+# the frozen v1 contract does not disturb the calibration audit trail
+# --------------------------------------------------------------------------
+
+
+def test_calibration_v0_artefacts_stay_readable_and_auditable(
+    frozen: Path, labels_root: Path
+):
+    """Freezing v1 changed no stored row and no stored reading of one.
+
+    The shape mirrors the real calibration round — a relabel at revision 2
+    leaving two rows for one judgement — with invented opportunities. What is
+    asserted is that such a history still parses, still validates, still reports
+    and still says `calibration-v0` afterwards.
+    """
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 3)
+    first, second, third = selection.opportunity_ids
+
+    append_human_label(
+        dataset, opportunity_id=first, relevance_grade=0, root=labels_root
+    )
+    append_human_label(
+        dataset, opportunity_id=second, relevance_grade=2, root=labels_root
+    )
+    append_human_label(
+        dataset,
+        opportunity_id=first,
+        relevance_grade=1,
+        relabel=True,
+        relabel_reason="the rubric was clarified after this judgement",
+        root=labels_root,
+    )
+    append_human_label(
+        dataset, opportunity_id=third, relevance_grade=0, root=labels_root
+    )
+
+    history = read_validated_label_history(dataset, labels_root)
+    assert len(history) == 4
+    assert {item.protocol_version for item in history} == {
+        HUMAN_LABEL_PROTOCOL_VERSION
+    }
+    effective = resolve_effective_labels(history)
+    assert len(effective) == 3
+    assert effective[first].revision == 2
+    assert effective[first].relevance_grade == 1
+
+    report = build_labelset_report(dataset, selection, labels_root)
+    assert report.protocol_version == HUMAN_LABEL_PROTOCOL_VERSION
+    assert report.judged_count == 3
+    assert report.unjudged_count == 0
+    # One relabel: more audit rows than judgements, exactly as the real round.
+    assert report.revision_count == 4
+
+
+def test_recording_a_new_judgement_never_migrates_an_existing_row(
+    frozen: Path, labels_root: Path
+):
+    """No silent v0 -> v1 rewrite, checked on the bytes.
+
+    The frozen contract is a definition sitting in the source tree. It must not
+    reach a stored row by any path, least of all as a side effect of recording
+    an unrelated judgement.
+    """
+    dataset = read_frozen_dataset(frozen)
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    append_human_label(
+        dataset, opportunity_id=1, relevance_grade=2, root=labels_root
+    )
+    before = path.read_text(encoding="utf-8").splitlines()
+
+    append_human_label(
+        dataset, opportunity_id=2, relevance_grade=0, root=labels_root
+    )
+    after = path.read_text(encoding="utf-8").splitlines()
+
+    assert after[: len(before)] == before
+    text = path.read_text(encoding="utf-8")
+    assert FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION not in text
+    assert text.count(HUMAN_LABEL_PROTOCOL_VERSION) == 2
+
+
+def test_a_v1_row_is_refused_rather_than_accepted_into_a_calibration_history(
+    frozen: Path, labels_root: Path
+):
+    """A row claiming the frozen protocol does not belong in this file."""
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(
+        dataset,
+        labels_root,
+        [_row(dataset, protocol_version=FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION)],
+    )
+    with pytest.raises(HumanLabelError, match="another protocol"):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+def test_a_history_mixing_calibration_and_frozen_rows_is_refused_whole(
+    frozen: Path, labels_root: Path
+):
+    """Two rubrics in one file is not a history, and half of one is not either.
+
+    The v0 row on its own is perfectly good. It is still refused here, because
+    what is being read is the file, and this file holds judgements of two
+    different questions with nothing to tell them apart.
+    """
+    dataset = read_frozen_dataset(frozen)
+    path = _write_rows(
+        dataset,
+        labels_root,
+        [
+            _row(dataset, opportunity_id=1),
+            _row(
+                dataset,
+                opportunity_id=2,
+                protocol_version=FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION,
+            ),
+        ],
+    )
+    before = path.read_bytes()
+    with pytest.raises(HumanLabelError, match="another protocol"):
+        read_label_history(dataset.dataset_id, labels_root)
+    with pytest.raises(HumanLabelError, match="another protocol"):
+        append_human_label(
+            dataset, opportunity_id=3, relevance_grade=2, root=labels_root
+        )
+    # Refused, not repaired: neither row was rewritten, dropped or converted.
+    assert path.read_bytes() == before
+
+
+def test_a_v1_selection_artefact_is_refused_too(frozen: Path, labels_root: Path):
+    """The separation is not only about labels: a lot names its protocol too."""
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 3), labels_root
+    )
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    payload["protocol_version"] = FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION
+    result.path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(HumanLabelError, match="another protocol"):
+        load_calibration_selection(result.path)
+
+
+# --------------------------------------------------------------------------
 # the CLI
 # --------------------------------------------------------------------------
 
@@ -1495,7 +1641,8 @@ def test_the_cli_verifies_selects_shows_labels_and_reports(
     assert code == 0
     assert verified["integrity"] == "VERIFIED"
     assert verified["protocol_version"] == "human-relevance-calibration-v0"
-    assert "not frozen" in verified["protocol_status"]
+    assert "CALIBRATION" in verified["protocol_status"]
+    assert "no label carries it" in verified["protocol_status"]
 
     code, selected = run(capsys, "select", *common, "--sample-size", "4")
     assert code == 0

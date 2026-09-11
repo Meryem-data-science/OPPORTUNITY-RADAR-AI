@@ -86,8 +86,17 @@ HUMAN_LABEL_SCHEMA_VERSION = "human-label-v1"
 #: the rubric they were produced under differs, and comparing them would be
 #: comparing two questions rather than two answers.
 #:
-#: `v0` is a calibration protocol. It is not, and must not be reported as, the
-#: final human protocol of Phase 10.
+#: `v0` is the calibration protocol, and it is what the **writer records** and
+#: the reader interprets: every label that exists was made under it.
+#:
+#: The *semantic* contract frozen after calibration is a different string —
+#: `rubric.FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION`, `human-relevance-v1` — and
+#: the two are deliberately not unified here. Switching this constant to v1
+#: would either rewrite the recorded protocol of labels that were not made under
+#: it, or append v1 rows into a file of v0 rows and leave one history holding
+#: judgements of two different rubrics. Neither is acceptable for an audit
+#: trail, and separating the two histories properly is a storage question this
+#: slice does not answer.
 HUMAN_LABEL_PROTOCOL_VERSION = "human-relevance-calibration-v0"
 
 
@@ -99,6 +108,11 @@ HUMAN_LABEL_PROTOCOL_VERSION = "human-relevance-calibration-v0"
 #: judgement of one question reported as a judgement of another. Widening this
 #: tuple is therefore a deliberate act that must come with a stated compatibility
 #: policy — never a side effect of bumping a version string.
+#:
+#: `human-relevance-v1` is now frozen semantically (see `rubric.py`) and is
+#: still **absent from this tuple on purpose**. No label carries it, and until a
+#: v1 labelset is stored separately from the calibration history, a row claiming
+#: it is a row that does not belong in the file it was found in.
 SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (HUMAN_LABEL_PROTOCOL_VERSION,)
 
 

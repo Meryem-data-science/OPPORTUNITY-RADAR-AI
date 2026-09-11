@@ -1,18 +1,69 @@
-# Human relevance labelling protocol — `human-relevance-calibration-v0`
+# Human relevance labelling protocol
 
-**Status: CALIBRATION. This protocol is not frozen.**
-A `human-relevance-v1` can only be declared after a small lot has actually been
-annotated on the operator's machine and its ambiguous cases have been reviewed.
-Until then every artefact produced under it carries `v0`, and no measurement
-computed from it may be presented as a settled benchmark.
+Two versions live in this document, and keeping them apart is the point.
+
+| | `human-relevance-calibration-v0` | `human-relevance-v1` |
+|---|---|---|
+| What it is | the protocol the **writer records** and the reader interprets | the **frozen semantic contract** |
+| Status | calibration round **completed locally**, AI-assisted with human validation | semantics **frozen** after that round |
+| Labels carrying it | every label that exists | **none** — no judgement has been made under it |
+| Accepted by the label reader | yes | **no**, deliberately |
+| Where it lives | `schema.HUMAN_LABEL_PROTOCOL_VERSION` | `rubric.FROZEN_HUMAN_RELEVANCE_PROTOCOL_VERSION` |
 
 | | |
 |---|---|
 | Label schema version | `human-label-v1` |
-| Protocol version | `human-relevance-calibration-v0` |
 | Blind view version | `blind-evidence-v1` |
 | Selector version | `calibration-selector-v0` |
 | Selection artefact schema | `evaluation-calibration-selection-v0` |
+
+## 0. Calibration — `human-relevance-calibration-v0`
+
+A real calibration round has been run, on the operator's machine, against the
+frozen dataset and the labels under `data/`. Neither exists in any development
+container, and nothing in this repository has read those labels: the digests and
+counts recorded in `rubric.CALIBRATION_V0_PROVENANCE` are what that round
+reported, carried here as provenance rather than as a verification performed
+here.
+
+* 12 opportunities judged, 0 unjudged;
+* 13 audit rows — one opportunity was explicitly relabelled at revision 2 after
+  the rubric was clarified, and both rows remain in the trail. That relabel is
+  the calibration doing its job;
+* distribution: OUT_OF_TARGET 7, WEAKLY_RELEVANT 2, RELEVANT 3,
+  VERY_RELEVANT 0.
+
+**The round was AI-assisted with final human validation.** A model proposed a
+reading of each posting and the operator decided every grade. That is a
+legitimate way to find out whether a rubric is usable — it is what surfaced the
+actionability rule and the hard-constraint rule below — and it is **not**:
+
+* an independent human benchmark;
+* an inter-annotator agreement study;
+* an independent gold-standard holdout.
+
+A holdout intended to *evaluate* the pipeline must not let a model propose the
+grade before the person forms one, or the two are no longer independent and what
+gets measured is the model agreeing with itself.
+
+## 0b. Final frozen rubric — `human-relevance-v1`
+
+Frozen after that round. Its semantics are in `rubric.py` and in §2 below.
+
+**No label carries `human-relevance-v1`, and none can yet.** The writer still
+records `calibration-v0`, `SUPPORTED_PROTOCOL_VERSIONS` still contains only
+`calibration-v0`, and a row claiming v1 is refused on read. That is deliberate:
+switching the writer would either rewrite what the existing labels say they
+answered, or append v1 rows behind v0 rows and leave one history holding
+judgements of two different questions. A real v1 benchmark will need a labelset
+explicitly separated from the calibration history — a storage question, and not
+this slice's.
+
+What the freeze changed: the **question**, not the scale. Same four integers,
+same four names. Under v0 the rubric effectively asked how close a posting
+looked to Data/AI. v1 asks whether the opportunity is **actually actionable for
+the profile and preferences the dataset is frozen against**, with lexical
+proximity to Data/AI as evidence toward that and never a substitute for it.
 
 ---
 
@@ -28,23 +79,77 @@ the location text, the posting's own description, the dates, the URLs and where
 it was collected — and never by re-reading the live database or following a link
 that may since have changed.
 
-## 2. The rubric
+## 2. The rubric — frozen as `human-relevance-v1`
+
+An opportunity is judged on its **actually actionable relevance for the frozen
+profile and preferences**, not on its lexical proximity to Data/AI.
+
+### 2.1 Hard constraints
+
+Some requirements are not tradeable: a posting that **explicitly** contradicts
+one is out of target however well it matches on everything else. Which
+requirements are hard is declared by the profile and preferences behind
+`profile_context_fingerprint` — the protocol names only *kinds* of constraint
+and never a country, a city, a level or a language, because a protocol that
+hard-coded one profile's geography would be a protocol for one person.
+
+`rubric.HardConstraintKind`:
+
+| Kind | What the profile declares as non-tradeable |
+|---|---|
+| `TARGET_GEOGRAPHY` | where the work is: country, region, on-site city, whether remote from elsewhere is acceptable |
+| `TARGET_LEVEL` | seniority and kind of position — a strictly PFE / internship / junior target declares this |
+| `WORK_AUTHORIZATION` | right to work, visa, clearance, residency |
+| `TARGET_DOMAIN` | the subject of the work, for a target defined by a domain such as Data/AI |
+| `OTHER_PROFILE_CONSTRAINT` | anything else declared non-tradeable — a language, a start date, a contract type |
+
+`rubric.ConstraintEvidence` is three-valued — `SATISFIED`, `CONTRADICTED`,
+`UNKNOWN` — and only `CONTRADICTED` establishes the grade-0 condition.
+
+**For the profile currently evaluated**, the operator has declared geography a
+hard constraint: the opportunities sought are in Morocco, so a posting
+explicitly located elsewhere is `OUT_OF_TARGET` **unless** the applicable
+profile or preferences explicitly accept another country or international
+remote. That instantiation belongs to the profile, not to the protocol; a second
+profile declares its own.
+
+### 2.2 The four grades
 
 | Grade | Name | Meaning |
 |---|---|---|
-| 3 | `VERY_RELEVANT` | Clearly a good opportunity for the profile and target. You would want it surfaced first. |
-| 2 | `RELEVANT` | Relevant and reasonably actionable, with some reservations possible. You would want it surfaced. |
-| 1 | `WEAKLY_RELEVANT` | Partial or weak link, borderline, or a fit too thin to justify a strong recommendation. |
-| 0 | `OUT_OF_TARGET` | Not a relevant opportunity for this target. |
+| 3 | `VERY_RELEVANT` | Clearly very well suited to the profile and target. The critical dimensions are positively established: a relevant Data/AI domain; a level or kind of position compatible with the target (PFE / internship / junior) where that constraint applies; geography and actionability compatible with the declared constraints; no known hard contradiction. You would want it surfaced first. |
+| 2 | `RELEVANT` | Relevant and reasonably actionable. Some unknowns, non-blocking reservations or incomplete evidence on a secondary dimension may remain, but there is enough positive evidence to want it surfaced. No known hard contradiction. |
+| 1 | `WEAKLY_RELEVANT` | A real but weak, partial or borderline link: an adjacent domain, a level that may be too high without being stated, Data/AI only partly demonstrated, too much uncertainty for a strong recommendation. No explicitly established hard contradiction, which would impose 0. |
+| 0 | `OUT_OF_TARGET` | A human determined the opportunity is outside the actionable target — typically an explicit contradiction with a hard constraint: a location incompatible with the declared geography, an explicitly senior position against a strictly PFE/internship/junior target, work authorisation explicitly out of reach, work clearly outside Data/AI when Data/AI is a target constraint, or any other declared hard constraint explicitly contradicted. |
 
-### The absolute rule
+Grades 1, 2 and 3 are **positive judgements requiring positive evidence**. The
+absence of a contradiction is not relevance.
+
+### The absolute rules
 
 > **UNJUDGED ≠ 0.**
 
 An opportunity nobody has judged has **no label row at all**. There is no
-default, no implicit grade and no "assume out of target". If you cannot decide,
-record nothing and move on — that is a valid outcome of a calibration round and
-one of the things it exists to discover.
+default, no implicit grade and no "assume out of target". `0` is a negative
+human judgement, never a fallback. If the evidence is too thin to defend any
+grade, record nothing — that is a valid outcome and one of the things a
+calibration round exists to discover.
+
+> **UNKNOWN ≠ FALSE.**
+
+Stated case by case in `rubric.UNKNOWN_IS_NOT_FALSE`, because this is exactly
+the rule that erodes when somebody implements against the prose:
+
+* a posting with no description is **not** an out-of-target posting;
+* a posting stating no level is **not** a senior posting;
+* a posting stating no country is **not** a posting outside the target geography;
+* a posting stating no opportunity type is **not** a posting of the wrong type;
+* evidence that is absent is **not** evidence that contradicts;
+* an opportunity nobody judged is **not** an opportunity graded 0.
+
+An unknown can lower confidence and lead to a 1 or a 2 depending on the rest of
+the evidence, and a pile of unknowns can lead to UNJUDGED. What it cannot do, on
+its own or by accretion, is become a hard contradiction.
 
 A label row that exists **must** carry an integer grade in `{0, 1, 2, 3}`. A
 boolean is refused. A `-1` or a `4` is refused.
@@ -325,14 +430,27 @@ evaluation table in the database, and no change to Recommendation, Matching,
 Qualification, Eligibility or Geography. Phase 10.3 is where metrics start, and
 it starts from a labelset produced here.
 
-## 11. What must happen before `human-relevance-v1`
+## 11. What is done, and what is not
 
-1. run `verify` against the real frozen dataset on the operator's machine;
-2. draw a small calibration lot;
-3. actually annotate it — a person, reading postings, applying the rubric above;
-4. review the ambiguous cases and the disagreements the rubric could not settle;
-5. only then decide the wording of `human-relevance-v1`, the diagnostics
-   vocabulary, and the benchmark size.
+Done:
 
-None of those five steps has been performed. Anything claiming otherwise is
-wrong.
+1. `verify` run against the real frozen dataset on the operator's machine;
+2. a calibration lot drawn;
+3. the lot annotated — 12 judgements, AI-assisted with human validation of every
+   grade, one explicit relabel;
+4. the ambiguous cases reviewed, which produced the actionability rule and the
+   hard-constraint rule;
+5. the semantics of `human-relevance-v1` frozen, in `rubric.py` and in §2 above.
+
+Not done, and not claimed:
+
+* **no label carries `human-relevance-v1`.** The definition is frozen; no
+  judgement has been made under it;
+* **no independent human holdout exists.** The calibration round is not one, for
+  the reason given in §0;
+* **no benchmark size is decided**, and no metric is implemented. Precision@K,
+  NDCG, recall, baselines and error analysis all belong to Phase 10.3 and after;
+* **no storage separation between a v0 and a v1 labelset has been built.** A real
+  v1 benchmark needs one before its first label is written.
+
+Anything claiming otherwise is wrong.

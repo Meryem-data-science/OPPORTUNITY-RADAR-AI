@@ -1045,9 +1045,10 @@ def labelset_manifest_payload(
         "label_schema_version": report.label_schema_version,
         "protocol_version": report.protocol_version,
         "protocol_status": (
-            "CALIBRATION — this protocol is not frozen; a human-relevance-v1 "
-            "can only be declared after a real calibration round has been "
-            "annotated and its ambiguous cases reviewed"
+            "CALIBRATION — these judgements were recorded under "
+            "human-relevance-calibration-v0. The final rubric "
+            "human-relevance-v1 is frozen (see PROTOCOL.md), but no label "
+            "carries it: this is a calibration artefact, not a v1 benchmark"
         ),
         "dataset_id": report.dataset_id,
         "dataset_content_fingerprint": report.dataset_content_fingerprint,
