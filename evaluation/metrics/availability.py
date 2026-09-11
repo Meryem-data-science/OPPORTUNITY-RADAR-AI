@@ -8,6 +8,14 @@ Phase 10.3a builds the gate and Phase 10.3b walks through it.
 The gates are pure and deterministic: same artefacts in, same decision out, no
 file read, no clock, no database, no randomness.
 
+**They take a verified context, never a bare run.** A `MetricRunContext` comes
+only from `run.build_metric_run_context`, which requires the frozen dataset and
+fully verifies both the run and the label coverage against it first — structure,
+digests, dataset membership, the calibration lot redrawn. So a reconstructed run
+carrying perfectly recomputed fingerprints over an invalid universe or ranking
+cannot reach a gate at all; it fails where it is assembled, without any caller
+having to remember to call a verifier.
+
 ## What is counted, and why counting it is not a metric
 
 Judged coverage *is* computed here — how many opportunities of a set carry an
@@ -75,17 +83,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
-from .run import verify_label_coverage
 from .schema import (
     EvaluationBindingError,
     EvaluationRanking,
-    EvaluationRunContract,
     EvaluationUniverse,
     JudgedCoverage,
     LabelCoverage,
     MetricAvailability,
     MetricAvailabilityDecision,
     MetricName,
+    MetricRunContext,
     MetricSupport,
     MetricUnavailableReason,
     is_relevant_grade,
@@ -197,83 +204,34 @@ def top_k_judged_coverage(
 
 
 # --------------------------------------------------------------------------
-# binding, checked before any gate decides
+# the gates
 # --------------------------------------------------------------------------
-
-
-def _check_label_bindings(
-    run: EvaluationRunContract, coverage: LabelCoverage
-) -> bool:
-    """Refuse structurally wrong labels; report a merely different labelset.
-
-    Returns whether the labels are a *different labelset* from the one the run
-    declares — and raises before returning at all if they are not even about
-    the same thing.
-
-    Three steps. The bindings that say what the labels are *about* are compared
-    first, because a coverage legitimately built over another dataset or another
-    profile state deserves to be told so in those words. Then
-    `verify_label_coverage` recomputes the declared labelset digest from the
-    judgements the coverage actually holds — reading a grade out of a coverage
-    whose identity has only been *asserted* would make the last step theatre,
-    one unverified string compared against another. Only then is the labelset
-    identity compared.
-
-    The first two steps and the third are deliberately different in kind. A
-    coverage built over another
-    dataset or another profile state is a **structurally wrong artefact** and
-    raises: the question itself does not typecheck. A coverage over the right
-    dataset whose labelset digest or protocol is not the one the run declares is
-    a **well-formed question this evidence cannot answer**, so it is reported as
-    `N_A / LABELSET_BINDING_MISMATCH` rather than as a crash — an unavailable
-    metric is a legitimate answer, and this is one.
-    """
-    if coverage.dataset_id != run.dataset_id:
-        raise EvaluationBindingError(
-            f"the labels were made against dataset {coverage.dataset_id}, not "
-            f"{run.dataset_id}"
-        )
-    if coverage.dataset_content_fingerprint != run.dataset_content_fingerprint:
-        raise EvaluationBindingError(
-            "the labels were made against content fingerprint "
-            f"{coverage.dataset_content_fingerprint}, not "
-            f"{run.dataset_content_fingerprint}"
-        )
-    if coverage.profile_id != run.profile_id:
-        raise EvaluationBindingError(
-            f"the labels were made for profile {coverage.profile_id}, not "
-            f"{run.profile_id}"
-        )
-    if coverage.profile_context_fingerprint != run.profile_context_fingerprint:
-        raise EvaluationBindingError(
-            "the labels were made against profile context "
-            f"{coverage.profile_context_fingerprint}, not "
-            f"{run.profile_context_fingerprint}"
-        )
-    verify_label_coverage(coverage)
-    return (
-        coverage.labelset_fingerprint != run.labelset_fingerprint
-        or coverage.label_protocol_version != run.label_protocol_version
-    )
+#
+# Every gate takes a `MetricRunContext` and never a bare run, and that is not a
+# convenience: a `MetricRunContext` can only come from
+# `run.build_metric_run_context`, which requires the verified frozen dataset and
+# runs the full verification of both the run and the coverage before it returns.
+# A gate that accepted an `EvaluationRunContract` would read `run.ranking` and
+# `run.universe` out of an object anybody can build — the dataclass is public,
+# and its fingerprints can be recomputed over an invalid structure — with
+# nothing but a docstring asking callers to verify first. This way the
+# verification is not something a caller remembers to do; it is the only way to
+# obtain the argument.
 
 
 def _support(
-    run: EvaluationRunContract,
-    coverage: LabelCoverage,
-    *,
-    k_requested: int,
-    k_effective: int,
+    context: MetricRunContext, *, k_requested: int, k_effective: int
 ) -> MetricSupport:
     """The numbers behind a decision, counted once and shared by the gates."""
-    universe = universe_judged_coverage(run.universe, coverage)
+    universe = universe_judged_coverage(context.universe, context.coverage)
     top = judged_coverage_of(
-        run.ranking.opportunity_ids[:k_effective], coverage
+        context.ranking.opportunity_ids[:k_effective], context.coverage
     )
     return MetricSupport(
         k_requested=k_requested,
         k_effective=k_effective,
-        ranking_length=run.ranking.length,
-        universe_size=run.universe.size,
+        ranking_length=context.ranking.length,
+        universe_size=context.universe.size,
         judged_count=universe.judged_count,
         judged_in_top_k=top.judged_count,
         unjudged_in_top_k=top.unjudged_opportunity_ids,
@@ -282,7 +240,7 @@ def _support(
 
 
 def _binding_mismatch_availability(
-    metric: MetricName, run: EvaluationRunContract, k: int
+    metric: MetricName, context: MetricRunContext, k: int
 ) -> MetricAvailability:
     """The one decision that can be made without reading a single judgement."""
     return MetricAvailability(
@@ -290,21 +248,16 @@ def _binding_mismatch_availability(
         decision=MetricAvailabilityDecision.UNAVAILABLE,
         reason=MetricUnavailableReason.LABELSET_BINDING_MISMATCH,
         support=MetricSupport(
-            k_requested=validate_k(k),
-            k_effective=min(validate_k(k), run.ranking.length),
-            ranking_length=run.ranking.length,
-            universe_size=run.universe.size,
+            k_requested=k,
+            k_effective=min(k, context.ranking.length),
+            ranking_length=context.ranking.length,
+            universe_size=context.universe.size,
         ),
     )
 
 
-# --------------------------------------------------------------------------
-# the gates
-# --------------------------------------------------------------------------
-
-
 def precision_at_k_availability(
-    run: EvaluationRunContract, coverage: LabelCoverage, k: int
+    context: MetricRunContext, k: int
 ) -> MetricAvailability:
     """May Precision@K be reported for this run? **Its value is not computed.**
 
@@ -313,14 +266,12 @@ def precision_at_k_availability(
     counted as a miss, and there is no third option that is honest.
     """
     k_requested = validate_k(k)
-    if _check_label_bindings(run, coverage):
+    if not context.labelset_matches:
         return _binding_mismatch_availability(
-            MetricName.PRECISION_AT_K, run, k_requested
+            MetricName.PRECISION_AT_K, context, k_requested
         )
-    k_used = min(k_requested, run.ranking.length)
-    support = _support(
-        run, coverage, k_requested=k_requested, k_effective=k_used
-    )
+    k_used = min(k_requested, context.ranking.length)
+    support = _support(context, k_requested=k_requested, k_effective=k_used)
     if support.unjudged_in_top_k:
         return MetricAvailability(
             metric=MetricName.PRECISION_AT_K,
@@ -336,7 +287,7 @@ def precision_at_k_availability(
 
 
 def recall_at_k_availability(
-    run: EvaluationRunContract, coverage: LabelCoverage, k: int
+    context: MetricRunContext, k: int
 ) -> MetricAvailability:
     """May Recall@K be reported for this run? **Its value is not computed.**
 
@@ -345,14 +296,12 @@ def recall_at_k_availability(
     when that total is not zero.
     """
     k_requested = validate_k(k)
-    if _check_label_bindings(run, coverage):
+    if not context.labelset_matches:
         return _binding_mismatch_availability(
-            MetricName.RECALL_AT_K, run, k_requested
+            MetricName.RECALL_AT_K, context, k_requested
         )
-    k_used = min(k_requested, run.ranking.length)
-    support = _support(
-        run, coverage, k_requested=k_requested, k_effective=k_used
-    )
+    k_used = min(k_requested, context.ranking.length)
+    support = _support(context, k_requested=k_requested, k_effective=k_used)
     if support.unjudged_in_universe:
         return MetricAvailability(
             metric=MetricName.RECALL_AT_K,
@@ -360,10 +309,10 @@ def recall_at_k_availability(
             reason=MetricUnavailableReason.RECALL_DENOMINATOR_UNKNOWN,
             support=support,
         )
-    # The denominator is knowable, so it is stated. It is *not* a metric
-    # value: it is a count of the evidence, and no ranking is measured by it
-    # anywhere in this slice.
-    relevant = relevant_count_in_universe(run.universe, coverage)
+    # The denominator is knowable, so it is stated. It is *not* a metric value:
+    # it is a count of the evidence, and no ranking is measured by it anywhere
+    # in this slice.
+    relevant = relevant_count_in_universe(context.universe, context.coverage)
     support = replace(support, relevant_count=relevant)
     if relevant == 0:
         return MetricAvailability(
@@ -380,7 +329,7 @@ def recall_at_k_availability(
 
 
 def ndcg_at_k_availability(
-    run: EvaluationRunContract, coverage: LabelCoverage, k: int
+    context: MetricRunContext, k: int
 ) -> MetricAvailability:
     """May NDCG@K be reported for this run? **Its value is not computed.**
 
@@ -390,14 +339,12 @@ def ndcg_at_k_availability(
     understates the IDCG and therefore overstates the ratio.
     """
     k_requested = validate_k(k)
-    if _check_label_bindings(run, coverage):
+    if not context.labelset_matches:
         return _binding_mismatch_availability(
-            MetricName.NDCG_AT_K, run, k_requested
+            MetricName.NDCG_AT_K, context, k_requested
         )
-    k_used = min(k_requested, run.ranking.length)
-    support = _support(
-        run, coverage, k_requested=k_requested, k_effective=k_used
-    )
+    k_used = min(k_requested, context.ranking.length)
+    support = _support(context, k_requested=k_requested, k_effective=k_used)
     if support.unjudged_in_universe:
         return MetricAvailability(
             metric=MetricName.NDCG_AT_K,

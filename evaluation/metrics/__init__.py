@@ -56,6 +56,16 @@ by name. Nothing here migrates, converts, duplicates or rewrites a v0 label, and
 no v1 label is written: a real benchmark needs a separately stored labelset that
 does not exist yet.
 
+**Verification has an explicit trust boundary.** `verify_*_structure` checks
+what an artefact can establish about itself — contract versions, structure,
+recomputed digests, internal agreement. It cannot check that an opportunity id
+names a real posting, because a SHA-256 identifies content it does not hold. The
+dataset-bound verifiers — `verify_evaluation_run(run, dataset)`,
+`verify_label_coverage(coverage, dataset)` — take the verified frozen dataset
+and ask it: every universe and ranking id is in the cohort, and the calibration
+lot is redrawn by Phase 10.2's own selector. `build_metric_run_context` runs all
+of it, and is the only source of the context an availability gate accepts.
+
 **Nothing declares its own identity.** A universe, a ranking and a run each
 carry a fingerprint field, and every one of them is recomputed before it is
 believed — together with the *structure* it claims, because a digest taken over
@@ -97,14 +107,19 @@ from .fingerprint import (
     verify_evaluation_universe_fingerprint,
 )
 from .run import (
+    assert_ranking_against_dataset,
     assert_ranking_within_universe,
+    assert_universe_against_dataset,
     build_evaluation_ranking,
     build_evaluation_run,
     build_evaluation_universe,
     build_label_coverage,
+    build_metric_run_context,
     ranking_from_frozen_dataset,
     verify_evaluation_run,
+    verify_evaluation_run_structure,
     verify_label_coverage,
+    verify_label_coverage_structure,
 )
 from .schema import (
     BINARY_RELEVANCE_GRADE_NAME,
@@ -133,11 +148,13 @@ from .schema import (
     MetricContractError,
     MetricName,
     MetricResult,
+    MetricRunContext,
     MetricStatus,
     MetricSupport,
     MetricUnavailableReason,
     RankingSource,
     UnjudgedOpportunityError,
+    canonical_opportunity_ids,
     evaluation_ranking_payload,
     evaluation_run_payload,
     evaluation_universe_payload,
@@ -146,6 +163,7 @@ from .schema import (
     metric_support_payload,
     require_evidence_class,
     require_supported_metric_contract_version,
+    validate_declared_size,
     validate_evaluation_ranking_structure,
     validate_evaluation_universe_structure,
     validate_fingerprint,
@@ -181,19 +199,24 @@ __all__ = [
     "MetricContractError",
     "MetricName",
     "MetricResult",
+    "MetricRunContext",
     "MetricStatus",
     "MetricSupport",
     "MetricUnavailableReason",
     "RankingSource",
     "UnjudgedOpportunityError",
+    "assert_ranking_against_dataset",
     "assert_ranking_within_universe",
+    "assert_universe_against_dataset",
     "build_evaluation_ranking",
     "build_evaluation_run",
     "build_evaluation_universe",
     "build_label_coverage",
+    "build_metric_run_context",
     "canonical_evaluation_ranking_payload",
     "canonical_evaluation_run_payload",
     "canonical_evaluation_universe_payload",
+    "canonical_opportunity_ids",
     "effective_k",
     "evaluation_ranking_fingerprint",
     "evaluation_ranking_payload",
@@ -215,6 +238,7 @@ __all__ = [
     "require_supported_metric_contract_version",
     "top_k_judged_coverage",
     "universe_judged_coverage",
+    "validate_declared_size",
     "validate_evaluation_ranking_structure",
     "validate_evaluation_universe_structure",
     "validate_fingerprint",
@@ -224,6 +248,8 @@ __all__ = [
     "verify_evaluation_ranking_fingerprint",
     "verify_evaluation_run",
     "verify_evaluation_run_fingerprint",
+    "verify_evaluation_run_structure",
     "verify_evaluation_universe_fingerprint",
     "verify_label_coverage",
+    "verify_label_coverage_structure",
 ]

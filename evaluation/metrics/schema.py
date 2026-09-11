@@ -59,7 +59,10 @@ from evaluation.labeling import (
     CALIBRATION_V0_PROVENANCE,
     RELEVANCE_GRADE_NAMES,
     SUPPORTED_PROTOCOL_VERSIONS,
+    CalibrationSelection,
+    HumanLabelError,
     HumanRelevanceLabel,
+    validate_relevance_grade,
 )
 
 __all__ = [
@@ -88,6 +91,7 @@ __all__ = [
     "MetricAvailabilityDecision",
     "MetricContractError",
     "MetricName",
+    "MetricRunContext",
     "MetricResult",
     "MetricStatus",
     "MetricSupport",
@@ -103,6 +107,7 @@ __all__ = [
     "metric_support_payload",
     "require_evidence_class",
     "require_supported_metric_contract_version",
+    "validate_declared_size",
     "validate_evaluation_ranking_structure",
     "validate_evaluation_universe_structure",
     "validate_fingerprint",
@@ -220,17 +225,25 @@ assert _GRADE_BY_NAME["OUT_OF_TARGET"] < RELEVANT_GRADE_THRESHOLD
 def is_relevant_grade(grade: int) -> bool:
     """Is this **recorded** grade relevant under the frozen binary contract?
 
+    The 0-3 domain is not restated here: `validate_relevance_grade` is Phase
+    10.2's, it already refuses a boolean, a float, a string and an integer
+    outside the rubric, and a second copy of that rule would be free to drift
+    from the scale the judgements were actually made on. A `99` is not "very
+    relevant indeed" and a `-1` is not "less than out of target" — neither is a
+    grade anybody could have recorded, so neither gets an answer here.
+
     Takes a grade, never an opportunity id: there is deliberately no overload
     that accepts "the grade of opportunity 7, whatever that is", because such a
     function would have to decide what to do about an opportunity nobody judged
     and the only correct answer — refuse — is not expressible as a `bool`.
     """
-    if isinstance(grade, bool) or not isinstance(grade, int):
-        raise MetricArgumentError(
-            f"a relevance grade is an integer, not {grade!r} "
-            f"({type(grade).__name__})"
-        )
-    return grade >= RELEVANT_GRADE_THRESHOLD
+    try:
+        validated = validate_relevance_grade(grade)
+    except HumanLabelError as error:
+        # Re-raised in this package's own vocabulary because the caller is a
+        # metric, not a label reader; the message, and the rule, stay 10.2's.
+        raise MetricArgumentError(str(error)) from error
+    return validated >= RELEVANT_GRADE_THRESHOLD
 
 
 # --------------------------------------------------------------------------
@@ -397,6 +410,26 @@ def validate_rank_position(value: Any, *, subject: str) -> int:
     if value <= 0:
         raise EvaluationBindingError(
             f"{subject} is not a positive rank position: {value!r}"
+        )
+    return value
+
+
+def validate_declared_size(value: Any, *, subject: str) -> int:
+    """A declared count: a positive integer, and `bool` is not one.
+
+    `declared_size=True` is the case this exists for. It would otherwise compare
+    equal to `1` and silently confirm the size of a one-member universe — a
+    check that passes because Python says `True == 1`, not because anybody
+    counted anything.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise EvaluationBindingError(
+            f"{subject} must be an integer, not {value!r} "
+            f"({type(value).__name__})"
+        )
+    if value < 1:
+        raise EvaluationBindingError(
+            f"{subject} must be at least 1, not {value!r}"
         )
     return value
 
@@ -803,9 +836,20 @@ class LabelCoverage:
     names the rest so nothing goes missing silently. Those outside judgements
     remain in Phase 10.2's history untouched; they simply are not this labelset.
 
-    The digest is never taken on trust either: `run.verify_label_coverage`
-    recomputes it from these labels and these bindings, and the run builder and
-    every gate call it before reading a single grade.
+    **The lot is retained as an object, not as two strings.** A
+    `selector_version` and a `selection_fingerprint` beside a list of labels
+    prove nothing about each other: a caller could pair lot A's digest with
+    answers to postings that are not in lot A and recompute a perfectly
+    self-consistent labelset digest around the pair. Holding the
+    `CalibrationSelection` itself makes that unstatable —
+    `run.verify_label_coverage_structure` recomputes the lot's own Phase 10.2
+    digest from its members and then requires every label to name one of them,
+    and `run.verify_label_coverage` additionally redraws the lot from the frozen
+    dataset through Phase 10.2's `assert_selection_bindings`.
+
+    The labelset digest is never taken on trust either: it is recomputed from
+    these labels and these bindings, and nothing reads a grade out of a coverage
+    that has not been through that.
 
     `grades` is derived from `labels` rather than stored beside them — two
     fields that could disagree would eventually disagree — and holds **only
@@ -821,11 +865,11 @@ class LabelCoverage:
     dataset_content_fingerprint: str
     profile_id: int
     profile_context_fingerprint: str
-    #: Which lot the judgements answer. Both are inside Phase 10.2's labelset
-    #: digest domain, so binding a run to the labelset fingerprint binds it to
-    #: the lot as well, transitively and without a second field on the run.
-    selector_version: str
-    selection_fingerprint: str
+    #: The lot the judgements answer, as Phase 10.2 drew it. Its selector
+    #: version and its digest are inside Phase 10.2's labelset digest domain, so
+    #: binding a run to the labelset fingerprint binds it to the lot as well —
+    #: transitively, and without a second field on the run.
+    selection: CalibrationSelection
     #: The effective judgements of the selected postings, in canonical order.
     labels: tuple[HumanRelevanceLabel, ...]
     #: Effective judgements recorded outside the lot. Reported, never counted.
@@ -848,6 +892,20 @@ class LabelCoverage:
                 )
             grades[item.opportunity_id] = item.relevance_grade
         object.__setattr__(self, "grades", MappingProxyType(grades))
+
+    @property
+    def selector_version(self) -> str:
+        """Delegated to the lot, so the two can never be made to disagree."""
+        return self.selection.selector_version
+
+    @property
+    def selection_fingerprint(self) -> str:
+        return self.selection.selection_fingerprint
+
+    @property
+    def selected_opportunity_ids(self) -> tuple[int, ...]:
+        """The lot's members, in the order it was drawn."""
+        return self.selection.opportunity_ids
 
     def is_judged(self, opportunity_id: int) -> bool:
         return opportunity_id in self.grades
@@ -1201,6 +1259,48 @@ def evaluation_run_payload(
             "label_root": run.provenance.label_root,
         }
     return payload
+
+
+# --------------------------------------------------------------------------
+# the verified context a gate decides in
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MetricRunContext:
+    """A run, its evidence, and the proof that both were checked together.
+
+    The availability gates take **this** and never a bare run, and that is the
+    whole reason the type exists. A gate that accepted an
+    `EvaluationRunContract` would be reading `run.ranking` and `run.universe`
+    out of an object anybody can construct: the dataclass is public, its
+    fingerprints can be recomputed over an invalid structure, and a comment
+    telling callers to verify first is not a check. Making the context the only
+    thing a gate accepts moves that from a convention to a type.
+
+    It is produced solely by `run.build_metric_run_context`, which requires the
+    verified `FrozenEvaluationDataset` and runs the full, dataset-bound
+    verification of the run and of the coverage before returning. Holding one is
+    therefore holding a statement that has been established, not asserted.
+
+    `labelset_matches` is the one disagreement that is *not* an error. A
+    coverage over the right dataset and profile whose labelset identity is not
+    the one the run declares is a well-formed question this evidence cannot
+    answer, and the gates report it as `N_A / LABELSET_BINDING_MISMATCH` rather
+    than refusing to be constructed.
+    """
+
+    run: EvaluationRunContract
+    coverage: LabelCoverage
+    labelset_matches: bool
+
+    @property
+    def universe(self) -> EvaluationUniverse:
+        return self.run.universe
+
+    @property
+    def ranking(self) -> EvaluationRanking:
+        return self.run.ranking
 
 
 def canonical_opportunity_ids(values: Sequence[int]) -> tuple[int, ...]:

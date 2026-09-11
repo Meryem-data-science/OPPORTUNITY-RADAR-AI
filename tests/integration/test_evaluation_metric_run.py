@@ -14,6 +14,7 @@ and no real judgement appears anywhere in it.
 
 import inspect
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,8 @@ from evaluation.labeling import (
     FrozenEvaluationDataset,
     HumanLabelError,
     append_human_label,
+    canonical_label_order,
+    labelset_fingerprint,
     build_labelset_report,
     read_frozen_dataset,
     read_validated_label_history,
@@ -49,15 +52,21 @@ from evaluation.labeling import (
 )
 from evaluation.metrics import (
     EvaluationBindingError,
+    EvaluationMetricsError,
     EvaluationRunProvenance,
+    EvaluationUniverseKind,
     EvidenceClass,
     EvidenceClassError,
+    MetricRunContext,
     MetricStatus,
     MetricUnavailableReason,
     UnjudgedOpportunityError,
     build_evaluation_run,
     build_evaluation_universe,
     build_label_coverage,
+    build_metric_run_context,
+    evaluation_run_fingerprint,
+    evaluation_universe_fingerprint,
     ndcg_at_k_availability,
     precision_at_k_availability,
     ranking_from_frozen_dataset,
@@ -65,6 +74,8 @@ from evaluation.metrics import (
     require_evidence_class,
     universe_judged_coverage,
     verify_evaluation_run,
+    verify_evaluation_run_structure,
+    verify_label_coverage,
 )
 
 PROFILE_CONTEXT = EvaluationProfileContext(
@@ -255,6 +266,17 @@ def run_for(
     )
 
 
+def context_for(
+    dataset: FrozenEvaluationDataset, coverage, **kwargs
+) -> MetricRunContext:
+    """The verified context a gate takes, built from real files."""
+    return build_metric_run_context(
+        dataset=dataset,
+        run=run_for(dataset, coverage, **kwargs),
+        coverage=coverage,
+    )
+
+
 # --------------------------------------------------------------------------
 # the run, assembled from real artefacts
 # --------------------------------------------------------------------------
@@ -279,7 +301,7 @@ def test_a_run_binds_a_real_dataset_a_real_ranking_and_a_real_labelset(
     assert run.labelset_fingerprint == build_labelset_report(
         frozen, lot, labels_root
     ).labelset_fingerprint
-    assert verify_evaluation_run(run) == run.run_fingerprint
+    assert verify_evaluation_run(run, frozen) == run.run_fingerprint
 
 
 def test_the_universe_is_the_cohort_and_not_the_ranked_or_labelled_subset(
@@ -349,16 +371,16 @@ def test_a_judged_top_ten_opens_precision_only(frozen, labels_root):
     """Regression 3, end to end: precision is local, recall and NDCG are not."""
     record_labels(frozen, labels_root, dict.fromkeys(range(1, 11), 2))
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
-    run = run_for(frozen, coverage)
+    context = context_for(frozen, coverage)
 
-    precision = precision_at_k_availability(run, coverage, 10)
+    precision = precision_at_k_availability(context, 10)
     assert precision.available
     assert precision.support.judged_in_top_k == 10
 
-    recall = recall_at_k_availability(run, coverage, 10)
+    recall = recall_at_k_availability(context, 10)
     assert recall.reason is MetricUnavailableReason.RECALL_DENOMINATOR_UNKNOWN
 
-    ndcg = ndcg_at_k_availability(run, coverage, 10)
+    ndcg = ndcg_at_k_availability(context, 10)
     assert ndcg.reason is MetricUnavailableReason.EVALUATION_UNIVERSE_NOT_FULLY_JUDGED
     assert ndcg.as_result().status is MetricStatus.N_A
     assert ndcg.as_result().value is None
@@ -369,9 +391,7 @@ def test_one_unjudged_posting_in_the_top_ten_closes_precision(frozen, labels_roo
     del grades[4]
     record_labels(frozen, labels_root, grades)
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
-    run = run_for(frozen, coverage)
-
-    precision = precision_at_k_availability(run, coverage, 10)
+    precision = precision_at_k_availability(context_for(frozen, coverage), 10)
     assert not precision.available
     assert precision.reason is MetricUnavailableReason.TOP_K_NOT_FULLY_JUDGED
     assert precision.support.unjudged_in_top_k == (4,)
@@ -385,18 +405,18 @@ def test_a_fully_judged_cohort_opens_every_gate_and_still_yields_no_number(
     grades = {index: (3 if index <= 5 else 0) for index in range(1, COHORT_SIZE + 1)}
     record_labels(frozen, labels_root, grades)
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
-    run = run_for(frozen, coverage)
+    context = context_for(frozen, coverage)
 
     for gate in (
         precision_at_k_availability,
         recall_at_k_availability,
         ndcg_at_k_availability,
     ):
-        availability = gate(run, coverage, 10)
+        availability = gate(context, 10)
         assert availability.available, availability.reason
         assert availability.support.numerator is None
         assert availability.support.denominator is None
-    assert recall_at_k_availability(run, coverage, 10).support.relevant_count == 5
+    assert recall_at_k_availability(context, 10).support.relevant_count == 5
 
 
 def test_a_fully_judged_cohort_with_nothing_relevant_has_no_recall(
@@ -406,14 +426,14 @@ def test_a_fully_judged_cohort_with_nothing_relevant_has_no_recall(
         frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 1)
     )
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
-    run = run_for(frozen, coverage)
+    context = context_for(frozen, coverage)
 
-    recall = recall_at_k_availability(run, coverage, 10)
+    recall = recall_at_k_availability(context, 10)
     assert recall.reason is MetricUnavailableReason.NO_RELEVANT_ITEMS
     assert recall.support.relevant_count == 0
     # Known-and-zero is not unknown, and the other two gates say so.
-    assert ndcg_at_k_availability(run, coverage, 10).available
-    assert precision_at_k_availability(run, coverage, 10).available
+    assert ndcg_at_k_availability(context, 10).available
+    assert precision_at_k_availability(context, 10).available
 
 
 def test_k_beyond_the_ranking_is_capped_against_real_artefacts(frozen, labels_root):
@@ -421,9 +441,7 @@ def test_k_beyond_the_ranking_is_capped_against_real_artefacts(frozen, labels_ro
         frozen, labels_root, dict.fromkeys(range(1, RANKED_COUNT + 1), 2)
     )
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
-    run = run_for(frozen, coverage)
-
-    precision = precision_at_k_availability(run, coverage, 100)
+    precision = precision_at_k_availability(context_for(frozen, coverage), 100)
     assert precision.support.k_requested == 100
     assert precision.support.k_effective == RANKED_COUNT
     assert precision.available
@@ -486,7 +504,11 @@ def test_a_labelset_from_another_lot_makes_every_metric_unavailable(
     run = run_for(frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen)))
     coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen, 4))
     assert coverage.labelset_fingerprint != run.labelset_fingerprint
-    availability = precision_at_k_availability(run, coverage, 10)
+    context = build_metric_run_context(
+        dataset=frozen, run=run, coverage=coverage
+    )
+    assert not context.labelset_matches
+    availability = precision_at_k_availability(context, 10)
     assert availability.reason is MetricUnavailableReason.LABELSET_BINDING_MISMATCH
 
 
@@ -576,11 +598,11 @@ def test_judgements_outside_the_lot_stay_in_the_history_and_out_of_the_labelset(
     assert len(history) == COHORT_SIZE
     # And a run bound to this lot sees only the lot's answers, so a cohort-wide
     # universe is not fully judged however many labels the file holds.
-    run = run_for(frozen, coverage)
-    judged = universe_judged_coverage(run.universe, coverage)
+    context = context_for(frozen, coverage)
+    judged = universe_judged_coverage(context.universe, coverage)
     assert judged.judged_count == len(inside)
     assert not judged.fully_judged
-    assert not ndcg_at_k_availability(run, coverage, 10).available
+    assert not ndcg_at_k_availability(context, 10).available
 
 
 def test_an_expected_labelset_fingerprint_is_checked_against_the_files(
@@ -609,6 +631,115 @@ def test_an_expected_labelset_fingerprint_is_checked_against_the_files(
 
 
 # --------------------------------------------------------------------------
+# the trust boundary, over real artefacts
+# --------------------------------------------------------------------------
+
+
+def test_a_label_outside_the_real_lot_cannot_be_smuggled_into_its_labelset(
+    frozen, labels_root
+):
+    """Real files, real lot, every digest recomputed — and still refused."""
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    small = lot_of(frozen, 4)
+    honest = coverage_from_disk(frozen, labels_root, small)
+    intruder = next(
+        opportunity_id
+        for opportunity_id in range(1, COHORT_SIZE + 1)
+        if opportunity_id not in set(small.opportunity_ids)
+    )
+    history = read_validated_label_history(frozen, labels_root)
+    extra = next(
+        item for item in history if item.opportunity_id == intruder
+    )
+    labels = canonical_label_order(honest.labels + (extra,))
+    smuggled = replace(
+        honest,
+        labels=labels,
+        labelset_fingerprint=labelset_fingerprint(
+            label_schema_version=honest.label_schema_version,
+            protocol_version=honest.label_protocol_version,
+            dataset_id=honest.dataset_id,
+            dataset_content_fingerprint=honest.dataset_content_fingerprint,
+            profile_id=honest.profile_id,
+            profile_context_fingerprint=honest.profile_context_fingerprint,
+            selector_version=honest.selector_version,
+            selection_fingerprint=honest.selection_fingerprint,
+            labels=labels,
+        ),
+    )
+    assert smuggled.labelset_fingerprint != honest.labelset_fingerprint
+    with pytest.raises(EvaluationBindingError, match="not in lot"):
+        verify_label_coverage(smuggled, frozen)
+    with pytest.raises(EvaluationBindingError, match="not in lot"):
+        run_for(frozen, smuggled)
+
+
+def test_a_universe_naming_a_posting_the_snapshot_does_not_hold_is_refused(
+    frozen, labels_root
+):
+    """`999` is structurally perfect and genuinely absent from the real file."""
+    record_labels(frozen, labels_root, {1: 3})
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
+
+    members = run.universe.opportunity_ids[:-1] + (999,)
+    universe = replace(
+        run.universe,
+        kind=EvaluationUniverseKind.FIXED_BENCHMARK_POOL,
+        opportunity_ids=members,
+        size=len(members),
+    )
+    universe = replace(
+        universe, fingerprint=evaluation_universe_fingerprint(universe)
+    )
+    forged = replace(run, universe=universe)
+    forged = replace(
+        forged, run_fingerprint=evaluation_run_fingerprint(forged)
+    )
+
+    assert 999 not in frozen.opportunity_ids
+    # Self-consistent, and refused the moment the snapshot is consulted.
+    assert verify_evaluation_run_structure(forged) == forged.run_fingerprint
+    with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+        verify_evaluation_run(forged, frozen)
+    with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+        build_metric_run_context(dataset=frozen, run=forged, coverage=coverage)
+    with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+        build_evaluation_run(
+            dataset=frozen,
+            universe=universe,
+            ranking=run.ranking,
+            coverage=coverage,
+            evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
+        )
+
+
+def test_a_gate_cannot_be_reached_with_a_re_sealed_invalid_run(
+    frozen, labels_root
+):
+    """No verifier is called here: the gate's argument simply cannot be built."""
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
+
+    duplicated = replace(
+        run.universe,
+        opportunity_ids=(run.universe.opportunity_ids[0],)
+        + run.universe.opportunity_ids,
+        size=run.universe.size + 1,
+    )
+    duplicated = replace(
+        duplicated, fingerprint=evaluation_universe_fingerprint(duplicated)
+    )
+    forged = replace(run, universe=duplicated)
+    forged = replace(
+        forged, run_fingerprint=evaluation_run_fingerprint(forged)
+    )
+    with pytest.raises(EvaluationMetricsError, match="repeats opportunity ids"):
+        build_metric_run_context(dataset=frozen, run=forged, coverage=coverage)
+
+
+# --------------------------------------------------------------------------
 # the layering, proved rather than described
 # --------------------------------------------------------------------------
 
@@ -633,10 +764,10 @@ def test_deciding_availability_opens_no_database_and_writes_no_label(
 
     reread = read_frozen_dataset(frozen.directory)
     coverage = coverage_from_disk(reread, labels_root, lot_of(reread))
-    run = run_for(reread, coverage)
-    assert precision_at_k_availability(run, coverage, 10).available
-    assert not recall_at_k_availability(run, coverage, 10).available
-    assert not ndcg_at_k_availability(run, coverage, 10).available
+    context = context_for(reread, coverage)
+    assert precision_at_k_availability(context, 10).available
+    assert not recall_at_k_availability(context, 10).available
+    assert not ndcg_at_k_availability(context, 10).available
 
     assert labels_file.read_bytes() == before
     assert not list(tmp_path.rglob("*.db"))
