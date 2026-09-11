@@ -29,10 +29,8 @@ from evaluation.metrics import (
     MetricUnavailableReason,
     build_evaluation_universe,
     build_metric_run_context,
-    discounted_cumulative_gain,
     evaluation_run_fingerprint,
     evaluation_universe_fingerprint,
-    ideal_grades_at_cutoff,
     metric_result_payload,
     ndcg_at_k,
     ndcg_at_k_availability,
@@ -45,6 +43,14 @@ from evaluation.metrics import (
     top_k_judged_coverage,
     universe_judged_coverage,
 )
+# Both helpers are private: they are ingredients of NDCG rather than part of
+# the contract, and reaching them from `evaluation.metrics` would be a way to
+# compute over verified grades with no gate having authorised it. They are
+# imported from their own modules here because the arithmetic they encode *is*
+# the frozen contract and deserves to be checked directly as well as through
+# `ndcg_at_k`.
+from evaluation.metrics.availability import _ideal_grades_at_cutoff
+from evaluation.metrics.formulas import _discounted_cumulative_gain
 from tests.unit.evaluation_metric_fixtures import (
     context_of,
     coverage_of,
@@ -118,11 +124,11 @@ def test_a_malformed_rank_has_no_discount(position):
 def test_the_dcg_sum_is_the_contract_written_out():
     """`approx` here only because summing the same terms in another order moves
     the last bit of the mantissa — the terms themselves are exact."""
-    assert discounted_cumulative_gain([3, 2, 0, 1]) == pytest.approx(
+    assert _discounted_cumulative_gain([3, 2, 0, 1]) == pytest.approx(
         7 / log2(2) + 3 / log2(3) + 0 / log2(4) + 1 / log2(5), rel=1e-15
     )
-    assert discounted_cumulative_gain([]) == 0
-    assert discounted_cumulative_gain([0, 0, 0]) == 0.0
+    assert _discounted_cumulative_gain([]) == 0
+    assert _discounted_cumulative_gain([0, 0, 0]) == 0.0
 
 
 # --------------------------------------------------------------------------
@@ -336,7 +342,9 @@ def test_the_ideal_is_built_from_the_whole_universe_not_from_the_ranking(dataset
     assert result.support.denominator == dcg(3, 2, 1)
     assert result.value == dcg(2, 1, 0) / dcg(3, 2, 1)
     assert result.value < 1.0
-    assert ideal_grades_at_cutoff(context.universe, context.coverage, 3) == (3, 2, 1)
+    assert _ideal_grades_at_cutoff(
+        context.universe, context.coverage, 3
+    ) == (3, 2, 1)
 
 
 def test_the_ideal_cut_off_takes_the_best_grades_in_order(dataset):
@@ -344,7 +352,7 @@ def test_the_ideal_cut_off_takes_the_best_grades_in_order(dataset):
         opportunity_id: (opportunity_id % 4) for opportunity_id in range(1, COHORT + 1)
     }
     context = graded(dataset, grades)
-    ideal = ideal_grades_at_cutoff(context.universe, context.coverage, 6)
+    ideal = _ideal_grades_at_cutoff(context.universe, context.coverage, 6)
     assert ideal == (3, 3, 3, 3, 3, 2)
     assert list(ideal) == sorted(ideal, reverse=True)
 

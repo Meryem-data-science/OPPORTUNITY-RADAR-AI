@@ -118,7 +118,6 @@ from .schema import (
 __all__ = [
     "effective_k",
     "judged_coverage_of",
-    "ideal_grades_at_cutoff",
     "judged_count_in_universe",
     "ndcg_at_k_availability",
     "precision_at_k_availability",
@@ -200,10 +199,16 @@ def relevant_count_in_universe(
     )
 
 
-def ideal_grades_at_cutoff(
+def _ideal_grades_at_cutoff(
     universe: EvaluationUniverse, coverage: LabelCoverage, k: int
 ) -> tuple[int, ...]:
     """The best `k` grades the declared universe can offer, best first.
+
+    Private, and shared with `formulas.py` by explicit import rather than
+    through the package's public surface. It is an ingredient of NDCG, not a
+    metric: exposing it would offer a way to read verified grades in ranked
+    order without any gate having decided that reading them is legitimate, and
+    the availability -> formula boundary is the only door this package has.
 
     The ideal ordering NDCG is measured against, and it is drawn from the
     **whole declared universe** rather than from the ranked items, the judged
@@ -422,7 +427,7 @@ def ndcg_at_k_availability(
     # frozen `relevance_gain`; summing it is the formula's job, not a gate's.
     if not any(
         relevance_gain(grade) > 0
-        for grade in ideal_grades_at_cutoff(
+        for grade in _ideal_grades_at_cutoff(
             context.universe, context.coverage, k_used
         )
     ):

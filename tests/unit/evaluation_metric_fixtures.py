@@ -183,7 +183,15 @@ def context_of(
     coverage: LabelCoverage | None = None,
     **kwargs: Any,
 ):
-    """A verified context: the only thing an availability gate accepts."""
+    """A context built through the verifying builder, for the ordinary cases.
+
+    Convenience, not a capability. `MetricRunContext` is a public dataclass and
+    a test may construct one by hand — several do, deliberately — because the
+    gates re-verify whatever they are given rather than trusting where it came
+    from. This helper exists so that tests about *metrics* do not each repeat
+    the assembly, and the tests about the trust boundary build their contexts
+    directly.
+    """
     resolved = coverage_of({1: 2}, dataset) if coverage is None else coverage
     return build_metric_run_context(
         dataset=dataset,

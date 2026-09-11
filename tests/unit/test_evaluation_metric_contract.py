@@ -1,8 +1,13 @@
-"""Phase 10.3a as a contract: what binds a metric run, and what forbids a number.
+"""The Phase 10.3 contract: what binds a metric run, and what forbids a number.
+
+This file tests the contract, the bindings and the availability gates — what a
+run must establish before a number may exist at all. The numbers themselves are
+Phase 10.3b's and are tested in `test_evaluation_metric_formulas.py`; what is
+asserted here about them is only the layering, namely that a metric is computed
+in `formulas.py` and nowhere else, and that each one asks its gate first.
 
 Nothing here reads the operational database, writes a label, or computes a
-ranking metric — because no ranking metric exists to compute yet, which is
-itself asserted below. Every dataset is invented, every judgement is invented,
+ranking metric. Every dataset is invented, every judgement is invented,
 and the frozen datasets are built in memory rather than on disk: the integrity
 gate that turns two files into a `FrozenEvaluationDataset` is Phase 10.2's and
 is exercised against real files in `tests/integration`.
@@ -1314,12 +1319,12 @@ def test_a_universe_built_for_another_snapshot_is_refused_by_the_shared_check(
     ],
 )
 def test_a_gate_cannot_be_reached_with_a_re_sealed_invalid_run(dataset, forge):
-    """No verifier is called by the test: the gate's argument cannot be built.
+    """The builder refuses a forged run before any gate is reached.
 
-    The gates take a `MetricRunContext`, and the only way to obtain one runs the
-    full dataset-bound verification. So a run that was reconstructed invalid and
-    then carefully re-digested fails where the context is assembled — not later,
-    and not only if somebody remembered to check.
+    Not the guarantee — a `MetricRunContext` can be constructed by hand and the
+    gates re-verify whatever they are handed, which the direct-construction
+    tests above cover. This is the convenience: a caller who goes through
+    `build_metric_run_context` finds out at once rather than at the first gate.
     """
     coverage = coverage_of(dict.fromkeys(range(1, 21), 2), dataset)
     forged = forge(run_over(dataset, coverage=coverage))
@@ -1747,6 +1752,66 @@ def test_every_public_formula_asks_its_own_gate_first():
             "ndcg_at_k_availability",
         } - {gate}
         assert not (called & other_gates), name
+
+
+def test_only_gated_metrics_reach_the_public_surface():
+    """The availability -> formula boundary, guarded at the package's door.
+
+    Three functions may compute: `precision_at_k`, `recall_at_k`, `ndcg_at_k`,
+    and each asks its own gate first (the test above reads that off the syntax
+    tree). The pieces they are made of — the DCG sum, the ideal cut-off — must
+    not become a second API, because a caller holding one of those could
+    aggregate verified grades into a score with no gate having decided the
+    metric was knowable at all. That is the boundary this slice exists to keep,
+    and an export is how it would quietly be lost.
+
+    Contract *definitions* are a different thing and stay public on purpose:
+    `relevance_gain` and `rank_discount` map one grade or one rank to one
+    number, aggregate nothing, and are what an auditor needs in order to check a
+    reported value by hand.
+    """
+    import evaluation.metrics as package
+    import evaluation.metrics.availability as availability_module
+    import evaluation.metrics.formulas as formulas_module
+
+    assert {"precision_at_k", "recall_at_k", "ndcg_at_k"} <= set(package.__all__)
+    assert set(formulas_module.__all__) == {
+        "precision_at_k",
+        "recall_at_k",
+        "ndcg_at_k",
+    }
+
+    for helper in ("discounted_cumulative_gain", "ideal_grades_at_cutoff"):
+        assert helper not in package.__all__
+        assert not hasattr(package, helper), helper
+        assert helper not in availability_module.__all__
+        assert helper not in formulas_module.__all__
+        # Still reachable under its private name, which is the point: private,
+        # not absent.
+        assert hasattr(formulas_module, f"_{helper}") or hasattr(
+            availability_module, f"_{helper}"
+        ), helper
+
+    # Nothing exported by the package aggregates grades into a score except the
+    # three gated metrics and the three gates named after them: every other
+    # public name is a contract object, a builder, a verifier, a support
+    # statistic or a definition.
+    gated = {"precision_at_k", "recall_at_k", "ndcg_at_k"}
+    gates = {f"{name}_availability" for name in gated}
+    exported_callables = {
+        name
+        for name in package.__all__
+        if callable(getattr(package, name))
+        and getattr(getattr(package, name), "__module__", "").startswith(
+            "evaluation.metrics"
+        )
+    }
+    aggregating = {
+        name
+        for name in exported_callables - gated - gates
+        if any(token in name for token in ("dcg", "cumulative_gain", "ideal"))
+    }
+    assert aggregating == set(), aggregating
 
 
 def test_the_metrics_package_has_no_clock_and_no_randomness():

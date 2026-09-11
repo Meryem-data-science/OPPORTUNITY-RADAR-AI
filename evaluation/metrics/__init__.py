@@ -109,7 +109,6 @@ unavailable metric is never a silently approximated number and never a zero.
 
 from .availability import (
     effective_k,
-    ideal_grades_at_cutoff,
     judged_coverage_of,
     judged_count_in_universe,
     ndcg_at_k_availability,
@@ -120,7 +119,6 @@ from .availability import (
     universe_judged_coverage,
 )
 from .formulas import (
-    discounted_cumulative_gain,
     ndcg_at_k,
     precision_at_k,
     recall_at_k,
@@ -250,7 +248,6 @@ __all__ = [
     "canonical_evaluation_run_payload",
     "canonical_evaluation_universe_payload",
     "canonical_opportunity_ids",
-    "discounted_cumulative_gain",
     "effective_k",
     "evaluation_ranking_fingerprint",
     "evaluation_ranking_payload",
@@ -258,7 +255,6 @@ __all__ = [
     "evaluation_run_payload",
     "evaluation_universe_fingerprint",
     "evaluation_universe_payload",
-    "ideal_grades_at_cutoff",
     "is_relevant_grade",
     "judged_coverage_of",
     "judged_count_in_universe",

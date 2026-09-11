@@ -102,7 +102,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 
 from .availability import (
-    ideal_grades_at_cutoff,
+    _ideal_grades_at_cutoff,
     ndcg_at_k_availability,
     precision_at_k_availability,
     recall_at_k_availability,
@@ -120,15 +120,20 @@ from .schema import (
     relevance_gain,
 )
 
+#: The whole public surface of this module. The helpers below are private on
+#: purpose: a caller who could reach a DCG sum or an ideal cut-off directly
+#: would have a way to compute over verified grades without a gate having
+#: decided that the metric is knowable, which is the one boundary this package
+#: exists to hold. The three metrics are the contract; everything else is how
+#: they are made.
 __all__ = [
-    "discounted_cumulative_gain",
     "ndcg_at_k",
     "precision_at_k",
     "recall_at_k",
 ]
 
 
-def discounted_cumulative_gain(grades: Sequence[int]) -> float:
+def _discounted_cumulative_gain(grades: Sequence[int]) -> float:
     """The DCG of a sequence of grades read in rank order, first position 1.
 
     The one summation in this package, used for the ranked cut-off and for the
@@ -258,7 +263,7 @@ def recall_at_k(context: MetricRunContext, k: int) -> MetricResult:
 def ndcg_at_k(context: MetricRunContext, k: int) -> MetricResult:
     """NDCG@K against the universe's ideal ordering, or the gate's `N_A` result.
 
-    `DCG@K / IDCG@K`, both through `discounted_cumulative_gain`, with the ideal
+    `DCG@K / IDCG@K`, both through the one DCG sum below, with the ideal
     drawn from the best `k_effective` grades of the **whole declared universe**
     — the gate has established it is fully judged, which is why NDCG needs more
     than a judged top K.
@@ -277,11 +282,11 @@ def ndcg_at_k(context: MetricRunContext, k: int) -> MetricResult:
         context.coverage.grade(opportunity_id)
         for opportunity_id in context.ranking.opportunity_ids[:k_effective]
     ]
-    ideal_grades = ideal_grades_at_cutoff(
+    ideal_grades = _ideal_grades_at_cutoff(
         context.universe, context.coverage, k_effective
     )
-    dcg = discounted_cumulative_gain(ranked_grades)
-    idcg = discounted_cumulative_gain(ideal_grades)
+    dcg = _discounted_cumulative_gain(ranked_grades)
+    idcg = _discounted_cumulative_gain(ideal_grades)
     if idcg == 0.0:
         # The gate refuses this case already, so reaching it would mean the two
         # had come to disagree. The answer is the same one the gate gives —
