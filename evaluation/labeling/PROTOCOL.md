@@ -195,6 +195,60 @@ One bad row stops the write. A valid judgement is never appended behind an
 invalid one — that would make the corruption permanent and give it company —
 and nothing is dropped, repaired, renumbered or quarantined.
 
+## 5e. Stored rows are read strictly and never repaired
+
+Reading a stored label is fail-closed. Nothing is coerced: no `int(...)` over a
+string, no `str(...)` over a number, no normalization of a tag list or a note
+that was not already canonical. `bool` is refused everywhere an integer is
+expected, because `isinstance(True, int)` is true and `"revision": true` would
+otherwise read as revision 1.
+
+Two layers, in order:
+
+1. every field is checked against the raw JSON type the contract states —
+   `profile_id`, `opportunity_id` and `revision` must already be positive JSON
+   integers; `labeled_at` an ISO-8601 string; `diagnostics` an object with
+   exactly the three contract keys; `reason_tags` a list of strings already in
+   canonical form; `note` and `relabel_reason` a string in canonical form or
+   `null`; the key set exactly the contract's;
+2. the parsed object is re-serialized through `human_label_payload` and compared
+   as **canonical JSON** (structures, not bytes — indentation and key order in
+   the file are irrelevant) against the row that was read. Anything layer 1 did
+   not anticipate surfaces here as a mismatch.
+
+A `relevance_grade_name` that contradicts its `relevance_grade` — grade 2 with
+`VERY_RELEVANT` — is **refused, never reconciled**: the row says two things
+about one judgement and picking one would be this code deciding what somebody
+meant.
+
+Appending preserves the earlier rows **verbatim**. The stored lines are written
+back as the exact strings they were, with one new canonical line added; they are
+not rebuilt from the objects they parsed into. So recording a new judgement
+cannot alter a character of an older one, and a non-canonical file can never be
+silently "repaired" by an unrelated append — it stops the append instead, byte
+for byte unchanged. The write still goes through a temporary file and
+`os.replace`: append-only here is an audit guarantee about content, not a claim
+about syscalls.
+
+## 5f. A stored lot must be what its selector actually draws
+
+Bindings and a self-declared fingerprint are not enough. A digest computed
+*from* a selection file only says the file is internally consistent; a
+hand-assembled file with plausible ids and a recomputed digest passes every such
+check while naming postings the algorithm never drew.
+
+So `assert_selection_bindings` redraws the lot —
+`select_calibration_sample(dataset, selection.requested_sample_size)`, the real
+selector, not a second implementation — and compares the effective size, the
+ordered ids, the selection fingerprint, and each item's `stratum` and
+`diversity_key`. This is only possible because `calibration-selector-v0` is
+deterministic, and it is why the strata are compared rather than believed: an
+explanation nobody checks is decoration, and a wrong one misleads exactly the
+person auditing a lot after annotation.
+
+`select_calibration_sample` does not call the guard, so drawing a fresh lot
+cannot re-enter it.
+
 ## 6. Traceability
 
 Every label row carries: label schema version, protocol version, `dataset_id`,
@@ -234,7 +288,8 @@ labelset whose notes changed is a labelset whose judgements changed.
 
 * Labels live in `data/evaluation/labels/<dataset_id>/labels.jsonl`, beside the
   frozen dataset rather than inside it — Phase 10.1's directory stays frozen.
-* The file is **append-only**. A first judgement is revision 1.
+* The file is **append-only**, and the earlier rows are preserved verbatim on
+  every append (see §5e). A first judgement is revision 1.
 * A second judgement of an already-labelled opportunity is **refused by
   default**. It is accepted only with an explicit relabel **and** a stated
   reason, and is then written as revision *n+1* with the earlier row left in

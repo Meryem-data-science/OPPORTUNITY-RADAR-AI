@@ -100,6 +100,7 @@ __all__ = [
     "WRITE_STATUS_UNCHANGED",
     "WRITE_STATUS_UPDATED",
     "LabelWriteResult",
+    "LabelFile",
     "LabelsetReport",
     "append_human_label",
     "build_labelset_report",
@@ -108,7 +109,9 @@ __all__ = [
     "labelset_manifest_payload",
     "list_calibration_selections",
     "load_calibration_selection",
+    "read_label_file",
     "read_label_history",
+    "read_validated_label_file",
     "read_validated_label_history",
     "resolve_effective_labels",
     "validate_label_history",
@@ -357,11 +360,209 @@ def _labels_path(directory: Path) -> Path:
     return directory / LABELS_FILENAME
 
 
-def _parse_label(payload: Mapping[str, Any], *, path: Path, line: int) -> HumanRelevanceLabel:
-    schema_version = payload.get("label_schema_version")
+#: The exact key set of a stored label row. A row with a key more or a key less
+#: is not a row this writer produced, and is refused rather than read around.
+_LABEL_ROW_KEYS: frozenset[str] = frozenset(
+    {
+        "label_schema_version",
+        "protocol_version",
+        "dataset_id",
+        "dataset_content_fingerprint",
+        "profile_id",
+        "profile_context_fingerprint",
+        "opportunity_id",
+        "relevance_grade",
+        "relevance_grade_name",
+        "diagnostics",
+        "reason_tags",
+        "note",
+        "labeled_at",
+        "revision",
+        "relabel_reason",
+    }
+)
+
+_DIAGNOSTIC_ENUMS: tuple[tuple[str, type], ...] = (
+    ("geo_judgment", GeoJudgment),
+    ("data_ai_judgment", DataAiJudgment),
+    ("opportunity_type_judgment", OpportunityTypeJudgment),
+)
+
+
+def _stored_text(value: Any, *, where: str, field: str) -> str:
+    """A field that must already be a non-empty JSON string."""
+    if not isinstance(value, str) or not value:
+        raise HumanLabelError(
+            f"{where} states {field} {value!r}; a non-empty string was expected"
+        )
+    return value
+
+
+def _stored_positive_integer(value: Any, *, where: str, field: str) -> int:
+    """A field that must already be a positive JSON integer.
+
+    `bool` is rejected before `int` because `isinstance(True, int)` is true in
+    Python: `"revision": true` would otherwise be read as revision 1, and
+    `"profile_id": true` as profile 1. A float is rejected too — `1.0` is not
+    how this writer spells 1, and turning it into one would be the repair this
+    function exists to refuse.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HumanLabelError(
+            f"{where} states {field} {value!r} ({type(value).__name__}); an "
+            "integer was expected and no value is converted into one here"
+        )
+    if value <= 0:
+        raise HumanLabelError(f"{where} states {field} {value}, which is not positive")
+    return value
+
+
+def _stored_optional_text(value: Any, *, where: str, field: str) -> str | None:
+    """A field that must already be a string or JSON `null`, in canonical form.
+
+    `normalize_note` is used as a *predicate*, never as a repair: if the stored
+    value is not already what normalization would produce — an untrimmed note,
+    an empty string standing in for `null` — the row is refused. Reading it as
+    its normalized form would silently rewrite somebody's record on the next
+    append.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HumanLabelError(
+            f"{where} states {field} {value!r} ({type(value).__name__}); a "
+            "string or null was expected"
+        )
+    if normalize_note(value) != value:
+        raise HumanLabelError(
+            f"{where} states {field} {value!r}, which is not the canonical form "
+            "this writer produces; refusing to normalize a stored judgement"
+        )
+    return value
+
+
+def _stored_diagnostics(value: Any, *, where: str) -> LabelDiagnostics:
+    """The diagnostics block, which must already be an object of the right shape."""
+    if not isinstance(value, Mapping):
+        raise HumanLabelError(
+            f"{where} states diagnostics {value!r} ({type(value).__name__}); "
+            "an object was expected"
+        )
+    expected = {name for name, _ in _DIAGNOSTIC_ENUMS}
+    if set(value) != expected:
+        missing = ", ".join(sorted(expected - set(value)))
+        unexpected = ", ".join(sorted(set(value) - expected))
+        raise HumanLabelError(
+            f"{where} states a diagnostics block that is not the contract's "
+            f"(missing: {missing or 'none'}; unexpected: {unexpected or 'none'})"
+        )
+    resolved: dict[str, Any] = {}
+    for name, enum_class in _DIAGNOSTIC_ENUMS:
+        raw = value[name]
+        if raw is None:
+            resolved[name] = None
+            continue
+        if not isinstance(raw, str):
+            raise HumanLabelError(
+                f"{where} states {name} {raw!r} ({type(raw).__name__}); a "
+                "string or null was expected"
+            )
+        try:
+            resolved[name] = enum_class(raw)
+        except ValueError as error:
+            raise HumanLabelError(
+                f"{where} states unknown {name} {raw!r}"
+            ) from error
+    return LabelDiagnostics(**resolved)
+
+
+def _stored_reason_tags(value: Any, *, where: str) -> tuple[str, ...]:
+    """The tags, which must already be a list of strings in canonical form.
+
+    Canonical means what `normalize_reason_tags` would have produced: lowercase,
+    trimmed, de-duplicated and sorted. As with the note, normalization is the
+    predicate and never the fix — a row holding `["Remote", "remote"]` is a row
+    this writer did not write, and reading it as `["remote"]` would rewrite it.
+    """
+    if not isinstance(value, list):
+        raise HumanLabelError(
+            f"{where} states reason_tags {value!r} ({type(value).__name__}); "
+            "a list was expected"
+        )
+    for tag in value:
+        if not isinstance(tag, str):
+            raise HumanLabelError(
+                f"{where} states reason tag {tag!r} ({type(tag).__name__}); "
+                "a string was expected"
+            )
+    normalized = normalize_reason_tags(value)
+    if list(normalized) != value:
+        raise HumanLabelError(
+            f"{where} states reason_tags {value!r}, which is not the canonical "
+            f"form this writer produces ({list(normalized)!r}); refusing to "
+            "normalize a stored judgement"
+        )
+    return normalized
+
+
+def _stored_timestamp(value: Any, *, where: str) -> str:
+    """`labeled_at`, which must already be a string holding a real timestamp."""
+    text = _stored_text(value, where=where, field="labeled_at")
+    try:
+        datetime.fromisoformat(text)
+    except ValueError as error:
+        raise HumanLabelError(
+            f"{where} states labeled_at {text!r}, which is not an ISO-8601 "
+            "timestamp"
+        ) from error
+    return text
+
+
+def _parse_label(
+    payload: Mapping[str, Any], *, path: Path, line: int
+) -> HumanRelevanceLabel:
+    """Read one stored row strictly, or refuse it. Never repair it.
+
+    This function is the audit trail's boundary, and it is deliberately
+    unhelpful. Nothing here coerces: no `int(...)` over a string, no `str(...)`
+    over a number, no normalization of a tag list or a note that was not already
+    canonical. The reason is not fussiness about types — it is that
+    `append_human_label` used to rebuild the whole file from the objects this
+    function returns, so any value quietly converted on the way in became a
+    *rewritten stored row* on the way out. A file that somebody had edited, or
+    that an older writer had produced, would be silently "repaired" by the act
+    of recording an unrelated new judgement, and an append-only audit trail that
+    edits its own history is not one.
+
+    Two layers, in order:
+
+    1. every field is checked against the raw JSON type the contract states,
+       with `bool` refused wherever an integer is expected and the canonical
+       forms of `reason_tags` and `note` required rather than produced;
+    2. the resulting object is re-serialized through `human_label_payload` and
+       compared, as canonical JSON, against the row that was read. Anything the
+       first layer did not think of shows up here as a mismatch — a
+       `relevance_grade_name` contradicting its grade, a stray key, a value
+       whose spelling differs from the writer's.
+
+    Layer 2 is the one that makes this safe going forward: it does not need to
+    know what a future field is in order to refuse a row that does not round
+    trip. The comparison is over *structures*, not bytes, so whitespace and key
+    order in the file are irrelevant — only what the row says.
+    """
+    where = f"{path} line {line}"
+    if set(payload) != _LABEL_ROW_KEYS:
+        missing = ", ".join(sorted(_LABEL_ROW_KEYS - set(payload)))
+        unexpected = ", ".join(sorted(set(payload) - _LABEL_ROW_KEYS))
+        raise HumanLabelError(
+            f"{where} is not a label row of this schema "
+            f"(missing: {missing or 'none'}; unexpected: {unexpected or 'none'})"
+        )
+
+    schema_version = payload["label_schema_version"]
     if schema_version != HUMAN_LABEL_SCHEMA_VERSION:
         raise HumanLabelError(
-            f"{path} line {line} states label schema {schema_version!r}; "
+            f"{where} states label schema {schema_version!r}; "
             f"this build reads {HUMAN_LABEL_SCHEMA_VERSION!r}"
         )
     # The shape being readable is not the same fact as the judgement being
@@ -369,62 +570,101 @@ def _parse_label(payload: Mapping[str, Any], *, path: Path, line: int) -> HumanR
     # parse perfectly here — same fields, same types — and would then be
     # digested as though its grade answered this rubric's question. It does not,
     # so it stops here, unconverted and unrewritten.
-    require_supported_protocol_version(
-        payload.get("protocol_version"), subject=f"{path} line {line}"
+    protocol_version = require_supported_protocol_version(
+        payload["protocol_version"], subject=where
     )
 
-    def _enum(name: str, enum_class):
-        raw = payload.get("diagnostics", {}).get(name)
-        if raw is None:
-            return None
-        try:
-            return enum_class(raw)
-        except ValueError as error:
-            raise HumanLabelError(
-                f"{path} line {line} states unknown {name} {raw!r}"
-            ) from error
+    grade = validate_relevance_grade(payload["relevance_grade"])
+    grade_name = payload["relevance_grade_name"]
+    if grade_name != RELEVANCE_GRADE_NAMES[grade]:
+        # Refused, never reconciled. The row states two things about one
+        # judgement and they disagree; picking the number over the name would be
+        # this code deciding what somebody meant.
+        raise HumanLabelError(
+            f"{where} states relevance_grade {grade} and "
+            f"relevance_grade_name {grade_name!r}, which contradict each other "
+            f"({RELEVANCE_GRADE_NAMES[grade]!r} was due); refusing to reconcile "
+            "a stored judgement"
+        )
 
-    diagnostics = LabelDiagnostics(
-        geo_judgment=_enum("geo_judgment", GeoJudgment),
-        data_ai_judgment=_enum("data_ai_judgment", DataAiJudgment),
-        opportunity_type_judgment=_enum(
-            "opportunity_type_judgment", OpportunityTypeJudgment
+    label = HumanRelevanceLabel(
+        label_schema_version=schema_version,
+        protocol_version=protocol_version,
+        dataset_id=_stored_text(
+            payload["dataset_id"], where=where, field="dataset_id"
+        ),
+        dataset_content_fingerprint=_stored_text(
+            payload["dataset_content_fingerprint"],
+            where=where,
+            field="dataset_content_fingerprint",
+        ),
+        profile_id=_stored_positive_integer(
+            payload["profile_id"], where=where, field="profile_id"
+        ),
+        profile_context_fingerprint=_stored_text(
+            payload["profile_context_fingerprint"],
+            where=where,
+            field="profile_context_fingerprint",
+        ),
+        opportunity_id=_stored_positive_integer(
+            payload["opportunity_id"], where=where, field="opportunity_id"
+        ),
+        relevance_grade=grade,
+        diagnostics=_stored_diagnostics(payload["diagnostics"], where=where),
+        reason_tags=_stored_reason_tags(payload["reason_tags"], where=where),
+        note=_stored_optional_text(payload["note"], where=where, field="note"),
+        labeled_at=_stored_timestamp(payload["labeled_at"], where=where),
+        revision=_stored_positive_integer(
+            payload["revision"], where=where, field="revision"
+        ),
+        relabel_reason=_stored_optional_text(
+            payload["relabel_reason"], where=where, field="relabel_reason"
         ),
     )
-    return HumanRelevanceLabel(
-        label_schema_version=str(schema_version),
-        protocol_version=str(payload["protocol_version"]),
-        dataset_id=str(payload["dataset_id"]),
-        dataset_content_fingerprint=str(payload["dataset_content_fingerprint"]),
-        profile_id=int(payload["profile_id"]),
-        profile_context_fingerprint=str(payload["profile_context_fingerprint"]),
-        opportunity_id=int(payload["opportunity_id"]),
-        relevance_grade=validate_relevance_grade(payload["relevance_grade"]),
-        diagnostics=diagnostics,
-        reason_tags=normalize_reason_tags(payload.get("reason_tags")),
-        note=normalize_note(payload.get("note")),
-        labeled_at=str(payload["labeled_at"]),
-        revision=int(payload.get("revision", 1)),
-        relabel_reason=payload.get("relabel_reason"),
-    )
+
+    round_trip = human_label_payload(label)
+    if canonical_json(round_trip) != canonical_json(payload):
+        differing = sorted(
+            key
+            for key in _LABEL_ROW_KEYS
+            if canonical_json(payload.get(key)) != canonical_json(round_trip.get(key))
+        )
+        raise HumanLabelError(
+            f"{where} is not in the canonical form this writer produces; "
+            f"{', '.join(differing)} would change if it were rewritten, and a "
+            "stored judgement is never rewritten"
+        )
+    return label
 
 
-def read_label_history(
-    dataset_id: str, root: str | Path = DEFAULT_LABEL_ROOT
-) -> tuple[HumanRelevanceLabel, ...]:
-    """Every judgement ever recorded for this dataset, in file order.
+@dataclass(frozen=True)
+class LabelFile:
+    """A labels file as it is on disk, and as it was understood.
 
-    Includes superseded revisions: this is the audit trail, not the current
-    state. `resolve_effective_labels` turns it into the latter.
+    `lines` holds the stored rows **verbatim**, and it is the reason this type
+    exists: an append writes those exact strings back and adds one, so recording
+    a new judgement cannot alter a single character of an older one. The parsed
+    `labels` are for reasoning about; the lines are what is preserved.
     """
+
+    path: Path
+    lines: tuple[str, ...]
+    labels: tuple[HumanRelevanceLabel, ...]
+
+
+def read_label_file(
+    dataset_id: str, root: str | Path = DEFAULT_LABEL_ROOT
+) -> LabelFile:
+    """Read and strictly parse the labels file, keeping its rows verbatim."""
     path = _labels_path(dataset_label_directory(dataset_id, root))
     if not path.is_file():
-        return ()
+        return LabelFile(path=path, lines=(), labels=())
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise HumanLabelError(f"cannot read {path}: {error}") from error
 
+    lines: list[str] = []
     labels: list[HumanRelevanceLabel] = []
     for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
@@ -440,7 +680,19 @@ def read_label_history(
         if not isinstance(payload, Mapping):
             raise HumanLabelError(f"{path} line {number} is not a JSON object")
         labels.append(_parse_label(payload, path=path, line=number))
-    return tuple(labels)
+        lines.append(line)
+    return LabelFile(path=path, lines=tuple(lines), labels=tuple(labels))
+
+
+def read_label_history(
+    dataset_id: str, root: str | Path = DEFAULT_LABEL_ROOT
+) -> tuple[HumanRelevanceLabel, ...]:
+    """Every judgement ever recorded for this dataset, in file order.
+
+    Includes superseded revisions: this is the audit trail, not the current
+    state. `resolve_effective_labels` turns it into the latter.
+    """
+    return read_label_file(dataset_id, root).labels
 
 
 def validate_label_history(
@@ -500,17 +752,24 @@ def validate_label_history(
             )
 
 
-def read_validated_label_history(
+def read_validated_label_file(
     dataset: FrozenEvaluationDataset, root: str | Path = DEFAULT_LABEL_ROOT
-) -> tuple[HumanRelevanceLabel, ...]:
-    """The audit trail of this dataset, refused whole if any row is wrong.
+) -> LabelFile:
+    """The labels file of this dataset, refused whole if any row is wrong.
 
     The one way the rest of this package reads labels. Reading and validating
     are one call so that no path can accidentally take the unchecked one.
     """
-    history = read_label_history(dataset.dataset_id, root)
-    validate_label_history(history, dataset)
-    return history
+    stored = read_label_file(dataset.dataset_id, root)
+    validate_label_history(stored.labels, dataset)
+    return stored
+
+
+def read_validated_label_history(
+    dataset: FrozenEvaluationDataset, root: str | Path = DEFAULT_LABEL_ROOT
+) -> tuple[HumanRelevanceLabel, ...]:
+    """The validated audit trail of this dataset, without its raw rows."""
+    return read_validated_label_file(dataset, root).labels
 
 
 def resolve_effective_labels(
@@ -588,7 +847,8 @@ def append_human_label(
     # Read and validate the whole file first. A judgement appended behind a row
     # that does not belong here would make the corruption permanent and give it
     # company.
-    history = read_validated_label_history(dataset, root)
+    stored = read_validated_label_file(dataset, root)
+    history = stored.labels
     effective = resolve_effective_labels(history)
     previous = effective.get(opportunity_id)
 
@@ -622,8 +882,13 @@ def append_human_label(
         relabel_reason=reason,
     )
 
-    lines = [canonical_json(human_label_payload(item)) for item in history]
-    lines.append(canonical_json(human_label_payload(label)))
+    # The stored rows are written back **verbatim**, not re-serialized from the
+    # objects they were parsed into. Strict parsing already guarantees the two
+    # would agree, so this is belt and braces — but it is the belt that makes
+    # "append-only" a property of the bytes rather than a property of a proof.
+    # A temporary file and `os.replace` still do the writing: append-only here
+    # is an audit guarantee about content, not a claim about syscalls.
+    lines = [*stored.lines, canonical_json(human_label_payload(label))]
     _atomic_write(_labels_path(directory), "\n".join(lines) + "\n")
     return label
 

@@ -453,7 +453,12 @@ def assert_selection_bindings(
       ids, positions `1..N` in order;
     * that every selected id is **actually in the dataset** — the one check that
       would otherwise fail much later, as a blind view of a posting that does
-      not exist.
+      not exist;
+    * that the lot **is what the declared selector draws** — redrawn from the
+      dataset and compared id by id, in order, along with its fingerprint and
+      the stratum and diversity key each item claims. A self-consistent file
+      with a recomputed digest can name any postings it likes; only redrawing
+      shows whether `calibration-selector-v0` would have named them.
     """
     if selection.dataset_id != dataset.dataset_id:
         raise HumanLabelError(
@@ -517,3 +522,55 @@ def assert_selection_bindings(
             f"the calibration selection names opportunities {missing}, which "
             f"are not in dataset {dataset.dataset_id}"
         )
+
+    # And finally: is this lot actually what `selector_version` would have
+    # drawn? Every check above can be satisfied by a file somebody assembled by
+    # hand — plausible ids, consistent positions, a fingerprint recomputed over
+    # whatever it happens to contain. A digest computed *from* a selection can
+    # only say the file is internally consistent; it cannot say the selection is
+    # the output of the algorithm it names. So the lot is redrawn and compared.
+    #
+    # This is only possible because the selector is deterministic, which is the
+    # property the whole design rests on: same dataset, same version, same size,
+    # same ids in the same order. No second implementation is written here — the
+    # real one is called. `select_calibration_sample` does not call this guard,
+    # so drawing a fresh lot cannot re-enter it.
+    expected = select_calibration_sample(dataset, selection.requested_sample_size)
+    if expected.effective_sample_size != selection.effective_sample_size:
+        raise HumanLabelError(
+            f"selector {selection.selector_version} draws "
+            f"{expected.effective_sample_size} postings for a requested sample "
+            f"of {selection.requested_sample_size}, not "
+            f"{selection.effective_sample_size}"
+        )
+    if expected.opportunity_ids != ids:
+        raise HumanLabelError(
+            f"the calibration selection is not what {selection.selector_version} "
+            f"draws from dataset {dataset.dataset_id}: it names "
+            f"{list(ids)} where the selector draws "
+            f"{list(expected.opportunity_ids)}"
+        )
+    if expected.selection_fingerprint != selection.selection_fingerprint:
+        raise HumanLabelError(
+            "the calibration selection states fingerprint "
+            f"{selection.selection_fingerprint} where the selector produces "
+            f"{expected.selection_fingerprint}"
+        )
+    # `stratum` and `diversity_key` claim to explain *why* each posting was
+    # drawn. An explanation nobody checks is decoration, and a wrong one would
+    # mislead exactly the person auditing a lot after annotation, so they are
+    # compared against the redrawn values rather than believed.
+    for stored, redrawn in zip(selection.items, expected.items, strict=True):
+        if dict(stored.stratum) != dict(redrawn.stratum):
+            raise HumanLabelError(
+                f"the calibration selection states stratum {dict(stored.stratum)} "
+                f"for opportunity {stored.opportunity_id}, where the selector "
+                f"computes {dict(redrawn.stratum)}"
+            )
+        if dict(stored.diversity_key) != dict(redrawn.diversity_key):
+            raise HumanLabelError(
+                "the calibration selection states diversity key "
+                f"{dict(stored.diversity_key)} for opportunity "
+                f"{stored.opportunity_id}, where the selector computes "
+                f"{dict(redrawn.diversity_key)}"
+            )

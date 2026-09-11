@@ -37,8 +37,10 @@ from evaluation.dataset import (
     write_evaluation_dataset,
 )
 from evaluation.labeling import (
+    CALIBRATION_SELECTOR_VERSION,
     HUMAN_LABEL_PROTOCOL_VERSION,
     HUMAN_LABEL_SCHEMA_VERSION,
+    RELEVANCE_GRADE_NAMES,
     WITHHELD_RECORD_FIELDS,
     DataAiJudgment,
     FrozenDatasetIntegrityError,
@@ -47,6 +49,7 @@ from evaluation.labeling import (
     LabelDiagnostics,
     append_human_label,
     assert_selection_bindings,
+    calibration_selection_fingerprint,
     build_labelset_report,
     load_calibration_selection,
     read_frozen_dataset,
@@ -1029,6 +1032,11 @@ def _row(dataset, **overrides) -> dict:
         "relabel_reason": None,
     }
     row.update(overrides)
+    # The name follows the grade unless a test deliberately contradicts it, so a
+    # fixture exercising some other rule does not trip the grade-name check
+    # first.
+    if "relevance_grade_name" not in overrides:
+        row["relevance_grade_name"] = RELEVANCE_GRADE_NAMES[row["relevance_grade"]]
     return row
 
 
@@ -1104,6 +1112,367 @@ def test_a_history_written_by_the_normal_path_always_validates(
         (2, 1),
         (1, 2),
     ]
+
+
+# --------------------------------------------------------------------------
+# a stored row is read strictly and never repaired (FIX A)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "pattern"),
+    [
+        ("revision", True, "revision"),
+        ("revision", "1", "revision"),
+        ("revision", 1.0, "revision"),
+        ("revision", 0, "not positive"),
+        ("profile_id", "1", "profile_id"),
+        ("profile_id", True, "profile_id"),
+        ("opportunity_id", "1", "opportunity_id"),
+        ("opportunity_id", 1.0, "opportunity_id"),
+        ("dataset_id", 7, "dataset_id"),
+        ("labeled_at", 20260301, "labeled_at"),
+        ("labeled_at", "yesterday", "ISO-8601"),
+        ("diagnostics", None, "diagnostics"),
+        ("diagnostics", [], "diagnostics"),
+        ("diagnostics", {"geo_judgment": None}, "diagnostics block"),
+        ("diagnostics", {"geo_judgment": 1, "data_ai_judgment": None,
+                         "opportunity_type_judgment": None}, "geo_judgment"),
+        ("reason_tags", "remote", "reason_tags"),
+        ("reason_tags", [3], "reason tag"),
+        ("reason_tags", None, "reason_tags"),
+        ("note", 7, "note"),
+        ("relabel_reason", 7, "relabel_reason"),
+    ],
+)
+def test_a_non_contractual_value_is_refused_rather_than_coerced(
+    frozen: Path, labels_root: Path, field, value, pattern
+):
+    """No `int(...)`, no `str(...)`, no normalization on the way in.
+
+    Each of these used to be quietly converted into something valid — `true`
+    into revision 1, `"1"` into 1 — and the converted value would then have been
+    written back over the stored row by the next unrelated append.
+    """
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(dataset, labels_root, [_row(dataset, **{field: value})])
+    with pytest.raises(HumanLabelError, match=pattern):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+@pytest.mark.parametrize(
+    ("tags", "pattern"),
+    [
+        (["Remote"], "canonical form"),
+        (["remote", "remote"], "canonical form"),
+        (["remote", "geo-mismatch"], "canonical form"),
+        ([" remote "], "canonical form"),
+    ],
+)
+def test_non_canonical_reason_tags_are_refused_not_normalized(
+    frozen: Path, labels_root: Path, tags, pattern
+):
+    """Uppercase, duplicated, unsorted or padded: all rows this writer never wrote."""
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(dataset, labels_root, [_row(dataset, reason_tags=tags)])
+    with pytest.raises(HumanLabelError, match=pattern):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+@pytest.mark.parametrize("note", ["  padded  ", "", "   "])
+def test_a_non_canonical_note_is_refused_not_trimmed(
+    frozen: Path, labels_root: Path, note
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(dataset, labels_root, [_row(dataset, note=note)])
+    with pytest.raises(HumanLabelError, match="canonical form"):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+def test_a_grade_name_contradicting_its_grade_is_refused_not_reconciled(
+    frozen: Path, labels_root: Path
+):
+    """The row says two things about one judgement and they disagree.
+
+    Rewriting the name to match the number would be this code deciding what
+    somebody meant, on a record whose entire purpose is to say what they meant.
+    """
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(
+        dataset,
+        labels_root,
+        [_row(dataset, relevance_grade=2, relevance_grade_name="VERY_RELEVANT")],
+    )
+    with pytest.raises(HumanLabelError, match="contradict each other"):
+        read_label_history(dataset.dataset_id, labels_root)
+    # And the file is left exactly as it was, name included.
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    assert '"relevance_grade_name": "VERY_RELEVANT"' in path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_row_with_an_extra_or_missing_key_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    _write_rows(dataset, labels_root, [_row(dataset, labeler="someone")])
+    with pytest.raises(HumanLabelError, match="unexpected: labeler"):
+        read_label_history(dataset.dataset_id, labels_root)
+
+    row = _row(dataset)
+    del row["note"]
+    _write_rows(dataset, labels_root, [row])
+    with pytest.raises(HumanLabelError, match="missing: note"):
+        read_label_history(dataset.dataset_id, labels_root)
+
+
+def test_the_round_trip_check_compares_structure_and_not_bytes(
+    frozen: Path, labels_root: Path
+):
+    """The second layer: re-serialize what was parsed, compare canonical JSON.
+
+    It does not need to know what a future field is in order to refuse a row
+    that would come out different — and it must not mistake formatting for
+    meaning, so indentation and key order in the file are irrelevant.
+    """
+    dataset = read_frozen_dataset(frozen)
+    row = _row(dataset)
+    row["relevance_grade_name"] = "RELEVANT"
+    row["relevance_grade"] = 2
+    # A row that does round trip is accepted...
+    _write_rows(dataset, labels_root, [row])
+    assert len(read_label_history(dataset.dataset_id, labels_root)) == 1
+    # ...and the comparison is over structure, not bytes: the same row written
+    # with different spacing and key order is the same row.
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    path.write_text(
+        json.dumps(dict(reversed(list(row.items()))), indent=None) + "\n",
+        encoding="utf-8",
+    )
+    assert len(read_label_history(dataset.dataset_id, labels_root)) == 1
+
+
+def test_an_append_leaves_every_earlier_row_byte_identical(
+    frozen: Path, labels_root: Path
+):
+    """Append-only as a property of the bytes, not of a proof about them."""
+    dataset = read_frozen_dataset(frozen)
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+
+    append_human_label(
+        dataset,
+        opportunity_id=1,
+        relevance_grade=3,
+        reason_tags=["strong-fit"],
+        note="clear fit",
+        root=labels_root,
+    )
+    first = path.read_text(encoding="utf-8").splitlines()
+
+    append_human_label(
+        dataset, opportunity_id=2, relevance_grade=0, root=labels_root
+    )
+    append_human_label(
+        dataset,
+        opportunity_id=1,
+        relevance_grade=1,
+        relabel=True,
+        relabel_reason="reread the description",
+        root=labels_root,
+    )
+    after = path.read_text(encoding="utf-8").splitlines()
+
+    assert after[: len(first)] == first
+    assert len(after) == 3
+
+
+def test_a_refused_append_leaves_the_file_byte_identical(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    path = labels_root / dataset.dataset_id / "labels.jsonl"
+    _write_rows(dataset, labels_root, [_row(dataset, reason_tags=["Remote"])])
+    before = path.read_bytes()
+    with pytest.raises(HumanLabelError, match="canonical form"):
+        append_human_label(
+            dataset, opportunity_id=2, relevance_grade=2, root=labels_root
+        )
+    assert path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------
+# a stored lot must be what its selector actually draws (FIX B)
+# --------------------------------------------------------------------------
+
+
+def _rewrite_selection(path: Path, mutate) -> None:
+    """Edit a stored selection and recompute its self-declared fingerprint.
+
+    The shape of a hand-assembled file: internally consistent, digest and all.
+    Only redrawing the lot can tell that the algorithm it names did not produce
+    it.
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    payload["selection_fingerprint"] = calibration_selection_fingerprint(
+        selector_version=payload["selector_version"],
+        dataset_id=payload["dataset_id"],
+        dataset_content_fingerprint=payload["dataset_content_fingerprint"],
+        sample_size=payload["effective_sample_size"],
+        selected_opportunity_ids=[
+            item["opportunity_id"] for item in payload["items"]
+        ],
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_selection_the_selector_would_not_have_drawn_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 4)
+    result = write_calibration_selection(selection, labels_root)
+    drawn = set(selection.opportunity_ids)
+    stranger = next(
+        value for value in dataset.opportunity_ids if value not in drawn
+    )
+
+    def swap(payload):
+        payload["items"][1]["opportunity_id"] = stranger
+
+    _rewrite_selection(result.path, swap)
+    # The file is internally consistent: its own digest matches its contents.
+    stored = load_calibration_selection(result.path)
+    assert stored.selection_fingerprint
+    with pytest.raises(HumanLabelError, match="is not what calibration-selector-v0"):
+        assert_selection_bindings(stored, dataset)
+
+
+def test_a_reordered_selection_is_refused(frozen: Path, labels_root: Path):
+    """The draw order is part of the lot; a resorted file is a different lot."""
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 4), labels_root
+    )
+
+    def reverse(payload):
+        items = list(reversed(payload["items"]))
+        for position, item in enumerate(items, start=1):
+            item["position"] = position
+        payload["items"] = items
+
+    _rewrite_selection(result.path, reverse)
+    with pytest.raises(HumanLabelError, match="is not what calibration-selector-v0"):
+        assert_selection_bindings(load_calibration_selection(result.path), dataset)
+
+
+def test_a_selection_with_an_invented_stratum_is_refused(
+    frozen: Path, labels_root: Path
+):
+    """The stratum claims to explain the draw; an unchecked explanation is decoration."""
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 4), labels_root
+    )
+
+    def relabel_stratum(payload):
+        payload["items"][0]["stratum"]["recommendation_band"] = "RECOMMENDED_HIGH"
+        payload["items"][0]["stratum"]["qualification"] = "CORE_TARGET"
+
+    _rewrite_selection(result.path, relabel_stratum)
+    with pytest.raises(HumanLabelError, match="states stratum"):
+        assert_selection_bindings(load_calibration_selection(result.path), dataset)
+
+
+def test_a_selection_with_an_invented_diversity_key_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 4), labels_root
+    )
+
+    def relabel_diversity(payload):
+        payload["items"][0]["diversity_key"]["source_type"] = "invented"
+
+    _rewrite_selection(result.path, relabel_diversity)
+    with pytest.raises(HumanLabelError, match="diversity key"):
+        assert_selection_bindings(load_calibration_selection(result.path), dataset)
+
+
+def test_a_selection_claiming_a_different_size_than_the_selector_draws_is_refused(
+    frozen: Path, labels_root: Path
+):
+    dataset = read_frozen_dataset(frozen)
+    result = write_calibration_selection(
+        select_calibration_sample(dataset, 4), labels_root
+    )
+
+    def drop_one(payload):
+        payload["items"] = payload["items"][:3]
+        payload["effective_sample_size"] = 3
+
+    _rewrite_selection(result.path, drop_one)
+    with pytest.raises(HumanLabelError, match="draws 4 postings"):
+        assert_selection_bindings(load_calibration_selection(result.path), dataset)
+
+
+def test_a_genuinely_drawn_selection_round_trips_and_is_accepted(
+    frozen: Path, labels_root: Path
+):
+    """The positive case: a real lot, stored and reloaded, still verifies."""
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 5)
+    result = write_calibration_selection(selection, labels_root)
+    stored = load_calibration_selection(result.path)
+    assert_selection_bindings(stored, dataset)
+    assert stored.opportunity_ids == selection.opportunity_ids
+    assert stored.selector_version == CALIBRATION_SELECTOR_VERSION
+
+
+def test_the_same_dataset_and_size_redraw_identically(frozen: Path):
+    """The determinism the re-derivation check depends on, stated separately."""
+    dataset = read_frozen_dataset(frozen)
+    again = read_frozen_dataset(frozen)
+    first = select_calibration_sample(dataset, 7)
+    second = select_calibration_sample(again, 7)
+    assert first.opportunity_ids == second.opportunity_ids
+    assert first.selection_fingerprint == second.selection_fingerprint
+    assert [dict(item.stratum) for item in first.items] == [
+        dict(item.stratum) for item in second.items
+    ]
+
+
+def test_the_cli_refuses_a_selection_the_selector_would_not_have_drawn(
+    frozen: Path, labels_root: Path, capsys
+):
+    """And it refuses before showing anything, as with every other binding."""
+    dataset = read_frozen_dataset(frozen)
+    selection = select_calibration_sample(dataset, 4)
+    result = write_calibration_selection(selection, labels_root)
+    drawn = set(selection.opportunity_ids)
+    stranger = next(
+        value for value in dataset.opportunity_ids if value not in drawn
+    )
+    _rewrite_selection(
+        result.path,
+        lambda payload: payload["items"][2].__setitem__(
+            "opportunity_id", stranger
+        ),
+    )
+    code, payload = run(
+        capsys,
+        "show",
+        "--dataset-dir",
+        str(frozen),
+        "--labels-root",
+        str(labels_root),
+        "--next",
+    )
+    assert code == 2
+    assert "is not what calibration-selector-v0" in payload["error"]
+    assert "opportunity" not in payload
 
 
 # --------------------------------------------------------------------------
