@@ -1,10 +1,12 @@
 """The versioned vocabulary of an offline metric run — Phase 10.3a.
 
-This module is the *contract* and nothing else: the objects a future ranking
-metric will be computed against, the statuses and reason codes a result may
-carry, and the validation that decides whether an artefact is well formed. It
-opens no file, reads no database, computes no digest and — this is the point of
-the whole slice — computes no metric.
+This module is the *contract* and nothing else: the objects a ranking metric is
+computed against, the statuses and reason codes a result may carry, the frozen
+definitions those metrics are made of — the relevance threshold, the NDCG gain,
+the positional discount — and the validation that decides whether an artefact is
+well formed. It opens no file, reads no database and computes no digest. It
+computes no metric either: a gain is a definition, and the sums that use it live
+in `formulas.py`.
 
 Four rules shape everything below, and three of them are inherited.
 
@@ -26,9 +28,11 @@ Four rules shape everything below, and three of them are inherited.
   that same function's output, so "what the object says" and "what its digest
   covers" cannot drift apart.
 
-**No metric formula lives in this package.** No Precision@K, no Recall@K, no
-DCG, no IDCG, no NDCG, no baseline, no business KPI. Phase 10.3a builds the
-gate; 10.3b walks through it.
+**No metric formula lives in this module.** Precision@K, Recall@K and NDCG@K
+are computed in `formulas.py`, each behind the `availability.py` gate that
+decides whether the judgements it needs exist; this module holds what they are
+defined in terms of. No baseline, no ablation and no business KPI exist anywhere
+in the package.
 
 The dependency direction, unchanged since Phase 10.1:
 
@@ -45,6 +49,7 @@ label file, on a machine that has those two things and nothing else.
 from __future__ import annotations
 
 import re
+from math import log2
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -106,6 +111,8 @@ __all__ = [
     "is_relevant_grade",
     "metric_result_payload",
     "metric_support_payload",
+    "rank_discount",
+    "relevance_gain",
     "require_evidence_class",
     "require_supported_metric_contract_version",
     "validate_declared_size",
@@ -221,6 +228,49 @@ assert RELEVANT_GRADE_THRESHOLD == 2
 assert _GRADE_BY_NAME["VERY_RELEVANT"] > RELEVANT_GRADE_THRESHOLD
 assert _GRADE_BY_NAME["WEAKLY_RELEVANT"] < RELEVANT_GRADE_THRESHOLD
 assert _GRADE_BY_NAME["OUT_OF_TARGET"] < RELEVANT_GRADE_THRESHOLD
+
+
+def relevance_gain(grade: int) -> float:
+    """The graded gain of one recorded judgement: `2**grade - 1`.
+
+    The frozen NDCG gain of this metric contract, stated once so that the gate
+    and the formula cannot hold two opinions of it:
+
+        grade 0 -> 0.0     grade 2 -> 3.0
+        grade 1 -> 1.0     grade 3 -> 7.0
+
+    Exponential rather than linear because the scale is ordinal and the top of
+    it is what a ranking is judged on: the difference between VERY_RELEVANT and
+    RELEVANT should outweigh the difference between WEAKLY_RELEVANT and
+    OUT_OF_TARGET, and a linear gain says they are equal.
+
+    It is a *definition*, not a metric: it maps one grade to one number and
+    knows nothing about rankings, positions or cut-offs. The sums that use it
+    live in `formulas.py`. The domain is Phase 10.2's, through
+    `validate_relevance_grade`, so there is no gain for a grade nobody could
+    have recorded.
+    """
+    try:
+        validated = validate_relevance_grade(grade)
+    except HumanLabelError as error:
+        raise MetricArgumentError(str(error)) from error
+    return float(2**validated - 1)
+
+
+def rank_discount(rank_position: int) -> float:
+    """The positional discount of this metric contract: `log2(rank + 1)`.
+
+    A *divisor*, and always at least 1.0 — rank 1 divides by `log2(2) == 1` and
+    every later rank divides by more. Two consequences are relied on elsewhere
+    and are true of no other discount by accident: the discount never vanishes,
+    and it never turns a positive gain into a zero contribution. That is what
+    lets a gate decide "the ideal cut-off carries no gain" by looking at gains
+    alone, without summing a DCG it has no business computing.
+    """
+    position = validate_rank_position(
+        rank_position, subject="a discounted rank position"
+    )
+    return log2(position + 1)
 
 
 def is_relevant_grade(grade: int) -> bool:
@@ -1017,6 +1067,15 @@ class MetricUnavailableReason(StrEnum):
     #: evaluation set, not the ranking.
     NO_RELEVANT_ITEMS = "NO_RELEVANT_ITEMS"
 
+    #: The ideal ranking at this cut-off carries no gain at all, so NDCG's
+    #: denominator is zero and the ratio is undefined. Distinct from
+    #: `NO_RELEVANT_ITEMS`, and the distinction is not pedantry: relevance is
+    #: binary at `grade >= 2` while NDCG is graded, so a universe of nothing but
+    #: grade 1 has no relevant item for Recall and a strictly positive IDCG for
+    #: NDCG — `gain(1) == 1`. This code means what it says: every grade the
+    #: ideal ordering could reach at this cut-off is a 0.
+    ZERO_IDEAL_DCG = "ZERO_IDEAL_DCG"
+
     #: The labels offered are not the labels this run is bound to. The question
     #: is well formed and this evidence cannot answer it.
     LABELSET_BINDING_MISMATCH = "LABELSET_BINDING_MISMATCH"
@@ -1042,9 +1101,9 @@ class MetricSupport:
     Everything here is either counted from the artefacts or echoed from the
     request. `numerator` and `denominator` exist because a computed result will
     need somewhere to state them and a reader should not have to learn a second
-    shape when 10.3b arrives — and they are `None` throughout this slice,
-    because no formula exists to fill them and a fabricated denominator is worse
-    than an absent one.
+    shape once a value exists. They are filled by `formulas.py` for a COMPUTED
+    result and stay `None` for an `N_A` one: a fabricated denominator is worse
+    than an absent one, and an unavailable metric has no fraction behind it.
     """
 
     k_requested: int | None = None
@@ -1106,13 +1165,16 @@ class MetricAvailability:
 
         Only ever one direction. An unavailable metric is already a complete
         result — `N_A`, a reason, the support that explains it — so it converts.
-        An *available* one is not a result at all until somebody computes it,
-        and this package never will, so asking converts nothing and raises.
+        An *available* one is not a result at all until somebody computes it:
+        the gate established that the question can be answered, not what the
+        answer is. Converting here would manufacture a COMPUTED result with no
+        value behind it, so it raises and `formulas.py` does the arithmetic.
         """
         if self.available:
             raise MetricContractError(
                 f"{self.metric} is available but no value has been computed; "
-                "Phase 10.3a decides availability and computes no metric"
+                "a gate decides availability and `formulas.py` computes the "
+                "metric"
             )
         return MetricResult(
             metric=self.metric,

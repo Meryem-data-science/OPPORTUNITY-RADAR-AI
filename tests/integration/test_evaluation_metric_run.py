@@ -15,6 +15,7 @@ and no real judgement appears anywhere in it.
 import inspect
 import sqlite3
 from dataclasses import replace
+from math import log2
 from pathlib import Path
 
 import pytest
@@ -67,9 +68,13 @@ from evaluation.metrics import (
     build_metric_run_context,
     evaluation_run_fingerprint,
     evaluation_universe_fingerprint,
+    metric_result_payload,
+    ndcg_at_k,
     ndcg_at_k_availability,
+    precision_at_k,
     precision_at_k_availability,
     ranking_from_frozen_dataset,
+    recall_at_k,
     recall_at_k_availability,
     require_evidence_class,
     universe_judged_coverage,
@@ -629,6 +634,144 @@ def test_an_expected_labelset_fingerprint_is_checked_against_the_files(
             lot,
             expected_labelset_fingerprint=report.labelset_fingerprint,
         )
+
+
+# --------------------------------------------------------------------------
+# Phase 10.3b: the metrics themselves, over real artefacts
+# --------------------------------------------------------------------------
+
+
+def test_a_metric_is_computed_from_real_files_through_its_gate(
+    frozen, labels_root
+):
+    """Dataset written by 10.1, labels appended by 10.2, score by 10.3b.
+
+    Ranks 1..12 are opportunities 1..12, and the first four are judged
+    VERY_RELEVANT, so the top 4 is perfect and the top 8 is half relevant.
+    """
+    grades = {
+        opportunity_id: (3 if opportunity_id <= 4 else 0)
+        for opportunity_id in range(1, COHORT_SIZE + 1)
+    }
+    record_labels(frozen, labels_root, grades)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    context = context_for(frozen, coverage)
+
+    precision = precision_at_k(context, 4)
+    assert precision.status is MetricStatus.COMPUTED
+    assert precision.value == 1.0
+    assert precision.support.numerator == 4.0
+    assert precision.support.denominator == 4.0
+
+    assert precision_at_k(context, 8).value == 0.5
+
+    recall = recall_at_k(context, 4)
+    assert recall.value == 1.0
+    assert recall.support.relevant_count == 4
+
+    ndcg = ndcg_at_k(context, 4)
+    assert ndcg.value == 1.0
+    assert ndcg.support.numerator == ndcg.support.denominator
+    assert ndcg.support.numerator == sum(
+        (2**3 - 1) / log2(position + 1) for position in range(1, 5)
+    )
+
+
+def test_a_real_unjudged_posting_makes_precision_n_a_and_never_zero(
+    frozen, labels_root
+):
+    grades = dict.fromkeys(range(1, COHORT_SIZE + 1), 3)
+    del grades[3]
+    record_labels(frozen, labels_root, grades)
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    context = context_for(frozen, coverage)
+
+    result = precision_at_k(context, 5)
+    assert result.status is MetricStatus.N_A
+    assert result.value is None
+    assert result.reason is MetricUnavailableReason.TOP_K_NOT_FULLY_JUDGED
+    assert result.support.unjudged_in_top_k == (3,)
+    with pytest.raises(UnjudgedOpportunityError):
+        coverage.grade(3)
+
+
+def test_a_real_universe_graded_zero_has_no_ndcg(frozen, labels_root):
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 0))
+    context = context_for(
+        frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    )
+    result = ndcg_at_k(context, 5)
+    assert result.status is MetricStatus.N_A
+    assert result.value is None
+    assert result.reason is MetricUnavailableReason.ZERO_IDEAL_DCG
+    # Recall says something different about the same universe, on purpose.
+    assert (
+        recall_at_k(context, 5).reason is MetricUnavailableReason.NO_RELEVANT_ITEMS
+    )
+
+
+def test_a_real_labelset_mismatch_yields_n_a_from_every_formula(
+    frozen, labels_root
+):
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    run = run_for(frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen)))
+    other_lot = coverage_from_disk(frozen, labels_root, lot_of(frozen, 4))
+    context = MetricRunContext(dataset=frozen, run=run, coverage=other_lot)
+
+    for metric in (precision_at_k, recall_at_k, ndcg_at_k):
+        result = metric(context, 5)
+        assert result.status is MetricStatus.N_A
+        assert result.value is None
+        assert result.reason is MetricUnavailableReason.LABELSET_BINDING_MISMATCH
+
+
+def test_a_hand_built_context_is_refused_by_the_formulas_too(
+    frozen, labels_root
+):
+    """A formula is no weaker a door than its gate, over real files."""
+    record_labels(frozen, labels_root, dict.fromkeys(range(1, COHORT_SIZE + 1), 2))
+    coverage = coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    run = run_for(frozen, coverage)
+
+    members = run.universe.opportunity_ids[:-1] + (999,)
+    universe = replace(
+        run.universe,
+        kind=EvaluationUniverseKind.FIXED_BENCHMARK_POOL,
+        opportunity_ids=members,
+        size=len(members),
+    )
+    universe = replace(
+        universe, fingerprint=evaluation_universe_fingerprint(universe)
+    )
+    forged = replace(run, universe=universe)
+    forged = replace(forged, run_fingerprint=evaluation_run_fingerprint(forged))
+    context = MetricRunContext(dataset=frozen, run=forged, coverage=coverage)
+
+    for metric in (precision_at_k, recall_at_k, ndcg_at_k):
+        with pytest.raises(EvaluationBindingError, match="absent from dataset"):
+            metric(context, 5)
+
+
+def test_a_real_result_payload_is_stable_and_states_its_fraction(
+    frozen, labels_root
+):
+    grades = {
+        opportunity_id: (2 if opportunity_id <= 6 else 0)
+        for opportunity_id in range(1, COHORT_SIZE + 1)
+    }
+    record_labels(frozen, labels_root, grades)
+    context = context_for(
+        frozen, coverage_from_disk(frozen, labels_root, lot_of(frozen))
+    )
+    payload = metric_result_payload(recall_at_k(context, 3))
+    assert payload["metric"] == "RECALL_AT_K"
+    assert payload["status"] == "COMPUTED"
+    assert payload["value"] == 0.5
+    assert payload["reason"] is None
+    assert payload["support"]["numerator"] == 3.0
+    assert payload["support"]["denominator"] == 6.0
+    assert payload["support"]["relevant_count"] == 6
+    assert payload == metric_result_payload(recall_at_k(context, 3))
 
 
 # --------------------------------------------------------------------------

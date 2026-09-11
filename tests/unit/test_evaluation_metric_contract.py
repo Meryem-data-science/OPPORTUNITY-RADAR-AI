@@ -13,10 +13,8 @@ each one prevents.
 
 import ast
 import inspect
-from collections.abc import Mapping, Sequence
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -27,11 +25,8 @@ from evaluation.labeling import (
     HUMAN_LABEL_PROTOCOL_VERSION,
     HUMAN_LABEL_SCHEMA_VERSION,
     RELEVANCE_GRADE_NAMES,
-    CalibrationSelection,
     FrozenEvaluationDataset,
     HumanLabelError,
-    HumanRelevanceLabel,
-    LabelDiagnostics,
     canonical_label_order,
     labelset_fingerprint,
     select_calibration_sample,
@@ -52,7 +47,6 @@ from evaluation.metrics import (
     EvaluationUniverseKind,
     EvidenceClass,
     EvidenceClassError,
-    LabelCoverage,
     MetricArgumentError,
     MetricAvailability,
     MetricAvailabilityDecision,
@@ -98,161 +92,28 @@ from evaluation.metrics import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
-DATASET_CONTENT_FINGERPRINT = "a" * 64
-DATASET_ID = "evaluation-dataset-v3-" + DATASET_CONTENT_FINGERPRINT[:16]
-PROFILE_CONTEXT_FINGERPRINT = "9" * 64
 
+def imported_modules(path: Path) -> set[str]:
+    """Every module name a file imports, relative imports kept as written."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            modules.add("." * node.level + (node.module or ""))
+    return modules
 
-# --------------------------------------------------------------------------
-# invented artefacts
-# --------------------------------------------------------------------------
-
-
-def record(opportunity_id: int, rank_position: int | None) -> dict[str, Any]:
-    """One frozen record, reduced to the two fields this slice reads.
-
-    A `recommendation` of `None` is Phase 10.1's statement that the
-    Recommendation run never covered the posting — the candidate false negative
-    the snapshot exists to preserve — and it is exactly what must not become a
-    rank of 0 or a place at the bottom of the list.
-    """
-    recommendation = (
-        None
-        if rank_position is None
-        else {
-            "rank_position": rank_position,
-            "disposition": "RECOMMENDED",
-            "recommendation_score": 0.5,
-            "evidence_coverage": 0.8,
-            "assessment_fingerprint": "f" * 64,
-        }
-    )
-    return {"opportunity_id": opportunity_id, "recommendation": recommendation}
-
-
-def frozen_dataset(
-    records: Sequence[Mapping[str, Any]],
-    *,
-    dataset_id: str = DATASET_ID,
-    content_fingerprint: str = DATASET_CONTENT_FINGERPRINT,
-    profile_id: int = 1,
-    profile_context_fingerprint: str = PROFILE_CONTEXT_FINGERPRINT,
-) -> FrozenEvaluationDataset:
-    return FrozenEvaluationDataset(
-        directory=Path("/invented/datasets") / dataset_id,
-        schema_version="evaluation-dataset-v3",
-        dataset_id=dataset_id,
-        content_fingerprint=content_fingerprint,
-        record_count=len(records),
-        profile_id=profile_id,
-        user_id=1,
-        profile_context_fingerprint=profile_context_fingerprint,
-        ordering="opportunity_id ASC",
-        records=tuple(records),
-    )
-
-
-def ranked_dataset(
-    size: int = 20, ranked: int = 12, **kwargs: Any
-) -> FrozenEvaluationDataset:
-    """`size` opportunities, the first `ranked` of which the pipeline ordered."""
-    return frozen_dataset(
-        [
-            record(index, index if index <= ranked else None)
-            for index in range(1, size + 1)
-        ],
-        **kwargs,
-    )
-
-
-def label(
-    opportunity_id: int,
-    grade: int,
-    *,
-    dataset: FrozenEvaluationDataset,
-    revision: int = 1,
-    relabel_reason: str | None = None,
-    protocol_version: str = HUMAN_LABEL_PROTOCOL_VERSION,
-) -> HumanRelevanceLabel:
-    return HumanRelevanceLabel(
-        label_schema_version=HUMAN_LABEL_SCHEMA_VERSION,
-        protocol_version=protocol_version,
-        dataset_id=dataset.dataset_id,
-        dataset_content_fingerprint=dataset.content_fingerprint,
-        profile_id=dataset.profile_id,
-        profile_context_fingerprint=dataset.profile_context_fingerprint,
-        opportunity_id=opportunity_id,
-        relevance_grade=grade,
-        diagnostics=LabelDiagnostics(),
-        reason_tags=(),
-        note=None,
-        labeled_at="2026-04-01T00:00:00+00:00",
-        revision=revision,
-        relabel_reason=relabel_reason,
-    )
-
-
-def whole_lot(dataset: FrozenEvaluationDataset) -> CalibrationSelection:
-    """A calibration lot covering the whole dataset.
-
-    Phase 10.2 draws a *stratified* lot, so a lot smaller than the cohort holds
-    postings nobody chose by hand. Most tests here want to decide which postings
-    are judged rather than which are selected, so they select everything and
-    then judge a subset — which is also the state a real round is in for most of
-    its life: a lot drawn, and part of it answered.
-    """
-    return select_calibration_sample(dataset, sample_size=len(dataset.records))
-
-
-def coverage_of(
-    grades: Mapping[int, int],
-    dataset: FrozenEvaluationDataset,
-    *,
-    selection: CalibrationSelection | None = None,
-    expected_labelset_fingerprint: str | None = None,
-) -> LabelCoverage:
-    return build_label_coverage(
-        dataset,
-        [
-            label(opportunity_id, grade, dataset=dataset)
-            for opportunity_id, grade in sorted(grades.items())
-        ],
-        selection=whole_lot(dataset) if selection is None else selection,
-        expected_labelset_fingerprint=expected_labelset_fingerprint,
-    )
-
-
-def run_over(
-    dataset: FrozenEvaluationDataset,
-    *,
-    universe_ids: Sequence[int] | None = None,
-    coverage: LabelCoverage | None = None,
-    **kwargs: Any,
-):
-    universe = build_evaluation_universe(dataset, universe_ids)
-    ranking = ranking_from_frozen_dataset(dataset)
-    return build_evaluation_run(
-        dataset=dataset,
-        universe=universe,
-        ranking=ranking,
-        coverage=coverage_of({1: 2}, dataset) if coverage is None else coverage,
-        evidence_class=EvidenceClass.DIAGNOSTIC_CALIBRATION,
-        **kwargs,
-    )
-
-
-def context_of(
-    dataset: FrozenEvaluationDataset,
-    coverage: LabelCoverage | None = None,
-    **kwargs: Any,
-):
-    """A verified context: the only thing an availability gate accepts."""
-    resolved = coverage_of({1: 2}, dataset) if coverage is None else coverage
-    return build_metric_run_context(
-        dataset=dataset,
-        run=run_over(dataset, coverage=resolved, **kwargs),
-        coverage=resolved,
-    )
+from tests.unit.evaluation_metric_fixtures import (
+    context_of,
+    coverage_of,
+    frozen_dataset,
+    label,
+    ranked_dataset,
+    record,
+    run_over,
+    whole_lot,
+)
 
 
 @pytest.fixture
@@ -825,7 +686,7 @@ def test_an_available_metric_cannot_be_turned_into_a_result(dataset):
     """Availability is not a score, and this slice refuses to let it become one."""
     coverage = coverage_of(dict.fromkeys(range(1, 13), 2), dataset)
     availability = precision_at_k_availability(context_of(dataset, coverage), 10)
-    with pytest.raises(MetricContractError, match="computes no metric"):
+    with pytest.raises(MetricContractError, match="`formulas.py` computes"):
         availability.as_result()
 
 
@@ -1810,23 +1671,136 @@ def test_14_the_metrics_package_imports_nothing_that_could_open_a_database():
             )
 
 
-def test_the_slice_contains_no_metric_formula():
-    """The deliverable, asserted rather than promised.
+def test_a_metric_formula_lives_only_in_the_formulas_module():
+    """Phase 10.3a's "no formula anywhere" rule, narrowed rather than dropped.
 
-    Read off the syntax tree: no public function of this package names a metric
-    it could be mistaken for computing, and no module defines one.
+    The formulas exist now, so the blanket prohibition would be a lie. What has
+    to stay true is the *layering*: the contract defines, the gates decide, and
+    only `formulas.py` computes. A DCG summation appearing in `schema.py` or a
+    Precision value computed inside `availability.py` would put a number where
+    nothing re-verifies the context first, which is exactly the door Phase 10.3a
+    spent three rounds closing.
+
+    Read off the syntax tree rather than from prose, so it cannot rot quietly.
     """
-    forbidden = ("precision_at_k", "recall_at_k", "ndcg_at_k", "dcg", "idcg")
+    computing = ("precision_at_k", "recall_at_k", "ndcg_at_k", "dcg", "idcg")
     for path in sorted((REPOSITORY_ROOT / "evaluation" / "metrics").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
             name = node.name.lower()
-            for token in forbidden:
-                assert not (name.startswith(token) and "availability" not in name), (
-                    f"{path.name} defines {node.name}, which is a metric formula"
+            if not any(name.startswith(token) for token in computing):
+                continue
+            if "availability" in name:
+                # A gate, and gates may be named after the metric they gate.
+                assert path.name == "availability.py", (
+                    f"{path.name} defines the gate {node.name}"
                 )
+                continue
+            assert path.name == "formulas.py", (
+                f"{path.name} defines {node.name}, which computes a metric; "
+                "only formulas.py may"
+            )
+
+
+def test_every_public_formula_asks_its_own_gate_first():
+    """The unavoidable path, asserted structurally and not by reading prose.
+
+    Each public metric calls its gate by name, and does so before anything else
+    in the body. A formula that read a grade first would be a second, weaker
+    door into the same house: the gate is what re-verifies the context, so a
+    forged context refused by `precision_at_k_availability` must also be refused
+    by `precision_at_k`.
+    """
+    import evaluation.metrics.formulas as formulas_module
+
+    tree = ast.parse(
+        Path(formulas_module.__file__).read_text(encoding="utf-8")
+    )
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    for name, gate in (
+        ("precision_at_k", "precision_at_k_availability"),
+        ("recall_at_k", "recall_at_k_availability"),
+        ("ndcg_at_k", "ndcg_at_k_availability"),
+    ):
+        body = functions[name].body
+        # The docstring, then the gate call, and nothing in between.
+        first = body[1]
+        assert isinstance(first, ast.Assign), name
+        call = first.value
+        assert isinstance(call, ast.Call) and call.func.id == gate, name
+        # ...and the very next statement is the refusal.
+        assert isinstance(body[2], ast.If), name
+        called = {
+            node.func.id
+            for node in ast.walk(functions[name])
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        other_gates = {
+            "precision_at_k_availability",
+            "recall_at_k_availability",
+            "ndcg_at_k_availability",
+        } - {gate}
+        assert not (called & other_gates), name
+
+
+def test_the_metrics_package_has_no_clock_and_no_randomness():
+    """Determinism, read off the imports of every module in the package.
+
+    A metric that consulted the clock or a random source would return a
+    different number for the same frozen artefacts, and no audit could ever
+    reproduce it.
+    """
+    forbidden = {"random", "secrets", "time", "datetime", "uuid", "os"}
+    for path in sorted((REPOSITORY_ROOT / "evaluation" / "metrics").glob("*.py")):
+        for module in imported_modules(path):
+            root = module.split(".")[0]
+            assert root not in forbidden, f"{path.name} imports {module}"
+
+
+def test_the_only_production_import_in_the_package_is_the_shared_digest():
+    """The layering rule, stated honestly rather than absolutely.
+
+    `evaluation/` may read a production *primitive* — Phase 10.1 and 10.2 both
+    digest through the project's single `canonical_json`, and a second copy of
+    it would eventually disagree with the one the datasets were fingerprinted
+    with. What must never happen is the reverse direction, which
+    `test_13_no_production_package_imports_the_evaluation_metrics` covers.
+
+    So exactly one such import is allowed, in exactly one module, and the
+    computing layer has none at all.
+    """
+    allowed = {"fingerprint.py": {"services.collector.matching.fingerprint"}}
+    for path in sorted((REPOSITORY_ROOT / "evaluation" / "metrics").glob("*.py")):
+        production = {
+            module
+            for module in imported_modules(path)
+            if module.split(".")[0] == "services"
+        }
+        assert production <= allowed.get(path.name, set()), path.name
+
+
+def test_the_formulas_module_reads_nothing_but_arithmetic_and_this_package():
+    """A metric is a pure function of artefacts already loaded and verified."""
+    formulas = REPOSITORY_ROOT / "evaluation" / "metrics" / "formulas.py"
+    modules = imported_modules(formulas)
+    for module in modules:
+        root = module.split(".")[0]
+        assert root not in {"services", "sqlite3", "libsql"}, module
+        assert "sqlite" not in module.lower(), module
+        assert not module.startswith("evaluation.dataset.readers"), module
+    assert modules <= {
+        "__future__",
+        "collections.abc",
+        "dataclasses",
+        ".availability",
+        ".schema",
+    }, modules
 
 
 def test_the_relevance_threshold_is_the_frozen_one_and_not_a_new_definition():

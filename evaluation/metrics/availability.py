@@ -2,8 +2,9 @@
 
 This module answers one question per metric: *given this universe, this
 ranking and these judgements, is the metric knowable?* It never answers *what
-is it*. There is no Precision@K here, no Recall@K, no DCG, no IDCG and no NDCG;
-Phase 10.3a builds the gate and Phase 10.3b walks through it.
+is it*. There is no Precision@K value here, no Recall@K value, no DCG and no
+IDCG sum: the gates decide, `formulas.py` computes, and each formula asks its
+gate before touching a grade.
 
 The gates are pure and deterministic: same artefacts in, same decision out, no
 file read, no clock, no database, no randomness.
@@ -67,17 +68,28 @@ unavailable for a reason that is not true.
 Reused from the frozen Phase 10.2 rubric — `relevant iff grade >= 2` — and used
 here for exactly one purpose: telling "the universe is fully judged and holds
 no relevant item" apart from "the universe is fully judged and holds some". No
-ranking relevance is scored with it, because no ranking relevance is scored
-here at all.
+ranking relevance is scored with it here; scoring is `formulas.py`'s job, and
+it reuses the same `is_relevant_grade` rather than restating the threshold.
 
-## One open question, recorded rather than decided
+## The zero ideal, decided
 
-A fully judged universe in which *every* grade is 0 has an IDCG of zero, and a
-ratio against zero is undefined. That is a different condition from
-`NO_RELEVANT_ITEMS` as this contract uses it (grade >= 2), and deciding it
-needs the gain function NDCG will actually use — which is a 10.3b question.
-This slice does not guess: such a universe passes the NDCG gate here, and the
-formula slice must decide the case explicitly rather than divide by zero.
+A fully judged universe whose best grades at the cut-off are all 0 has an ideal
+ordering worth nothing, so NDCG's denominator is zero and the ratio is
+undefined. Phase 10.3a left this open because deciding it needed the gain
+function; the gain function is now frozen in `schema.relevance_gain`, so the
+NDCG gate settles it here: `N_A / ZERO_IDEAL_DCG`, never an AVAILABLE that
+hands the formula a division it cannot perform.
+
+The gate decides it from gains rather than by summing a DCG it has no business
+computing. Every discount is `log2(rank + 1)`, which is at least 1.0 and always
+finite and positive, so a sum of non-negative discounted gains is zero exactly
+when every gain in it is zero — and "is any ideal gain positive?" is a question
+about the contract, not a score.
+
+`ZERO_IDEAL_DCG` is not `NO_RELEVANT_ITEMS`. Relevance is binary at `grade >= 2`
+while NDCG is graded: a universe of nothing but grade 1 has no relevant item —
+Recall is `N_A / NO_RELEVANT_ITEMS` — and a strictly positive IDCG, because
+`gain(1) == 1`. Two different facts, two different codes.
 """
 
 from __future__ import annotations
@@ -99,12 +111,14 @@ from .schema import (
     MetricSupport,
     MetricUnavailableReason,
     is_relevant_grade,
+    relevance_gain,
     validate_k,
 )
 
 __all__ = [
     "effective_k",
     "judged_coverage_of",
+    "ideal_grades_at_cutoff",
     "judged_count_in_universe",
     "ndcg_at_k_availability",
     "precision_at_k_availability",
@@ -184,6 +198,40 @@ def relevant_count_in_universe(
         for opportunity_id in universe.opportunity_ids
         if is_relevant_grade(coverage.grade(opportunity_id))
     )
+
+
+def ideal_grades_at_cutoff(
+    universe: EvaluationUniverse, coverage: LabelCoverage, k: int
+) -> tuple[int, ...]:
+    """The best `k` grades the declared universe can offer, best first.
+
+    The ideal ordering NDCG is measured against, and it is drawn from the
+    **whole declared universe** rather than from the ranked items, the judged
+    items or the relevant ones. An ideal built from what the ranking happened to
+    surface would be an ideal the ranking cannot fail to match.
+
+    Refuses unless the universe is fully judged, for the same reason
+    `relevant_count_in_universe` does: the best grades of the judged part are an
+    understatement of the best grades of the whole, and an understated ideal
+    inflates every ratio taken against it.
+
+    Fewer than `k` grades come back when the universe is smaller than the
+    cut-off. Nothing is padded — a universe of 3 has 3 grades, not 3 grades and
+    seven zeros — because a padded zero is an opinion nobody expressed.
+    """
+    judged = universe_judged_coverage(universe, coverage)
+    if not judged.fully_judged:
+        raise EvaluationBindingError(
+            f"{len(judged.unjudged_opportunity_ids)} of the universe's "
+            f"{judged.total_count} opportunities carry no judgement; the ideal "
+            "ordering is not knowable, and one built from the judged part would "
+            "understate the ideal and inflate every ratio taken against it"
+        )
+    grades = sorted(
+        (coverage.grade(opportunity_id) for opportunity_id in universe.opportunity_ids),
+        reverse=True,
+    )
+    return tuple(grades[: validate_k(k)])
 
 
 def effective_k(k: int, ranking: EvaluationRanking) -> int:
@@ -360,6 +408,28 @@ def ndcg_at_k_availability(
             metric=MetricName.NDCG_AT_K,
             decision=MetricAvailabilityDecision.UNAVAILABLE,
             reason=MetricUnavailableReason.EVALUATION_UNIVERSE_NOT_FULLY_JUDGED,
+            support=support,
+        )
+    # The gate has to be honest about the denominator as well as the evidence.
+    # A universe that is fully judged and graded 0 throughout has an ideal
+    # ordering worth nothing, so NDCG's denominator is zero and the ratio is
+    # undefined — announcing AVAILABLE there would hand the formula a division
+    # it cannot perform.
+    #
+    # Decided from gains, not from a DCG: every discount is at least 1.0 and
+    # therefore finite and positive, so a sum of non-negative discounted gains
+    # is zero exactly when every gain in it is zero. The gate consults the one
+    # frozen `relevance_gain`; summing it is the formula's job, not a gate's.
+    if not any(
+        relevance_gain(grade) > 0
+        for grade in ideal_grades_at_cutoff(
+            context.universe, context.coverage, k_used
+        )
+    ):
+        return MetricAvailability(
+            metric=MetricName.NDCG_AT_K,
+            decision=MetricAvailabilityDecision.UNAVAILABLE,
+            reason=MetricUnavailableReason.ZERO_IDEAL_DCG,
             support=support,
         )
     return MetricAvailability(

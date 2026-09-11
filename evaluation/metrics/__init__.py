@@ -1,16 +1,30 @@
-"""Phase 10.3a: the offline metric run contract, and the availability gates.
+"""Phase 10.3: offline ranking metrics for a frozen evaluation run.
 
-This package decides **whether** a ranking metric may be reported for a frozen
-evaluation run. It does not compute one. There is no Precision@K, no Recall@K,
-no DCG, no IDCG, no NDCG, no baseline, no ablation, no business KPI and no error
-analysis in it, and that absence is the deliverable: the point of this slice is
-to make the later formulas difficult to misuse.
+This package decides **whether** a ranking metric may be reported, and then
+computes it. The two are separate jobs in separate modules, and the separation
+is the design rather than an accident of how it was built:
+
+    schema.py       the contract — objects, versions, statuses, reason codes,
+                    and the frozen definitions (relevance threshold, NDCG gain,
+                    positional discount). It computes nothing.
+    run.py          builders and verifiers — universes, rankings, label
+                    coverage, evaluation runs, and the context verification
+                    every decision rests on.
+    availability.py the gates — given this universe, this ranking and these
+                    judgements, is the metric knowable at all? They verify the
+                    whole context and decide; they compute no score.
+    formulas.py     the three metrics — Precision@K, Recall@K, NDCG@K — each of
+                    which asks its own gate first and computes only what the
+                    gate authorised.
+
+There is still no baseline, no ablation, no business KPI and no error analysis.
 
     frozen Phase 10.1 dataset
         -> evaluation universe + frozen ranking projection   (run.py)
         -> Phase 10.2 label coverage                         (run.py)
         -> a bound, digested evaluation run                  (schema.py)
-        -> COMPUTED / N_A availability decisions             (availability.py)
+        -> AVAILABLE / N_A gate decisions                    (availability.py)
+        -> COMPUTED / N_A metric results                     (formulas.py)
 
 and never the reverse. Nothing in `services/` imports this package; nothing here
 opens SQLite, writes a label, or touches Recommendation, Matching,
@@ -43,7 +57,11 @@ the comparison universe: an unjudged tail cannot lower the DCG but does lower
 the IDCG this build could construct, and a ratio with an understated denominator
 is an overstated score. So NDCG's safe rule is a fully judged universe, and
 Recall's is the same universe for a different reason — without it the total
-number of relevant items is a lower bound presented as a total.
+number of relevant items is a lower bound presented as a total. When that fully
+judged universe turns out to have an ideal ordering worth nothing at the
+cut-off, NDCG is `N_A / ZERO_IDEAL_DCG` rather than a division by zero; that is
+a different fact from Recall's `NO_RELEVANT_ITEMS`, because relevance is binary
+at `grade >= 2` while `gain(1)` is 1.
 
 **Calibration evidence is not an independent benchmark.** The existing
 `human-relevance-calibration-v0` round — twelve judgements, AI-assisted with
@@ -91,6 +109,7 @@ unavailable metric is never a silently approximated number and never a zero.
 
 from .availability import (
     effective_k,
+    ideal_grades_at_cutoff,
     judged_coverage_of,
     judged_count_in_universe,
     ndcg_at_k_availability,
@@ -99,6 +118,12 @@ from .availability import (
     relevant_count_in_universe,
     top_k_judged_coverage,
     universe_judged_coverage,
+)
+from .formulas import (
+    discounted_cumulative_gain,
+    ndcg_at_k,
+    precision_at_k,
+    recall_at_k,
 )
 from .fingerprint import (
     canonical_evaluation_ranking_payload,
@@ -167,6 +192,8 @@ from .schema import (
     is_relevant_grade,
     metric_result_payload,
     metric_support_payload,
+    rank_discount,
+    relevance_gain,
     require_evidence_class,
     require_supported_metric_contract_version,
     validate_declared_size,
@@ -223,6 +250,7 @@ __all__ = [
     "canonical_evaluation_run_payload",
     "canonical_evaluation_universe_payload",
     "canonical_opportunity_ids",
+    "discounted_cumulative_gain",
     "effective_k",
     "evaluation_ranking_fingerprint",
     "evaluation_ranking_payload",
@@ -230,15 +258,21 @@ __all__ = [
     "evaluation_run_payload",
     "evaluation_universe_fingerprint",
     "evaluation_universe_payload",
+    "ideal_grades_at_cutoff",
     "is_relevant_grade",
     "judged_coverage_of",
     "judged_count_in_universe",
     "metric_result_payload",
     "metric_support_payload",
+    "ndcg_at_k",
     "ndcg_at_k_availability",
+    "precision_at_k",
     "precision_at_k_availability",
+    "rank_discount",
     "ranking_from_frozen_dataset",
+    "recall_at_k",
     "recall_at_k_availability",
+    "relevance_gain",
     "relevant_count_in_universe",
     "require_evidence_class",
     "require_supported_metric_contract_version",
