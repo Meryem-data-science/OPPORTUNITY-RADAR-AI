@@ -1,8 +1,10 @@
 """The three offline ranking metrics — Phase 10.3b.
 
 This module computes Precision@K, Recall@K and NDCG@K. It is the only module in
-this package that produces a number, and it produces one **only where a Phase
-10.3a gate has already said the question is answerable**.
+this package that produces ranking metric values — `schema.py` defines the
+contract's own numbers, the gain and the discount, and `availability.py` counts
+support statistics — and it produces one **only where a Phase 10.3a gate has
+already said the question is answerable**.
 
 ## The one rule that shapes everything here
 

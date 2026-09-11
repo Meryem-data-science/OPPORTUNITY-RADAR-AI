@@ -103,8 +103,8 @@ labels behind it.
 
 `COMPUTED` or `N_A`, with a stable reason code from a closed vocabulary and a
 support block — `k_requested`, `k_effective`, `judged_count`, `universe_size`
-and, when a formula eventually exists, its numerator and denominator. An
-unavailable metric is never a silently approximated number and never a zero.
+and, for a computed metric, its numerator and denominator. An unavailable
+metric is never a silently approximated number and never a zero.
 """
 
 from .availability import (
