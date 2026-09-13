@@ -102,6 +102,18 @@ from typing import Any, Callable
 from services.priority.engine import freshness_score
 from services.priority.input_assembly import parse_persisted_date
 
+from evaluation.frozen_facts import (
+    FrozenDataAiState,
+    FrozenRecordGeography,
+    FrozenTargetVerdict,
+    data_ai_state_of,
+    frozen_block_field,
+    frozen_block_sequence,
+    frozen_optional_block,
+    record_geography_of,
+    target_verdict_of,
+)
+
 from .bindings import (
     _build_business_metric_result,
     benchmark_records_fingerprint,
@@ -139,7 +151,6 @@ from .schema import (
     UrlAuditOutcome,
     frozen_action_url,
     metric_definition,
-    validate_country_code,
     validate_text,
 )
 
@@ -395,48 +406,39 @@ def verify_business_metric_computation_context(
 # skipped record.
 
 
+def _record_subject(position: int) -> str:
+    """How this contract names one record in a refusal. Spelled once."""
+    return f"frozen record {position}"
+
+
 def _optional_block(
     record: Mapping[str, Any], field: str, position: int
 ) -> Mapping[str, Any] | None:
-    value = record[field]
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        raise BusinessMetricBindingError(
-            f"frozen record {position} states {field}={value!r} "
-            f"({type(value).__name__}), which is not the optional block of the "
-            "Phase 10.1 record contract"
-        )
-    return value
+    return frozen_optional_block(
+        record,
+        field,
+        record_subject=_record_subject(position),
+        refuse=BusinessMetricBindingError,
+    )
 
 
 def _block_sequence(
     record: Mapping[str, Any], field: str, position: int
 ) -> tuple[Mapping[str, Any], ...]:
-    value = record[field]
-    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
-        raise BusinessMetricBindingError(
-            f"frozen record {position} states {field}={value!r}, which is not a "
-            "sequence"
-        )
-    for index, item in enumerate(value, start=1):
-        if not isinstance(item, Mapping):
-            raise BusinessMetricBindingError(
-                f"frozen record {position} states {field}[{index}]={item!r}, "
-                "which is not a mapping"
-            )
-    return tuple(value)
+    return frozen_block_sequence(
+        record,
+        field,
+        record_subject=_record_subject(position),
+        refuse=BusinessMetricBindingError,
+    )
 
 
 def _block_field(
     block: Mapping[str, Any], field: str, *, subject: str
 ) -> Any:
-    if field not in block:
-        raise BusinessMetricBindingError(
-            f"{subject} states no {field!r}; refusing to read a block of another "
-            "contract"
-        )
-    return block[field]
+    return frozen_block_field(
+        block, field, subject=subject, refuse=BusinessMetricBindingError
+    )
 
 
 def _projected(
@@ -567,15 +569,19 @@ def _source_provenance(verified: _VerifiedComputation) -> _SourceProvenance:
     )
 
 
-#: The Data/AI qualification vocabulary, projected onto the five counts of
-#: `DataAiQualificationBreakdown`. The keys are the production classifier's own
-#: members; the tests assert that this mapping's domain is exactly that enum, so
-#: a value added upstream is a test failure here rather than a silent miscount.
-_DATA_AI_PROJECTION: Mapping[str, str] = {
-    "CORE_TARGET": "core_target_count",
-    "ADJACENT_TARGET": "adjacent_target_count",
-    "OUT_OF_SCOPE": "out_of_scope_count",
-    "UNCERTAIN": "uncertain_count",
+#: The five `FrozenDataAiState` members, projected onto the five counts of
+#: `DataAiQualificationBreakdown`. The *vocabulary* now lives in
+#: `evaluation.frozen_facts`, which Phase 10.5 reads through as well, so what is
+#: left here is only this contract's own arithmetic: which count each state
+#: feeds. The tests assert that this mapping's domain is exactly the shared
+#: enum, so a state added there is a test failure here rather than a silent
+#: miscount.
+_DATA_AI_COUNTS: Mapping[FrozenDataAiState, str] = {
+    FrozenDataAiState.CORE_TARGET: "core_target_count",
+    FrozenDataAiState.ADJACENT_TARGET: "adjacent_target_count",
+    FrozenDataAiState.OUT_OF_SCOPE: "out_of_scope_count",
+    FrozenDataAiState.UNCERTAIN: "uncertain_count",
+    FrozenDataAiState.UNCLASSIFIED: "unclassified_count",
 }
 
 #: The opportunity type vocabulary, projected onto six of the seven counts of
@@ -643,13 +649,22 @@ def _data_ai_breakdown(
     `DATA_AI_RATE`, `CORE_DATA_AI_RATE` and `CLASSIFICATION_COVERAGE_RATE` are
     all fractions of this one object, so the three can never be published from
     three different pictures of the same cohort.
+
+    The *reading* of each record is `evaluation.frozen_facts.data_ai_state_of`,
+    which Phase 10.5's `DATA_AI_NOT_EXPLICITLY_OUT_OF_SCOPE` projection reads
+    through too. What stays here is the counting: one walk, five counts, and the
+    partition check below. A second copy of "an unread posting is UNCLASSIFIED,
+    never OUT_OF_SCOPE" in another phase is exactly the drift that would be
+    invisible, because each copy would be internally consistent.
     """
-    counts = _qualification_counts(
-        verified,
-        "qualification",
-        _DATA_AI_PROJECTION,
-        unclassified_attribute="unclassified_count",
-    )
+    counts = {attribute: 0 for attribute in _DATA_AI_COUNTS.values()}
+    for position, record in enumerate(verified.records, start=1):
+        state = data_ai_state_of(
+            record,
+            record_subject=_record_subject(position),
+            refuse=BusinessMetricBindingError,
+        )
+        counts[_DATA_AI_COUNTS[state]] += 1
     breakdown = DataAiQualificationBreakdown(**counts)
     _require_partition(breakdown.total, verified, "the Data/AI qualifications")
     return breakdown
@@ -708,98 +723,26 @@ def _require_partition(
         )
 
 
-#: The geography segment statuses this contract reads, with what each one is
-#: allowed to say about a country. `RESOLVED` named exactly one country;
-#: `AMBIGUOUS` found several places the text could mean; `UNKNOWN` found no
-#: geographic signal at all. The last two are different failures and neither is
-#: ever read as "not in the target country".
-_SEGMENT_RESOLVED = "RESOLVED"
-_SEGMENT_AMBIGUOUS = "AMBIGUOUS"
-_SEGMENT_UNKNOWN = "UNKNOWN"
-_SEGMENT_STATUSES: frozenset[str] = frozenset(
-    {_SEGMENT_RESOLVED, _SEGMENT_AMBIGUOUS, _SEGMENT_UNKNOWN}
-)
-
-
-@dataclass(frozen=True)
-class _RecordGeography:
-    """One record's frozen geography, already checked for self-coherence."""
-
-    #: Empty when the resolver produced no segment at all for this posting.
-    statuses: tuple[str, ...]
-    #: The countries its RESOLVED segments named.
-    resolved_countries: tuple[str, ...]
-
-    @property
-    def has_segments(self) -> bool:
-        return bool(self.statuses)
-
-    @property
-    def has_unknown_segment(self) -> bool:
-        return _SEGMENT_UNKNOWN in self.statuses
-
-    @property
-    def has_ambiguous_segment(self) -> bool:
-        return _SEGMENT_AMBIGUOUS in self.statuses
-
-    @property
-    def all_resolved(self) -> bool:
-        return bool(self.statuses) and all(
-            status == _SEGMENT_RESOLVED for status in self.statuses
-        )
-
-
 def _record_geography(
     record: Mapping[str, Any], position: int
-) -> _RecordGeography:
-    """Read one record's frozen segments, refusing any that contradicts itself.
+) -> FrozenRecordGeography:
+    """One record's frozen geography, through the one shared reading.
 
-    The frozen Phase 7A segments and **nothing else**: no live geography
-    resolver, and no fallback to `record.location` or `record.country`. Those
-    fields are the raw text the resolver was given and the column the collector
-    wrote; reading a country out of either would be resolving geography here,
-    under a metric's name, with no rule and no version.
+    The statuses, their coherence rule and what each one may say about a country
+    live in `evaluation.frozen_facts`: `RESOLVED` named exactly one country,
+    `AMBIGUOUS` found several places the text could mean, `UNKNOWN` found no
+    geographic signal at all, and the last two are different failures of which
+    neither is ever read as "not in the target country". Phase 10.5's
+    `GEO_NOT_EXPLICITLY_OUT_OF_TARGET` projection reads the same primitive, so
+    the two phases cannot come to disagree about which postings are placed.
 
-    The coherence rule is the resolver's own: a RESOLVED segment names a country,
-    and an AMBIGUOUS or UNKNOWN one does not. A segment that claims to have
-    resolved to nothing — or to have resolved nothing to a country — is a hard
-    error, because the two halves of it cannot both be true.
+    Still the frozen Phase 7A segments and nothing else — no live resolver, and
+    no fallback to `record["location"]` or `record["country"]`.
     """
-    statuses: list[str] = []
-    countries: list[str] = []
-    for index, segment in enumerate(
-        _block_sequence(record, "geography_segments", position), start=1
-    ):
-        subject = f"geography segment {index} of frozen record {position}"
-        status = validate_text(
-            _block_field(segment, "status", subject=subject),
-            subject=f"the status of {subject}",
-        )
-        if status not in _SEGMENT_STATUSES:
-            raise BusinessMetricBindingError(
-                f"the status of {subject} is {status!r}; this contract reads "
-                f"{sorted(_SEGMENT_STATUSES)}"
-            )
-        country = _block_field(segment, "country_code", subject=subject)
-        if status == _SEGMENT_RESOLVED:
-            if country is None:
-                raise BusinessMetricBindingError(
-                    f"{subject} is {status} and names no country; a resolved "
-                    "segment resolved to somewhere"
-                )
-            countries.append(
-                validate_country_code(country, subject=f"the country of {subject}")
-            )
-        elif country is not None:
-            raise BusinessMetricBindingError(
-                f"{subject} is {status} and names country {country!r}; only a "
-                f"{_SEGMENT_RESOLVED} segment names one, and a country stated "
-                "under either of the other two would be a placement the resolver "
-                "did not make"
-            )
-        statuses.append(status)
-    return _RecordGeography(
-        statuses=tuple(statuses), resolved_countries=tuple(countries)
+    return record_geography_of(
+        record,
+        record_subject=_record_subject(position),
+        refuse=BusinessMetricBindingError,
     )
 
 
@@ -852,18 +795,30 @@ def _target_verdicts(
 
     **No country is hardcoded here.** `target_country` comes from the bound
     profile target binding; this function knows nothing about Morocco.
+
+    The verdict itself is `evaluation.frozen_facts.target_verdict_of`, shared
+    with Phase 10.5's `GEO_NOT_EXPLICITLY_OUT_OF_TARGET` projection — which is
+    what makes the two phases' geography one statement rather than two. What
+    stays here is this contract's arithmetic: three counts over one walk, and
+    the partition check.
     """
-    match = 0
-    out_of_target = 0
-    unknown = 0
+    counts = {
+        FrozenTargetVerdict.MATCH: 0,
+        FrozenTargetVerdict.OUT_OF_TARGET: 0,
+        FrozenTargetVerdict.UNKNOWN: 0,
+    }
     for position, record in enumerate(verified.records, start=1):
-        geography = _record_geography(record, position)
-        if target_country in geography.resolved_countries:
-            match += 1
-        elif geography.all_resolved:
-            out_of_target += 1
-        else:
-            unknown += 1
+        counts[
+            target_verdict_of(
+                record,
+                target_country,
+                record_subject=_record_subject(position),
+                refuse=BusinessMetricBindingError,
+            )
+        ] += 1
+    match = counts[FrozenTargetVerdict.MATCH]
+    out_of_target = counts[FrozenTargetVerdict.OUT_OF_TARGET]
+    unknown = counts[FrozenTargetVerdict.UNKNOWN]
     breakdown = TargetVerdictBreakdown(
         match_count=match,
         out_of_target_count=out_of_target,

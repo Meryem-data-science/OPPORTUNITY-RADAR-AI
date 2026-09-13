@@ -498,10 +498,32 @@ def test_an_unknown_qualification_value_is_a_hard_error() -> None:
 
 
 def test_the_data_ai_projection_matches_the_production_vocabulary() -> None:
-    from evaluation.business_metrics.formulas import _DATA_AI_PROJECTION
+    """The shared vocabulary is the production classifier's, exactly.
+
+    The *vocabulary* moved to `evaluation.frozen_facts` in Phase 10.5 so that
+    both phases read one definition of "explicitly out of scope"; the invariant
+    is unchanged and is asserted where the vocabulary now lives. A value added
+    upstream is still a failure here rather than a silent miscount.
+    """
+    from evaluation.frozen_facts import FROZEN_DATA_AI_STATE_NAMES
     from services.collector.qualification.taxonomy import Qualification
 
-    assert set(_DATA_AI_PROJECTION) == {str(item) for item in Qualification}
+    assert FROZEN_DATA_AI_STATE_NAMES == {str(item) for item in Qualification}
+
+
+def test_the_data_ai_counts_cover_every_shared_state() -> None:
+    """This contract's arithmetic covers the whole shared enum, and only it.
+
+    `_DATA_AI_COUNTS` is what is left in Phase 10.4 after the reading moved out:
+    which of the five counts each state feeds. A state added to
+    `FrozenDataAiState` with no count here would raise a `KeyError` mid-walk, so
+    the mapping is held against the enum directly.
+    """
+    from evaluation.business_metrics.formulas import _DATA_AI_COUNTS
+    from evaluation.frozen_facts import FrozenDataAiState
+
+    assert set(_DATA_AI_COUNTS) == set(FrozenDataAiState)
+    assert len(set(_DATA_AI_COUNTS.values())) == len(FrozenDataAiState)
 
 
 def test_no_data_ai_fallback_reads_any_other_field() -> None:
