@@ -8,30 +8,68 @@ in its own docstring that it holds no business KPI. Phase 10.4 measures the
 a URL that resolves, how much we can date. It shares no abstraction with the
 ranking contract on purpose.
 
-Phase 10.4a — this slice — is **the contract and the bindings, and nothing
-else**:
+Phase 10.4a froze the contract and the bindings. Phase 10.4b computes, runs,
+verifies and stores:
 
     schema.py       the contract — versions, the closed metric table (one
                     universe, one evidence class, one set of required artefacts
                     and one set of permitted refusals per metric), the frozen
                     cohort binding, the eight-state freshness partition, the URL
-                    audit policy, the support and result shapes, the run context
-                    and the two per-metric projections. It opens nothing and
-                    computes nothing.
-    fingerprint.py  the identities — the cohort binding's, the run context's, and
-                    three per result (scope, evidence, result) — each with one
-                    canonical payload and a verifier that recomputes the
+                    audit policy, the support and result shapes, the run context,
+                    the two per-metric projections and the run document. It opens
+                    nothing and computes nothing.
+    fingerprint.py  the identities — the cohort binding's, the run context's, the
+                    run's, and three per result (scope, evidence, result) — each
+                    with one canonical payload and a verifier that recomputes the
                     structure and the digest before believing either.
     bindings.py     the builders, the projections and the verifiers: where every
                     invariant is established and where a contradiction is
                     refused.
+    formulas.py     the twenty-seven metrics, one closed resolver registry, and
+                    the computation context that re-establishes the trust
+                    boundary on every call. `compute_business_metric` is the one
+                    public way to obtain a result.
+    run.py          which keys a complete run answers, computing all of them or
+                    none, and the two verifications — structural, and full
+                    against the snapshot.
+    storage.py      one immutable content-addressed document per run.
 
-## What this slice deliberately does not contain
+## What this package deliberately still does not contain
 
-No `formulas.py` and **no metric is computed anywhere** — not one of the
-twenty-seven names in `BusinessMetricName`, and not over the 394 opportunities of
-the current snapshot. No `storage.py`: nothing is written. No HTTP client, no
-`httpx`, no socket, no CLI. No migration. No change to any production module.
+No HTTP client, no `httpx`, no socket, no CLI. No migration, and no change to any
+production module. Nothing writes to SQLite and nothing in `services/` imports
+this package. No human label anywhere.
+
+## The rules Phase 10.4b adds
+
+**A dataclass is not a proof token.** `BusinessMetricComputationContext` carries
+the frozen records, and `compute_business_metric` re-verifies it on every call —
+rebuilding the cohort binding from those records, holding it against the run
+context's, and recomputing every nested digest — before reading one of them. A
+builder exists for convenience, never as a credential.
+
+**Every value is derived, and nothing else can be.** One arithmetic path
+produces every COMPUTED result: verified facts, numerator, denominator,
+universe_size, then `value = numerator / denominator`, then the private sealer.
+No public function accepts a value, a numerator, a denominator, a status, a
+support block or a reason, so an arbitrary float cannot be published with a valid
+digest and a complete evidence trail around it. No rounding anywhere.
+
+**A run is every metric or it is not a run.** The key set is derived — one scalar
+key per non-dimensional metric, plus one `OBSERVED_SOURCE_CONTRIBUTION` per
+`source_id` the records were actually seen at, and none for a source that was
+merely declared. A hard error on a single key means no run exists at all.
+
+**Structural and full verification are different claims.**
+`verify_business_metric_run_structure` re-establishes a run from itself and says
+so; only `verify_business_metric_run`, which has the records, re-derives the
+dynamic keys and recomputes every number — which is what catches a forged value
+whose own digest is impeccable.
+
+**A stored run never moves.** `run.json` lands under its own fingerprint, is
+published by an atomic rename, and is thereafter verified rather than
+overwritten: identical content reports UNCHANGED without rewriting a byte, a
+provenance-only difference is still UNCHANGED, and anything else raises.
 
 ## The seven ideas worth remembering
 
@@ -139,17 +177,40 @@ from .bindings import (
     verify_metric_scope_and_evidence_agree,
 )
 
+from .formulas import (
+    BusinessMetricComputationContext,
+    build_business_metric_computation_context,
+    compute_business_metric,
+    verify_business_metric_computation_context,
+)
+
+from .run import (
+    build_business_metric_run,
+    verify_business_metric_run,
+    verify_business_metric_run_structure,
+)
+
+from .storage import (
+    DEFAULT_BUSINESS_METRIC_RUN_ROOT,
+    BusinessMetricRunStorageResult,
+    BusinessMetricRunWriteStatus,
+    read_business_metric_run,
+    write_business_metric_run,
+)
+
 from .fingerprint import (
     PLACEHOLDER_FINGERPRINT,
     benchmark_binding_fingerprint,
     business_metric_evidence_fingerprint,
     business_metric_result_fingerprint,
     business_metric_run_context_fingerprint,
+    business_metric_run_fingerprint,
     business_metric_scope_fingerprint,
     canonical_benchmark_binding_payload,
     canonical_business_metric_evidence_payload,
     canonical_business_metric_result_payload,
     canonical_business_metric_run_context_payload,
+    canonical_business_metric_run_payload,
     canonical_business_metric_scope_payload,
     canonical_declared_source_universe_payload,
     canonical_dedup_evidence_payload,
@@ -167,6 +228,7 @@ from .fingerprint import (
     verify_business_metric_evidence_fingerprint,
     verify_business_metric_result_fingerprint,
     verify_business_metric_run_context_fingerprint,
+    verify_business_metric_run_fingerprint,
     verify_business_metric_scope_fingerprint,
     verify_declared_source_universe_fingerprint,
     verify_dedup_evidence_fingerprint,
@@ -185,6 +247,7 @@ from .schema import (
     BUSINESS_METRIC_DEFINITIONS,
     BUSINESS_METRIC_RESULT_SCHEMA_VERSION,
     BUSINESS_METRIC_RUN_CONTEXT_SCHEMA_VERSION,
+    BUSINESS_METRIC_RUN_SCHEMA_VERSION,
     BUSINESS_METRIC_SCOPE_SCHEMA_VERSION,
     BenchmarkBinding,
     BusinessEvidenceClass,
@@ -199,7 +262,9 @@ from .schema import (
     BusinessMetricKey,
     BusinessMetricName,
     BusinessMetricResult,
+    BusinessMetricRun,
     BusinessMetricRunContext,
+    BusinessMetricRunProvenance,
     BusinessMetricScope,
     BusinessMetricStatus,
     BusinessMetricSupport,
@@ -207,6 +272,7 @@ from .schema import (
     BusinessMetricUniverse,
     BusinessMetricsError,
     COMPUTED_ONLY_SUPPORT_BLOCKS,
+    DECLARED_SOURCE_ACTIVE_STATUS,
     DECLARED_SOURCE_UNIVERSE_VERSION,
     DEDUP_EVIDENCE_VERSION,
     DIMENSIONAL_BUSINESS_METRICS,
@@ -243,6 +309,7 @@ from .schema import (
     ProfileTargetBindingEvidence,
     REQUIRED_SUPPORT_BLOCKS,
     SUPPORTED_BUSINESS_METRIC_CONTRACT_VERSIONS,
+    SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS,
     SUPPORT_BLOCK_HOSTS,
     TARGET_VERDICT_HOST_METRIC,
     TargetVerdictBreakdown,
@@ -267,6 +334,8 @@ from .schema import (
     business_metric_key_sort_key,
     business_metric_result_payload,
     business_metric_run_context_payload,
+    business_metric_run_fingerprint_payload,
+    business_metric_run_payload,
     business_metric_scope_payload,
     business_metric_support_payload,
     calendar_date_of,
@@ -292,6 +361,7 @@ from .schema import (
     require_metric_universe,
     require_permitted_reason,
     require_supported_business_metric_contract_version,
+    require_supported_business_metric_run_schema_version,
     target_verdict_breakdown_payload,
     unknown_location_diagnostics_payload,
     url_audit_binding_payload,
@@ -301,6 +371,7 @@ from .schema import (
     validate_business_metric_evidence_structure,
     validate_business_metric_result_structure,
     validate_business_metric_run_context_structure,
+    validate_business_metric_run_structure,
     validate_business_metric_scope_structure,
     validate_count,
     validate_country_code,
@@ -332,6 +403,7 @@ __all__ = [
     "BUSINESS_METRIC_DEFINITIONS",
     "BUSINESS_METRIC_RESULT_SCHEMA_VERSION",
     "BUSINESS_METRIC_RUN_CONTEXT_SCHEMA_VERSION",
+    "BUSINESS_METRIC_RUN_SCHEMA_VERSION",
     "BUSINESS_METRIC_SCOPE_SCHEMA_VERSION",
     "BenchmarkBinding",
     "BusinessEvidenceClass",
@@ -339,6 +411,7 @@ __all__ = [
     "BusinessEvidenceMember",
     "BusinessMetricArgumentError",
     "BusinessMetricBindingError",
+    "BusinessMetricComputationContext",
     "BusinessMetricContractError",
     "BusinessMetricDefinition",
     "BusinessMetricDimension",
@@ -346,7 +419,11 @@ __all__ = [
     "BusinessMetricKey",
     "BusinessMetricName",
     "BusinessMetricResult",
+    "BusinessMetricRun",
     "BusinessMetricRunContext",
+    "BusinessMetricRunProvenance",
+    "BusinessMetricRunStorageResult",
+    "BusinessMetricRunWriteStatus",
     "BusinessMetricScope",
     "BusinessMetricStatus",
     "BusinessMetricSupport",
@@ -354,8 +431,10 @@ __all__ = [
     "BusinessMetricUniverse",
     "BusinessMetricsError",
     "COMPUTED_ONLY_SUPPORT_BLOCKS",
+    "DECLARED_SOURCE_ACTIVE_STATUS",
     "DECLARED_SOURCE_UNIVERSE_VERSION",
     "DEDUP_EVIDENCE_VERSION",
+    "DEFAULT_BUSINESS_METRIC_RUN_ROOT",
     "DIMENSIONAL_BUSINESS_METRICS",
     "DataAiQualificationBreakdown",
     "DeclaredSourceEntry",
@@ -391,6 +470,7 @@ __all__ = [
     "ProfileTargetBindingEvidence",
     "REQUIRED_SUPPORT_BLOCKS",
     "SUPPORTED_BUSINESS_METRIC_CONTRACT_VERSIONS",
+    "SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS",
     "SUPPORT_BLOCK_HOSTS",
     "TARGET_VERDICT_HOST_METRIC",
     "TargetVerdictBreakdown",
@@ -415,6 +495,8 @@ __all__ = [
     "benchmark_binding_payload",
     "benchmark_records_fingerprint",
     "build_benchmark_binding",
+    "build_business_metric_computation_context",
+    "build_business_metric_run",
     "build_business_metric_run_context",
     "build_dedup_evidence",
     "build_freshness_binding",
@@ -429,6 +511,9 @@ __all__ = [
     "business_metric_result_payload",
     "business_metric_run_context_fingerprint",
     "business_metric_run_context_payload",
+    "business_metric_run_fingerprint",
+    "business_metric_run_fingerprint_payload",
+    "business_metric_run_payload",
     "business_metric_scope_fingerprint",
     "business_metric_scope_payload",
     "business_metric_support_payload",
@@ -438,6 +523,7 @@ __all__ = [
     "canonical_business_metric_keys",
     "canonical_business_metric_result_payload",
     "canonical_business_metric_run_context_payload",
+    "canonical_business_metric_run_payload",
     "canonical_business_metric_scope_payload",
     "canonical_declared_source_universe_payload",
     "canonical_dedup_evidence_payload",
@@ -445,6 +531,7 @@ __all__ = [
     "canonical_frozen_cohort_binding_payload",
     "canonical_profile_target_binding_payload",
     "canonical_url_audit_binding_payload",
+    "compute_business_metric",
     "data_ai_qualification_breakdown_payload",
     "declared_source_entry_payload",
     "declared_source_universe_fingerprint",
@@ -472,10 +559,12 @@ __all__ = [
     "profile_target_binding_payload",
     "project_metric_evidence",
     "project_metric_scope",
+    "read_business_metric_run",
     "require_business_evidence_class",
     "require_metric_universe",
     "require_permitted_reason",
     "require_supported_business_metric_contract_version",
+    "require_supported_business_metric_run_schema_version",
     "source_map_payload",
     "target_verdict_breakdown_payload",
     "unknown_location_diagnostics_payload",
@@ -487,6 +576,7 @@ __all__ = [
     "validate_business_metric_evidence_structure",
     "validate_business_metric_result_structure",
     "validate_business_metric_run_context_structure",
+    "validate_business_metric_run_structure",
     "validate_business_metric_scope_structure",
     "validate_count",
     "validate_country_code",
@@ -508,12 +598,16 @@ __all__ = [
     "validate_timestamp",
     "validate_url_audit_binding_structure",
     "verify_benchmark_binding_fingerprint",
+    "verify_business_metric_computation_context",
     "verify_business_metric_evidence_fingerprint",
     "verify_business_metric_result",
     "verify_business_metric_result_fingerprint",
     "verify_business_metric_results",
+    "verify_business_metric_run",
     "verify_business_metric_run_context",
     "verify_business_metric_run_context_fingerprint",
+    "verify_business_metric_run_fingerprint",
+    "verify_business_metric_run_structure",
     "verify_business_metric_scope_fingerprint",
     "verify_declared_source_universe_fingerprint",
     "verify_dedup_evidence_fingerprint",
@@ -522,4 +616,5 @@ __all__ = [
     "verify_metric_scope_and_evidence_agree",
     "verify_profile_target_binding_fingerprint",
     "verify_url_audit_binding_fingerprint",
+    "write_business_metric_run",
 ]

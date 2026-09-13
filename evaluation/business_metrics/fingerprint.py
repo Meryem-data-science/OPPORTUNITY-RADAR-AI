@@ -94,6 +94,7 @@ from .schema import (
     BusinessMetricBindingError,
     BusinessMetricEvidenceView,
     BusinessMetricResult,
+    BusinessMetricRun,
     BusinessMetricRunContext,
     BusinessMetricScope,
     DeclaredSourceUniverseEvidence,
@@ -106,6 +107,7 @@ from .schema import (
     business_metric_evidence_payload,
     business_metric_result_payload,
     business_metric_run_context_payload,
+    business_metric_run_fingerprint_payload,
     business_metric_scope_payload,
     declared_source_universe_payload,
     dedup_evidence_payload,
@@ -117,6 +119,7 @@ from .schema import (
     validate_business_metric_evidence_structure,
     validate_business_metric_result_structure,
     validate_business_metric_run_context_structure,
+    validate_business_metric_run_structure,
     validate_business_metric_scope_structure,
     validate_declared_source_universe_structure,
     validate_dedup_evidence_structure,
@@ -132,11 +135,13 @@ __all__ = [
     "business_metric_evidence_fingerprint",
     "business_metric_result_fingerprint",
     "business_metric_run_context_fingerprint",
+    "business_metric_run_fingerprint",
     "business_metric_scope_fingerprint",
     "canonical_benchmark_binding_payload",
     "canonical_business_metric_evidence_payload",
     "canonical_business_metric_result_payload",
     "canonical_business_metric_run_context_payload",
+    "canonical_business_metric_run_payload",
     "canonical_business_metric_scope_payload",
     "canonical_declared_source_universe_payload",
     "canonical_dedup_evidence_payload",
@@ -154,6 +159,7 @@ __all__ = [
     "verify_business_metric_evidence_fingerprint",
     "verify_business_metric_result_fingerprint",
     "verify_business_metric_run_context_fingerprint",
+    "verify_business_metric_run_fingerprint",
     "verify_business_metric_scope_fingerprint",
     "verify_declared_source_universe_fingerprint",
     "verify_dedup_evidence_fingerprint",
@@ -534,4 +540,58 @@ def verify_business_metric_result_fingerprint(
     recomputed = business_metric_result_fingerprint(result)
     if recomputed != result.result_fingerprint:
         _refuse("the business metric result", result.result_fingerprint, recomputed)
+    return recomputed
+
+
+# --------------------------------------------------------------------------
+# the whole run — Phase 10.4b
+# --------------------------------------------------------------------------
+
+
+def canonical_business_metric_run_payload(
+    run: BusinessMetricRun,
+) -> dict[str, Any]:
+    """The run's digest domain: its identity, and never its document.
+
+    Four things — the layout version, the contract version, the run context's
+    own digest, and the canonical sequence of `(key, result_fingerprint)` pairs.
+    Each result enters by digest, as every nested artefact does throughout this
+    package, and each digest is recomputed before a run is sealed.
+
+    Deliberately outside it: the provenance block entire, so a run generated at
+    another moment, read from another directory, on another machine, under
+    another Python, is the **same run**. That is what makes the content-addressed
+    store in `storage.py` able to say UNCHANGED and mean it.
+
+    And this is emphatically not the SHA-256 of `run.json`: the file carries
+    the provenance and its own formatting, and two files differing in either
+    describe one measurement.
+    """
+    return business_metric_run_fingerprint_payload(run)
+
+
+def business_metric_run_fingerprint(run: BusinessMetricRun) -> str:
+    """SHA-256 of the canonical JSON of everything a run *is*.
+
+    Moves when any result's digest moves — which is to say when any value,
+    status, reason, support block, universe or evidence identity moves — when
+    the key set moves, when the assembled evidence moves, and when either
+    version moves. It does not move when the clock does.
+    """
+    return _digest(canonical_business_metric_run_payload(run))
+
+
+def verify_business_metric_run_fingerprint(run: BusinessMetricRun) -> str:
+    """Re-establish the structure, then recompute the digest, or refuse.
+
+    Both halves and in that order, as everywhere else here: a run whose results
+    were edited after somebody digested them is caught by the recomputation, and
+    a run that was already mis-assembled when they did — two results under one
+    key, a result in the wrong order — is caught by the structure, whose digest
+    would otherwise be perfectly valid over an artefact nobody should read.
+    """
+    validate_business_metric_run_structure(run)
+    recomputed = business_metric_run_fingerprint(run)
+    if recomputed != run.run_fingerprint:
+        _refuse("the business metric run", run.run_fingerprint, recomputed)
     return recomputed

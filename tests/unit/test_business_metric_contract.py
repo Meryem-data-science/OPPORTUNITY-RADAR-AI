@@ -1022,7 +1022,36 @@ def test_a_result_survives_reverification_against_its_own_context() -> None:
 
 PACKAGE_ROOT = REPOSITORY_ROOT / "evaluation/business_metrics"
 PURE_MODULES = ("schema.py", "fingerprint.py")
-ALL_MODULES = ("__init__.py", "schema.py", "fingerprint.py", "bindings.py")
+
+#: Every module of the package, Phase 10.4b's three included. The guards below
+#: that apply to all of them — no human label, no ranking package, no network —
+#: are guarantees of the package rather than of one slice, so adding formulas,
+#: the run and storage to this tuple makes them broader, not weaker.
+ALL_MODULES = (
+    "__init__.py",
+    "schema.py",
+    "fingerprint.py",
+    "bindings.py",
+    "formulas.py",
+    "run.py",
+    "storage.py",
+)
+
+#: The modules that must touch no filesystem. `storage.py` is the one place in
+#: the package that writes, which is the whole reason it is a separate module:
+#: everything else stays pure and the write path is reviewable in one file.
+NON_WRITING_MODULES = tuple(name for name in ALL_MODULES if name != "storage.py")
+
+#: The modules that must contain no division at all. `formulas.py` is the one
+#: place a metric value is derived, and `value = numerator / denominator` is
+#: exactly what it exists to do — so the guard that used to say "this package
+#: computes nothing" now says "only the formulas compute", which is the property
+#: 10.4b needs to keep. `storage.py` is excluded here and checked separately
+#: below: its only `/` operators are `Path` joins, which are not arithmetic, and
+#: the companion test pins exactly which ones they are.
+NON_COMPUTING_MODULES = tuple(
+    name for name in ALL_MODULES if name not in ("formulas.py", "storage.py")
+)
 
 
 def _imports(path: Path) -> dict[str, set[str]]:
@@ -1120,8 +1149,8 @@ def test_only_the_url_parser_comes_from_urllib() -> None:
     assert urllib_modules == {"urllib.parse": {"urlsplit"}}
 
 
-def test_the_package_writes_nothing() -> None:
-    for name in ALL_MODULES:
+def test_the_package_writes_nothing_outside_storage() -> None:
+    for name in NON_WRITING_MODULES:
         tree = ast.parse((PACKAGE_ROOT / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -1145,16 +1174,41 @@ def test_production_never_depends_on_the_business_metrics_package() -> None:
     assert offenders == []
 
 
-def test_the_package_computes_no_metric() -> None:
-    assert not (PACKAGE_ROOT / "formulas.py").exists()
-    assert not (PACKAGE_ROOT / "storage.py").exists()
-    for name in ALL_MODULES:
+def test_only_the_formulas_compute_anything() -> None:
+    """The contract, the identities and the bindings still do no arithmetic.
+
+    Phase 10.4a asserted that *nothing* in the package divided, because no
+    formula existed. 10.4b adds exactly one module that may, and this guard is
+    the same rule with one door in it: a division appearing in `schema.py`,
+    `bindings.py`, `run.py` or `storage.py` would mean a second place where a
+    rate can be produced — which is precisely the drift the closed resolver
+    registry and the single public `compute_business_metric` exist to prevent.
+    """
+    for name in NON_COMPUTING_MODULES:
         tree = ast.parse((PACKAGE_ROOT / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.BinOp) and isinstance(
                 node.op, (ast.Div, ast.FloorDiv)
             ):
                 raise AssertionError(f"{name} divides something")
+
+
+def test_every_slash_in_storage_is_a_path_join() -> None:
+    """`storage.py` computes nothing either; its `/` operators join paths.
+
+    Checked by pinning the left-hand operand of every division in the module,
+    rather than by exempting the file. A real arithmetic expression — a rate
+    recomputed while writing, a count divided while reading — would introduce an
+    operand outside this set and fail here.
+    """
+    source = (PACKAGE_ROOT / "storage.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    operands = {
+        ast.get_source_segment(source, node.left)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.FloorDiv))
+    }
+    assert operands == {"Path(root)", "root_path", "directory"}, operands
 
 
 def test_the_business_package_reuses_the_phase_10_1_error_hierarchy() -> None:
@@ -1185,6 +1239,29 @@ def test_no_low_level_exception_escapes_a_public_binding_function() -> None:
                     "BusinessMetricArgumentError",
                     "BusinessEvidenceClassError",
                 ), f"{name} raises {raised}"
+
+
+def test_no_low_level_exception_escapes_the_phase_10_4b_modules() -> None:
+    """Every refusal in the computing modules is one of this package's errors.
+
+    The guard above walks `bindings.py`'s public functions; this one walks the
+    whole source of the three modules Phase 10.4b adds, because their failure
+    paths run over records, JSON documents and the filesystem — exactly the
+    places a `KeyError`, a `ValueError` or an `OSError` would otherwise leak
+    through a public boundary.
+    """
+    permitted = {
+        "BusinessMetricBindingError",
+        "BusinessMetricContractError",
+        "BusinessMetricArgumentError",
+        "BusinessEvidenceClassError",
+    }
+    for name in ("formulas.py", "run.py", "storage.py"):
+        tree = ast.parse((PACKAGE_ROOT / name).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                raised = getattr(node.exc.func, "id", "")
+                assert raised in permitted, f"{name} raises {raised}"
 
 
 def test_the_business_contract_shares_no_object_with_the_ranking_contract() -> None:

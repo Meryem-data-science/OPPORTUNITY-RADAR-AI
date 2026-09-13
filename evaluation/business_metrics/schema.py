@@ -85,6 +85,7 @@ __all__ = [
     "BUSINESS_METRIC_DEFINITIONS",
     "BUSINESS_METRIC_RESULT_SCHEMA_VERSION",
     "BUSINESS_METRIC_RUN_CONTEXT_SCHEMA_VERSION",
+    "BUSINESS_METRIC_RUN_SCHEMA_VERSION",
     "BUSINESS_METRIC_SCOPE_SCHEMA_VERSION",
     "BenchmarkBinding",
     "BusinessEvidenceClass",
@@ -99,7 +100,9 @@ __all__ = [
     "BusinessMetricKey",
     "BusinessMetricName",
     "BusinessMetricResult",
+    "BusinessMetricRun",
     "BusinessMetricRunContext",
+    "BusinessMetricRunProvenance",
     "BusinessMetricScope",
     "BusinessMetricStatus",
     "BusinessMetricSupport",
@@ -107,6 +110,7 @@ __all__ = [
     "BusinessMetricUniverse",
     "BusinessMetricsError",
     "COMPUTED_ONLY_SUPPORT_BLOCKS",
+    "DECLARED_SOURCE_ACTIVE_STATUS",
     "DECLARED_SOURCE_UNIVERSE_VERSION",
     "DEDUP_EVIDENCE_VERSION",
     "DIMENSIONAL_BUSINESS_METRICS",
@@ -143,6 +147,7 @@ __all__ = [
     "ProfileTargetBindingEvidence",
     "REQUIRED_SUPPORT_BLOCKS",
     "SUPPORTED_BUSINESS_METRIC_CONTRACT_VERSIONS",
+    "SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS",
     "SUPPORT_BLOCK_HOSTS",
     "TARGET_VERDICT_HOST_METRIC",
     "TargetVerdictBreakdown",
@@ -167,6 +172,8 @@ __all__ = [
     "business_metric_key_sort_key",
     "business_metric_result_payload",
     "business_metric_run_context_payload",
+    "business_metric_run_fingerprint_payload",
+    "business_metric_run_payload",
     "business_metric_scope_payload",
     "business_metric_support_payload",
     "calendar_date_of",
@@ -192,6 +199,7 @@ __all__ = [
     "require_metric_universe",
     "require_permitted_reason",
     "require_supported_business_metric_contract_version",
+    "require_supported_business_metric_run_schema_version",
     "target_verdict_breakdown_payload",
     "unknown_location_diagnostics_payload",
     "url_audit_binding_payload",
@@ -201,6 +209,7 @@ __all__ = [
     "validate_business_metric_evidence_structure",
     "validate_business_metric_result_structure",
     "validate_business_metric_run_context_structure",
+    "validate_business_metric_run_structure",
     "validate_business_metric_scope_structure",
     "validate_count",
     "validate_country_code",
@@ -247,6 +256,21 @@ BUSINESS_METRIC_SCOPE_SCHEMA_VERSION = "business-metric-scope-v1"
 BUSINESS_METRIC_RESULT_SCHEMA_VERSION = "business-metric-result-v1"
 BUSINESS_EVIDENCE_VIEW_SCHEMA_VERSION = "business-metric-evidence-view-v1"
 BUSINESS_METRIC_RUN_CONTEXT_SCHEMA_VERSION = "business-metric-run-context-v1"
+
+#: The shape of a whole persisted run — Phase 10.4b. Deliberately **not**
+#: `BUSINESS_METRIC_CONTRACT_VERSION`: that version governs what the numbers
+#: *mean*, and this one governs how a run of them is laid out. Widening the
+#: document (a new provenance field, a new block) moves this and leaves the
+#: semantics alone; changing what a rate is defined as moves the other and would
+#: invalidate every stored run whatever its layout.
+BUSINESS_METRIC_RUN_SCHEMA_VERSION = "business-metric-run-v1"
+
+#: The run layouts this build can read. Exactly one, for the same reason the
+#: contract has exactly one: a stored run under an unknown version is refused
+#: rather than guessed at.
+SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS: tuple[str, ...] = (
+    BUSINESS_METRIC_RUN_SCHEMA_VERSION,
+)
 
 #: The evidence artefacts, each versioned on its own so that widening one does
 #: not invalidate the others.
@@ -296,6 +320,19 @@ URL_AUDIT_USER_AGENT = "OpportunityRadarAI-UrlAudit/1.0 (+evaluation; GET-only)"
 
 #: The manifest exclusion key whose count the dedup evidence must agree with.
 MERGED_DUPLICATE_EXCLUSION_KEY = "merged_duplicate"
+
+#: The `integration_status` a declared source entry must carry to be counted in
+#: the numerator of `ACTIVE_DECLARED_SOURCE_RATE`.
+#:
+#: Written as a literal for the same reason as the freshness policy below: this
+#: module imports no other package. The *agreement* with the source map
+#: validator's own `SourceMap.active_sources` — which selects on exactly this
+#: status — is asserted by the unit tests, which may import it freely. "Active"
+#: is that file's word and not this contract's invention: an entry only earns
+#: the status when a strategy that already runs names a real row of
+#: `config/sources.yaml`, so the rate is a coverage claim about collectors that
+#: exist rather than about entries somebody intends to write.
+DECLARED_SOURCE_ACTIVE_STATUS = "ACTIVE"
 
 #: The production freshness policy a freshness metric is defined against.
 #: Written as a literal so that this module imports no production package and
@@ -357,6 +394,22 @@ def require_supported_business_metric_contract_version(value: Any) -> str:
             f"unsupported business metric contract version: {value!r} (this "
             f"build implements "
             f"{list(SUPPORTED_BUSINESS_METRIC_CONTRACT_VERSIONS)})"
+        )
+    return str(value)
+
+
+def require_supported_business_metric_run_schema_version(value: Any) -> str:
+    """Refuse a run laid out in a shape this build cannot read.
+
+    Separate from the contract version above because the two fail for different
+    reasons and a reader needs to know which: an unsupported *run schema* means
+    this build cannot parse the document, and an unsupported *contract* means it
+    could parse it and must not believe what it says.
+    """
+    if value not in SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS:
+        raise BusinessMetricContractError(
+            f"unsupported business metric run schema version: {value!r} (this "
+            f"build reads {list(SUPPORTED_BUSINESS_METRIC_RUN_SCHEMA_VERSIONS)})"
         )
     return str(value)
 
@@ -4258,3 +4311,350 @@ def validate_business_metric_evidence_structure(
     )
     _validate_members(evidence, subject="the evidence view")
     return evidence
+
+
+# --------------------------------------------------------------------------
+# the whole run — Phase 10.4b
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BusinessMetricRunProvenance:
+    """Where and when a run was assembled. **Outside `run_fingerprint`.**
+
+    Phase 10.1's rule, applied to this artefact: a digest that moved with the
+    clock or with a directory would describe the act of running rather than what
+    was run. Two operators computing the same metrics from the same frozen
+    snapshot, a week and a filesystem apart, produce one run identity — which is
+    exactly what makes the content-addressed storage in `storage.py` able to
+    recognise a re-run as the run it already holds.
+
+    The paths are **informative**. They are validated as text and nothing here
+    asks the filesystem whether they exist: a path says where somebody read a
+    file, and a run that was moved to another machine did not thereby become a
+    different measurement.
+    """
+
+    generated_at: str | None = None
+    dataset_directory: str | None = None
+    benchmark_records_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.generated_at is not None:
+            validate_timestamp(
+                self.generated_at, subject="the run's generated_at"
+            )
+        validate_optional_text(
+            self.dataset_directory, subject="the run's dataset directory"
+        )
+        validate_optional_text(
+            self.benchmark_records_path,
+            subject="the run's benchmark records path",
+        )
+
+
+@dataclass(frozen=True)
+class BusinessMetricRun:
+    """One complete business / data-quality run: every metric, once, sealed.
+
+    "Complete" is the load-bearing word and it is not a promise this dataclass
+    can keep on its own — `run.build_business_metric_run` derives the exact key
+    set from the verified cohort and refuses to return anything less. What is
+    enforced here is the shape: one result per key, no key twice, canonical
+    order, and one contract version across the run, its context and every result
+    in it.
+
+    **Nothing is duplicated.** There is no `metric_count`, no `computed_count`,
+    no `na_count`, no `values_by_metric`, no second copy of the dataset id and no
+    second copy of the run context's digest. Every one of those is derivable from
+    `results` and `context`, and a stored copy is a field that can come to
+    disagree with the thing it summarises — which is how a report ends up saying
+    twenty-seven metrics over a list of twenty-six.
+
+    `provenance` is the one block outside `run_fingerprint`.
+    """
+
+    run_schema_version: str
+    contract_version: str
+    context: BusinessMetricRunContext
+    results: tuple[BusinessMetricResult, ...]
+    run_fingerprint: str
+    provenance: BusinessMetricRunProvenance = BusinessMetricRunProvenance()
+
+    @property
+    def keys(self) -> tuple[BusinessMetricKey, ...]:
+        """The keys this run answered, in the order the results are held."""
+        return tuple(result.key for result in self.results)
+
+    def result_for(self, key: BusinessMetricKey) -> BusinessMetricResult:
+        """This run's answer for one key, or a refusal.
+
+        Derived rather than stored: an index built beside `results` would be a
+        second statement about the same set.
+        """
+        if not isinstance(key, BusinessMetricKey):
+            raise BusinessMetricContractError(
+                f"{key!r} is not a business metric key"
+            )
+        wanted = business_metric_key_sort_key(key)
+        for result in self.results:
+            if business_metric_key_sort_key(result.key) == wanted:
+                return result
+        raise BusinessMetricBindingError(
+            f"this run holds no result for {key.metric}"
+            + (
+                ""
+                if key.dimension_value is None
+                else f" / {key.dimension_kind}={key.dimension_value}"
+            )
+        )
+
+
+def business_metric_run_fingerprint_payload(
+    run: BusinessMetricRun,
+) -> dict[str, Any]:
+    """The run's **identity domain**, and deliberately not its document.
+
+    Exactly four things, and the third and fourth are why a run has an identity
+    at all:
+
+        run_schema_version    the layout
+        contract_version      the rules the numbers were produced under
+        run_context_fingerprint   which assembly of evidence this run had
+        results               every key, with that key's own result digest
+
+    The results enter **by digest**, in canonical key order, the same way nested
+    artefacts enter every other domain in this package — each one is recomputed
+    before a run is sealed, so the digest is the whole of what it says, and a
+    changed value moves the result's digest and therefore this one.
+
+    A key is represented by `business_metric_key_payload`, never by `repr()`: a
+    digest over a Python representation would move with a dataclass's `__repr__`
+    and name nothing stable.
+
+    **Outside**: the provenance and everything in it, the bytes of `run.json`,
+    the directory it lands in, the machine, the OS and the Python version. This
+    is not the SHA-256 of a file; it is the identity of a measurement, and the
+    same measurement written twice is one run.
+    """
+    return {
+        "run_schema_version": run.run_schema_version,
+        "contract_version": run.contract_version,
+        "run_context_fingerprint": run.context.run_context_fingerprint,
+        "results": [
+            {
+                "key": business_metric_key_payload(result.key),
+                "result_fingerprint": result.result_fingerprint,
+            }
+            for result in run.results
+        ],
+    }
+
+
+def business_metric_run_payload(run: BusinessMetricRun) -> dict[str, Any]:
+    """The whole run as a structure — the authoritative document of `run.json`.
+
+    Distinct from the fingerprint domain above, and the difference is not a
+    block that was left out: the identity holds each result by digest, while
+    this holds each result **in full**, because a document a reader can only
+    verify by already having the run is not a document. Everything needed to
+    rebuild the run is here — the context with every binding it assembled, every
+    result with its support, and the provenance.
+
+    `storage.py` renders this and parses it back strictly, field by field.
+    """
+    return {
+        "run_schema_version": run.run_schema_version,
+        "contract_version": run.contract_version,
+        "context": _full_run_context_payload(run.context),
+        "results": [business_metric_result_payload(item) for item in run.results],
+        "run_fingerprint": run.run_fingerprint,
+        "provenance": {
+            "generated_at": run.provenance.generated_at,
+            "dataset_directory": run.provenance.dataset_directory,
+            "benchmark_records_path": run.provenance.benchmark_records_path,
+        },
+    }
+
+
+# -- the full shapes of the nested artefacts ------------------------------
+#
+# Each is its digest domain **plus the fields that domain deliberately leaves
+# out** — a self-declared fingerprint, a provenance path, the two temporal
+# values the cohort binding keeps outside its own identity. Written as one
+# expression over the existing payload function rather than as a second field
+# list, so a field added to a digest domain appears in the document too.
+
+
+def _full_frozen_cohort_binding_payload(
+    binding: FrozenCohortBinding,
+) -> dict[str, Any]:
+    return {
+        **frozen_cohort_binding_payload(binding),
+        "dataset_generated_at": binding.dataset_generated_at,
+        "freshness_as_of_date": binding.freshness_as_of_date,
+        "binding_fingerprint": binding.binding_fingerprint,
+    }
+
+
+def _full_profile_target_binding_payload(
+    binding: ProfileTargetBindingEvidence,
+) -> dict[str, Any]:
+    return {
+        **profile_target_binding_payload(binding),
+        "binding_fingerprint": binding.binding_fingerprint,
+    }
+
+
+def _full_declared_source_universe_payload(
+    evidence: DeclaredSourceUniverseEvidence,
+) -> dict[str, Any]:
+    return {
+        **declared_source_universe_payload(evidence),
+        "content_fingerprint": evidence.content_fingerprint,
+        "provenance_path": evidence.provenance_path,
+    }
+
+
+def _full_url_audit_binding_payload(binding: UrlAuditBinding) -> dict[str, Any]:
+    return {
+        **url_audit_binding_payload(binding),
+        "binding_fingerprint": binding.binding_fingerprint,
+    }
+
+
+def _full_dedup_evidence_payload(evidence: DedupEvidence) -> dict[str, Any]:
+    return {
+        **dedup_evidence_payload(evidence),
+        "evidence_fingerprint": evidence.evidence_fingerprint,
+    }
+
+
+def _full_benchmark_binding_payload(binding: BenchmarkBinding) -> dict[str, Any]:
+    return {
+        **benchmark_binding_payload(binding),
+        "content_fingerprint": binding.content_fingerprint,
+        "provenance_path": binding.provenance_path,
+    }
+
+
+def _full_freshness_binding_payload(binding: FreshnessBinding) -> dict[str, Any]:
+    return {
+        **freshness_binding_payload(binding),
+        "binding_fingerprint": binding.binding_fingerprint,
+    }
+
+
+#: Member -> the function that renders that artefact in full. One mapping, so
+#: the document and the parser agree about which shape each member takes.
+_FULL_MEMBER_PAYLOADS: Mapping[BusinessEvidenceMember, Any] = {
+    BusinessEvidenceMember.PROFILE_TARGET_BINDING: (
+        _full_profile_target_binding_payload
+    ),
+    BusinessEvidenceMember.DECLARED_SOURCE_UNIVERSE: (
+        _full_declared_source_universe_payload
+    ),
+    BusinessEvidenceMember.URL_AUDIT_BINDING: _full_url_audit_binding_payload,
+    BusinessEvidenceMember.DEDUP_EVIDENCE: _full_dedup_evidence_payload,
+    BusinessEvidenceMember.BENCHMARK_BINDING: _full_benchmark_binding_payload,
+    BusinessEvidenceMember.FRESHNESS_BINDING: _full_freshness_binding_payload,
+}
+
+assert set(_FULL_MEMBER_PAYLOADS) == set(BusinessEvidenceMember)
+
+
+def _full_run_context_payload(
+    context: BusinessMetricRunContext,
+) -> dict[str, Any]:
+    """The run context with every artefact in full, not by digest.
+
+    The context's own *digest domain* holds each member by fingerprint, which is
+    right for an identity and useless for a document: a stored run must be
+    re-readable into the same objects, and a fingerprint reconstructs nothing.
+    An absent member is written as an explicit `null` rather than omitted, for
+    the same reason it is stated in the digest domain — "this run assembled no
+    URL audit" is a fact about the run.
+    """
+    payload: dict[str, Any] = {
+        "run_context_schema_version": context.run_context_schema_version,
+        "contract_version": context.contract_version,
+        "frozen_cohort_binding": _full_frozen_cohort_binding_payload(
+            context.frozen_cohort_binding
+        ),
+        "run_context_fingerprint": context.run_context_fingerprint,
+    }
+    for member in BusinessEvidenceMember:
+        artefact = member_value(context, member)
+        payload[EVIDENCE_MEMBER_ATTRIBUTES[member]] = (
+            None if artefact is None else _FULL_MEMBER_PAYLOADS[member](artefact)
+        )
+    return payload
+
+
+def validate_business_metric_run_structure(run: Any) -> BusinessMetricRun:
+    """Re-establish every invariant a run claims about its own shape.
+
+    Structure only, and the boundary is deliberate: this checks the versions,
+    the nested structures, one result per key in canonical order, and the single
+    contract version across the run, its context and its results. It recomputes
+    **no digest** and re-derives **no key set** — `run.verify_business_metric_run_structure`
+    does the first, and only the full verifier can do the second, because the
+    dynamic per-source keys are a fact about records this function does not hold.
+    """
+    if not isinstance(run, BusinessMetricRun):
+        raise BusinessMetricContractError(
+            f"{run!r} is not a business metric run"
+        )
+    require_supported_business_metric_run_schema_version(run.run_schema_version)
+    require_supported_business_metric_contract_version(run.contract_version)
+    validate_business_metric_run_context_structure(run.context)
+    if run.context.contract_version != run.contract_version:
+        raise BusinessMetricContractError(
+            f"the run states contract version {run.contract_version!r} and its "
+            f"context was assembled under {run.context.contract_version!r}; a "
+            "run and the evidence it drew on answer to one set of rules"
+        )
+    if not isinstance(run.results, tuple):
+        raise BusinessMetricContractError(
+            "a business metric run's results are not an immutable sequence"
+        )
+    if not run.results:
+        raise BusinessMetricContractError(
+            "a business metric run holds at least one result; an empty run "
+            "reports nothing and would still claim to be complete"
+        )
+    seen: set[tuple[str, str, str]] = set()
+    repeated: set[tuple[str, str, str]] = set()
+    for result in run.results:
+        validate_business_metric_result_structure(result)
+        if result.contract_version != run.contract_version:
+            raise BusinessMetricContractError(
+                f"{result.key.metric} was produced under contract version "
+                f"{result.contract_version!r} and this run states "
+                f"{run.contract_version!r}"
+            )
+        identity = business_metric_key_sort_key(result.key)
+        if identity in seen:
+            repeated.add(identity)
+        seen.add(identity)
+    if repeated:
+        raise BusinessMetricBindingError(
+            f"the run holds more than one result for {sorted(repeated)}; one "
+            "key carries one result, and two answers under one name leave "
+            "nothing downstream able to tell which is the measurement"
+        )
+    ordered = [business_metric_key_sort_key(result.key) for result in run.results]
+    if ordered != sorted(ordered):
+        raise BusinessMetricBindingError(
+            "the run's results are not in the contract's canonical key order; a "
+            "run is a set of answers, and it is held in the one order two equal "
+            "runs are guaranteed to agree on"
+        )
+    validate_fingerprint(
+        run.run_fingerprint, subject="the business metric run fingerprint"
+    )
+    if not isinstance(run.provenance, BusinessMetricRunProvenance):
+        raise BusinessMetricContractError(
+            f"{run.provenance!r} is not a business metric run provenance block"
+        )
+    return run
