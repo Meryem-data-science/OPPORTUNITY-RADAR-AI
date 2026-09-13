@@ -983,3 +983,153 @@ def test_provenance_fields_default_to_not_stated() -> None:
 def test_a_padded_provenance_path_is_refused() -> None:
     with pytest.raises(ExperimentBindingError, match="padded"):
         ExperimentRunProvenance(label_root=" data/labels ")
+
+
+# ====================================================================
+# provenance is validated, and by one authority
+# ====================================================================
+#
+# `provenance` is outside `run_fingerprint` and stays there. Being outside
+# identity is not a reason to be unchecked: D50 asks for a structurally verified
+# provenance, and the lesson is Phase 10.4's — a block validated only in
+# `__post_init__` is unchecked for every object that never ran it.
+
+
+def _unchecked(cls, **fields):
+    """An instance that skipped `__post_init__`. The forger's constructor."""
+    forged = object.__new__(cls)
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def _bare_provenance(**overrides):
+    """A provenance built through `object.__new__`, so nothing was checked."""
+    fields = {
+        "generated_at": None,
+        "dataset_directory": None,
+        "business_metric_run_path": None,
+        "label_root": None,
+        "benchmark_records_path": None,
+    }
+    fields.update(overrides)
+    return _unchecked(ExperimentRunProvenance, **fields)
+
+
+def test_an_empty_provenance_is_valid_and_states_nothing() -> None:
+    from evaluation.experiments import validate_experiment_run_provenance
+
+    provenance = ExperimentRunProvenance()
+    assert validate_experiment_run_provenance(provenance) is provenance
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-a-timestamp",
+        "2026-03-01",
+        "2026-03-01T09:00:00",
+        "2026-03-01 09:00:00+00:00",
+        "2026-02-30T09:00:00Z",
+        "2026-13-01T09:00:00Z",
+        " 2026-03-01T09:00:00Z",
+        1,
+        True,
+    ],
+)
+def test_a_generated_at_that_is_not_an_rfc_3339_instant_is_refused(value) -> None:
+    """`"not-a-timestamp"` used to pass as optional text. It does not now."""
+    with pytest.raises(ExperimentBindingError):
+        ExperimentRunProvenance(generated_at=value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-03-01T09:00:00Z",
+        "2026-03-01T09:00:00z",
+        "2026-03-01T09:00:00+00:00",
+        "2026-03-01T09:00:00-07:00",
+        "2026-03-01T09:00:00.123456Z",
+        "2026-03-01t09:00:00Z",
+    ],
+)
+def test_a_real_instant_with_an_offset_is_accepted(value) -> None:
+    assert ExperimentRunProvenance(generated_at=value).generated_at == value
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dataset_directory",
+        "business_metric_run_path",
+        "label_root",
+        "benchmark_records_path",
+    ],
+)
+def test_a_padded_or_empty_path_is_refused(field) -> None:
+    for value in (" data/labels ", "", "   "):
+        with pytest.raises(ExperimentBindingError):
+            ExperimentRunProvenance(**{field: value})
+
+
+def test_the_four_paths_are_not_held_to_the_instant_rule() -> None:
+    """A path is a path. Only `generated_at` is an instant."""
+    provenance = ExperimentRunProvenance(
+        dataset_directory="/datasets/x",
+        business_metric_run_path="/runs/y",
+        label_root="relative/labels",
+        benchmark_records_path="gold.jsonl",
+    )
+    assert provenance.label_root == "relative/labels"
+
+
+def test_no_path_is_checked_against_the_filesystem() -> None:
+    """A run moved to another machine did not become a different experiment."""
+    provenance = ExperimentRunProvenance(
+        dataset_directory="/nowhere/at/all",
+        label_root="/does/not/exist",
+    )
+    from evaluation.experiments import validate_experiment_run_provenance
+
+    assert validate_experiment_run_provenance(provenance) is provenance
+
+
+def test_something_that_is_not_a_provenance_is_refused() -> None:
+    from evaluation.experiments import validate_experiment_run_provenance
+
+    with pytest.raises(ExperimentContractError, match="not an experiment run"):
+        validate_experiment_run_provenance({"generated_at": None})
+
+
+def test_the_post_init_and_the_verifier_share_one_authority() -> None:
+    """One function, two callers — not two copies of the rules."""
+    import ast
+    import inspect
+    import pathlib
+
+    from evaluation.experiments import validate_experiment_run_provenance
+
+    source = pathlib.Path("evaluation/experiments/schema.py").read_text()
+    tree = ast.parse(source)
+    callers = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "validate_experiment_run_provenance"
+        ):
+            callers.add(node.lineno)
+    # Called from `__post_init__` and from the structural verifier.
+    assert len(callers) >= 2
+    assert "validate_experiment_run_provenance" in inspect.getsource(
+        ExperimentRunProvenance.__post_init__
+    )
+
+
+def test_the_validator_covers_every_field_the_contract_declares() -> None:
+    """A field added to the block cannot go quietly unchecked."""
+    from evaluation.experiments.schema import PROVENANCE_PATH_FIELDS
+
+    declared = set(ExperimentRunProvenance.__dataclass_fields__)
+    assert declared == {"generated_at", *PROVENANCE_PATH_FIELDS}

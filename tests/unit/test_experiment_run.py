@@ -642,3 +642,109 @@ def test_the_ranking_block_is_reachable_by_question() -> None:
     assert run.ranking.entry(MetricName.NDCG_AT_K, 10).k_requested == 10
     with pytest.raises(ExperimentBindingError, match="no entry"):
         run.ranking.entry(MetricName.NDCG_AT_K, 5)
+
+
+# ====================================================================
+# provenance is re-established by the structural verifier
+# ====================================================================
+#
+# Being outside `run_fingerprint` is not a reason to be unchecked. A provenance
+# built through `object.__new__` never ran `__post_init__`, so a verifier that
+# only checked its *type* would accept whatever it happened to hold.
+
+
+def _unchecked_provenance(**overrides):
+    forged = object.__new__(ExperimentRunProvenance)
+    fields = {
+        "generated_at": None,
+        "dataset_directory": None,
+        "business_metric_run_path": None,
+        "label_root": None,
+        "benchmark_records_path": None,
+    }
+    fields.update(overrides)
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def test_a_provenance_that_bypassed_post_init_is_refused_by_the_verifier() -> None:
+    run, _ = run_of()
+    forged = _unchecked_provenance(generated_at="not-a-timestamp")
+    # It really did skip the constructor's guarantee.
+    assert forged.generated_at == "not-a-timestamp"
+    moved = reseal(replace(run, provenance=forged))
+    with pytest.raises(ExperimentBindingError, match="RFC 3339"):
+        verify_experiment_run_structure(moved)
+
+
+def test_a_padded_path_that_bypassed_post_init_is_refused() -> None:
+    run, _ = run_of()
+    forged = _unchecked_provenance(label_root=" /padded/labels ")
+    moved = reseal(replace(run, provenance=forged))
+    with pytest.raises(ExperimentBindingError, match="padded"):
+        verify_experiment_run_structure(moved)
+
+
+def test_a_provenance_that_is_not_a_provenance_is_refused() -> None:
+    run, _ = run_of()
+    moved = reseal(replace(run, provenance={"generated_at": None}))
+    with pytest.raises(ExperimentContractError, match="not an experiment run"):
+        verify_experiment_run_structure(moved)
+
+
+def test_a_forged_provenance_never_reaches_the_full_verifier_either() -> None:
+    run, context = run_of()
+    moved = reseal(
+        replace(run, provenance=_unchecked_provenance(generated_at="yesterday"))
+    )
+    with pytest.raises(ExperimentBindingError):
+        verify_experiment_run(moved, context)
+
+
+def test_validating_the_provenance_did_not_move_it_into_identity() -> None:
+    """It is checked *and* still outside `run_fingerprint`. Both, not either."""
+    context = experiment_context()
+    bare = build_experiment_run(context)
+    stamped = build_experiment_run(
+        context,
+        provenance=ExperimentRunProvenance(
+            generated_at="2027-07-07T07:07:07+00:00",
+            dataset_directory="/yet/another/place",
+        ),
+    )
+    assert bare.run_fingerprint == stamped.run_fingerprint
+    assert verify_experiment_run(stamped, context) == bare.run_fingerprint
+    from evaluation.experiments import canonical_experiment_run_payload
+
+    assert "provenance" not in canonical_experiment_run_payload(stamped)
+
+
+def test_two_valid_but_different_provenances_are_still_one_run(tmp_path) -> None:
+    """The storage consequence of the line above, restated where it bites."""
+    from evaluation.experiments import (
+        ExperimentRunWriteStatus,
+        write_experiment_run,
+    )
+
+    context = experiment_context()
+    first = build_experiment_run(
+        context,
+        provenance=ExperimentRunProvenance(
+            generated_at="2026-01-01T00:00:00Z", label_root="/a/labels"
+        ),
+    )
+    second = build_experiment_run(
+        context,
+        provenance=ExperimentRunProvenance(
+            generated_at="2029-09-09T09:09:09-03:00", label_root="/b/labels"
+        ),
+    )
+    assert first.run_fingerprint == second.run_fingerprint
+    assert (
+        write_experiment_run(first, context, root=tmp_path).status
+        is ExperimentRunWriteStatus.CREATED
+    )
+    again = write_experiment_run(second, context, root=tmp_path)
+    assert again.status is ExperimentRunWriteStatus.UNCHANGED
+    assert again.run.provenance.generated_at == "2026-01-01T00:00:00Z"

@@ -88,6 +88,8 @@ from evaluation.metrics import (
     validate_evaluation_ranking_structure,
     validate_evaluation_universe_structure,
     validate_k,
+    validate_metric_result_structure,
+    validate_metric_support_structure,
     verify_evaluation_run,
     verify_evaluation_run_structure,
     verify_label_coverage,
@@ -1945,3 +1947,286 @@ def test_every_refusal_belongs_to_one_evaluation_exception_hierarchy():
         HumanLabelError,
     ):
         assert issubclass(error_type, EvaluationDatasetError)
+
+
+# ====================================================================
+# structural re-establishment of a result — for a consumer, not a builder
+# ====================================================================
+#
+# `MetricResult.__post_init__` is enough for a caller that constructs one. It is
+# not enough for a caller that is *handed* one, and Phase 10.5 embeds four of
+# them in an artefact of its own. These validators are how that consumer
+# re-establishes what a result claims, and they live here because the invariants
+# are this package's.
+
+
+def _unchecked(cls, **fields):
+    """An instance that never ran `__post_init__`. The forger's constructor.
+
+    `object.__new__` skips `__init__` entirely, so every guarantee a dataclass
+    makes at construction is simply absent. This is the object a downstream
+    verifier must refuse, and the reason "a dataclass is not a proof token" is a
+    rule rather than a slogan.
+    """
+    forged = object.__new__(cls)
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def _support(**overrides):
+    return MetricSupport(**overrides)
+
+
+def test_a_well_formed_result_re_establishes() -> None:
+    result = MetricResult(
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=0.5,
+        support=_support(k_requested=5, k_effective=5, numerator=2.0, denominator=4.0),
+    )
+    assert validate_metric_result_structure(result) is result
+
+
+def test_a_well_formed_na_result_re_establishes() -> None:
+    result = MetricResult(
+        metric=MetricName.RECALL_AT_K,
+        status=MetricStatus.N_A,
+        reason=MetricUnavailableReason.NO_RELEVANT_ITEMS,
+        support=_support(k_requested=10, k_effective=10),
+    )
+    assert validate_metric_result_structure(result) is result
+
+
+def test_something_that_is_not_a_result_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="not a metric result"):
+        validate_metric_result_structure({"metric": "PRECISION_AT_K"})
+
+
+def test_a_computed_result_with_no_value_is_refused_even_unchecked() -> None:
+    """The forgery `__post_init__` would have caught, on an object that skipped it."""
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=None,
+        reason=None,
+        support=_support(k_requested=5),
+    )
+    # It really did bypass the constructor's guarantee.
+    assert forged.status is MetricStatus.COMPUTED and forged.value is None
+    with pytest.raises(MetricContractError, match="states no value"):
+        validate_metric_result_structure(forged)
+
+
+def test_an_na_result_with_a_value_is_refused_even_unchecked() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.RECALL_AT_K,
+        status=MetricStatus.N_A,
+        value=0.0,
+        reason=MetricUnavailableReason.NO_RELEVANT_ITEMS,
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError, match="not even a zero"):
+        validate_metric_result_structure(forged)
+
+
+def test_a_computed_result_stating_a_reason_is_refused_even_unchecked() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.NDCG_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=0.4,
+        reason=MetricUnavailableReason.ZERO_IDEAL_DCG,
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError, match="states an N_A reason"):
+        validate_metric_result_structure(forged)
+
+
+def test_an_na_result_with_no_reason_is_refused_even_unchecked() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.NDCG_AT_K,
+        status=MetricStatus.N_A,
+        value=None,
+        reason=None,
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError):
+        validate_metric_result_structure(forged)
+
+
+def test_a_reason_outside_the_closed_vocabulary_is_refused() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.NDCG_AT_K,
+        status=MetricStatus.N_A,
+        value=None,
+        reason="NOT_ENOUGH_LABELS",
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError, match="which is not one of"):
+        validate_metric_result_structure(forged)
+
+
+def test_a_status_that_is_not_a_status_is_refused() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.NDCG_AT_K,
+        status="COMPUTED",
+        value=0.5,
+        reason=None,
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError, match="not a metric status"):
+        validate_metric_result_structure(forged)
+
+
+def test_a_metric_that_is_not_a_metric_name_is_refused() -> None:
+    forged = _unchecked(
+        MetricResult,
+        metric="MRR",
+        status=MetricStatus.COMPUTED,
+        value=0.5,
+        reason=None,
+        support=_support(),
+    )
+    with pytest.raises(MetricContractError, match="not a metric name"):
+        validate_metric_result_structure(forged)
+
+
+def test_a_support_that_is_not_a_support_is_refused_rather_than_crashing() -> None:
+    """Named, not an `AttributeError` escaping from three reads later."""
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=0.5,
+        reason=None,
+        support={"k_requested": 5},
+    )
+    with pytest.raises(MetricContractError, match="not a metric support block"):
+        validate_metric_result_structure(forged)
+
+
+def test_a_non_integer_count_in_the_support_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="not an integer"):
+        validate_metric_support_structure(_support(universe_size="12"))
+
+
+def test_a_boolean_count_in_the_support_is_refused() -> None:
+    """`True` would otherwise read as the count 1."""
+    with pytest.raises(MetricContractError, match="not an integer"):
+        validate_metric_support_structure(_support(judged_count=True))
+
+
+def test_a_negative_count_in_the_support_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="negative"):
+        validate_metric_support_structure(_support(ranking_length=-1))
+
+
+def test_a_non_finite_fraction_in_the_support_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="not finite"):
+        validate_metric_support_structure(_support(denominator=float("inf")))
+
+
+def test_an_effective_cut_off_deeper_than_the_request_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="can only be the smaller"):
+        validate_metric_support_structure(_support(k_requested=5, k_effective=10))
+
+
+def test_more_judged_than_the_universe_holds_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="judged items in a universe"):
+        validate_metric_support_structure(
+            _support(universe_size=4, judged_count=9)
+        )
+
+
+def test_a_repeated_unjudged_id_is_refused() -> None:
+    with pytest.raises(MetricContractError, match="repeats opportunity ids"):
+        validate_metric_support_structure(_support(unjudged_in_universe=(3, 3)))
+
+
+def test_the_validator_does_not_bound_a_value_to_zero_one() -> None:
+    """A metric outside [0, 1] is a bug and must stay visible as one.
+
+    `formulas.py` states in its own docstring that nothing clamps a result back
+    into range. A validator that refused such a value would be that clamping,
+    moved one layer out and turned into an exception at the wrong place.
+    """
+    result = MetricResult(
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=1.5,
+        support=_support(k_requested=5),
+    )
+    assert validate_metric_result_structure(result) is result
+
+
+def test_every_result_the_gates_and_formulas_produce_re_establishes() -> None:
+    """The non-regression that matters: the validator accepts real results.
+
+    A structural check that refused something Phase 10.3 legitimately produces
+    would be a new gate wearing a validator's clothes.
+    """
+    from evaluation.metrics import ndcg_at_k, precision_at_k, recall_at_k
+
+    dataset = ranked_dataset(size=20, ranked=12)
+    coverage = coverage_of(
+        {index: (3 if index <= 5 else 1) for index in range(1, 21)}, dataset
+    )
+    context = context_of(dataset, coverage)
+    partial = context_of(dataset, coverage_of({1: 3}, dataset))
+    for metric_context in (context, partial):
+        for k in (1, 5, 10, 50):
+            for result in (
+                precision_at_k(metric_context, k),
+                recall_at_k(metric_context, k),
+                ndcg_at_k(metric_context, k),
+            ):
+                assert validate_metric_result_structure(result) is result
+
+
+def test_no_formula_or_gate_lives_in_the_validators() -> None:
+    """They re-establish shape; they decide nothing and compute nothing."""
+    names = set()
+    for function in (
+        metrics_package.schema.validate_metric_result_structure,
+        metrics_package.schema.validate_metric_support_structure,
+    ):
+        tree = ast.parse(inspect.getsource(function).lstrip())
+        # Docstrings say what these functions do *not* do, so they are excluded
+        # by identity — grepping the text would forbid saying so.
+        docstrings = set()
+        for node in ast.walk(tree):
+            body = getattr(node, "body", ())
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+            ):
+                docstrings.add(id(body[0].value))
+        names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        names |= {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        }
+    for forbidden in (
+        "relevance_gain",
+        "rank_discount",
+        "is_relevant_grade",
+        "_discounted_cumulative_gain",
+        "precision_at_k",
+        "recall_at_k",
+        "ndcg_at_k",
+        "grade",
+        "RELEVANT_GRADE_THRESHOLD",
+    ):
+        assert forbidden not in names, forbidden

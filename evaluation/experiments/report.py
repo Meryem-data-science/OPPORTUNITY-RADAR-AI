@@ -50,6 +50,7 @@ no HTML, no dashboard, and no report fingerprint.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,6 +58,7 @@ from evaluation.business_metrics import (
     BusinessMetricRun,
     BusinessMetricStatus,
     business_metric_key_payload,
+    business_metric_support_payload,
 )
 from evaluation.metrics import MetricStatus
 
@@ -219,8 +221,68 @@ def _identities(report: ExperimentReport) -> list[str]:
     return lines
 
 
+#: The three scalar support fields every Phase 10.4 result carries, in the order
+#: the summary table states them. Read off the official payload rather than off
+#: the dataclass, so a field renamed upstream is a `KeyError` here rather than a
+#: silently blank column.
+_SCALAR_SUPPORT_FIELDS: tuple[str, ...] = (
+    "numerator",
+    "denominator",
+    "universe_size",
+)
+
+
+def _metric_name(result: Any) -> str:
+    """One Phase 10.4 key as a person reads it, dimension included."""
+    key = business_metric_key_payload(result.key)
+    name = str(key["metric"])
+    if key["dimension_value"] is not None:
+        name += f" / {key['dimension_kind']}={key['dimension_value']}"
+    return name
+
+
+def _support_lines(payload: Any, prefix: str = "") -> list[str]:
+    """One structured support block, flattened deterministically. **Read-only.**
+
+    Walks whatever the official Phase 10.4 payload holds — nested objects and
+    the one list of bucket entries alike — and emits `key: value` lines in
+    sorted key order. Nothing is summed, averaged, re-derived or reformatted
+    beyond display rounding: a block is shown, not interpreted.
+
+    Generic on purpose. Enumerating the seven blocks' fields here would be a
+    second copy of Phase 10.4's contract, free to fall behind it; walking the
+    payload means a field added upstream appears without this module changing.
+    """
+    lines: list[str] = []
+    if isinstance(payload, Mapping):
+        for key in sorted(payload):
+            lines += _support_lines(payload[key], f"{prefix}{key}.")
+        return lines
+    if isinstance(payload, list):
+        for index, item in enumerate(payload, start=1):
+            if isinstance(item, Mapping) and set(item) == {"bucket", "count"}:
+                # The freshness partition's own shape, rendered as the pair it
+                # is rather than as `entries.1.bucket`.
+                lines.append(f"- `{prefix}{item['bucket']}`: {item['count']}")
+                continue
+            lines += _support_lines(item, f"{prefix}{index}.")
+        return lines
+    rendered = (
+        _number(payload) if isinstance(payload, float) else str(payload)
+    )
+    lines.append(f"- `{prefix.rstrip('.')}`: {rendered}")
+    return lines
+
+
 def _business_metrics(report: ExperimentReport) -> list[str]:
-    """Every Phase 10.4 result, as that run states it. Not recomputed here."""
+    """Every Phase 10.4 result **and its support**, as that run states them.
+
+    Nothing here is recomputed, and nothing is derived: every number comes from
+    `business_metric_support_payload`, the same canonical projection Phase 10.4
+    digests, applied to a run that has already been fully verified. No ratio is
+    formed, no total is taken and no score is invented — the support is
+    *shown*.
+    """
     run = report.business_metric_run
     lines = [
         "## 2. Business and data-quality metrics (Phase 10.4)",
@@ -232,23 +294,57 @@ def _business_metrics(report: ExperimentReport) -> list[str]:
             "projection from them."
         ),
         "",
-        "| metric | status | value |",
-        "| --- | --- | --- |",
+        "| metric | status | value | numerator | denominator | universe |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
+    supports: list[tuple[str, Any, dict[str, Any]]] = []
     for result in run.results:
-        key = business_metric_key_payload(result.key)
-        name = str(key["metric"])
-        if key["dimension_value"] is not None:
-            name += f" / {key['dimension_kind']}={key['dimension_value']}"
+        # The official payload, not a field-by-field copy of the support block.
+        payload = business_metric_support_payload(result.support)
+        supports.append((_metric_name(result), result, payload))
         value = (
             _number(result.value)
             if result.status is BusinessMetricStatus.COMPUTED
             else "—"
         )
-        lines.append(
-            f"| `{name}` | {_status(result.status, result.reason)} | {value} |"
+        cells = " | ".join(
+            _number(payload[field])
+            if isinstance(payload[field], float)
+            else ("—" if payload[field] is None else str(payload[field]))
+            for field in _SCALAR_SUPPORT_FIELDS
         )
-    lines.append("")
+        lines.append(
+            f"| `{_metric_name(result)}` | "
+            f"{_status(result.status, result.reason)} | {value} | {cells} |"
+        )
+    lines += [
+        "",
+        (
+            "An `N_A` metric states no fraction — an unavailable rate has no "
+            "numerator and no denominator, not even a zero — and keeps whatever "
+            "support it does have. The structured blocks below are the ones the "
+            "run actually carries; a metric that carries none is not listed."
+        ),
+        "",
+    ]
+    for name, result, payload in supports:
+        blocks = {
+            key: value
+            for key, value in payload.items()
+            if key not in _SCALAR_SUPPORT_FIELDS and value is not None
+        }
+        if not blocks:
+            continue
+        lines += [f"### {name}", ""]
+        if result.status is not BusinessMetricStatus.COMPUTED:
+            lines += [
+                f"- status: {_status(result.status, result.reason)}",
+                "",
+            ]
+        for key in sorted(blocks):
+            lines += [f"**{key}**", ""]
+            lines += _support_lines(blocks[key])
+            lines.append("")
     return lines
 
 

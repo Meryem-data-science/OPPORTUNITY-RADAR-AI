@@ -199,6 +199,8 @@ from .schema import (
     validate_evaluation_universe_structure,
     validate_fingerprint,
     validate_k,
+    validate_metric_result_structure,
+    validate_metric_support_structure,
     validate_opportunity_id,
     validate_rank_position,
 )
@@ -279,6 +281,8 @@ __all__ = [
     "validate_evaluation_universe_structure",
     "validate_fingerprint",
     "validate_k",
+    "validate_metric_result_structure",
+    "validate_metric_support_structure",
     "validate_opportunity_id",
     "validate_rank_position",
     "verify_evaluation_ranking_fingerprint",

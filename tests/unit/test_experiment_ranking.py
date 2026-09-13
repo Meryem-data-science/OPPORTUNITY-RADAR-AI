@@ -24,6 +24,7 @@ from evaluation.experiments import (
     RankingEvaluationInputs,
     RankingExperimentStatus,
     RankingExperimentUnavailableReason,
+    RankingMetricEntry,
     compute_projection,
     compute_ranking_experiment,
     verify_ranking_experiment_result_fingerprint,
@@ -31,6 +32,7 @@ from evaluation.experiments import (
 from evaluation.metrics import (
     EvidenceClass,
     MetricName,
+    MetricResult,
     MetricStatus,
     MetricUnavailableReason,
     effective_k,
@@ -461,3 +463,195 @@ def test_an_edited_metric_value_fails_the_declared_digest() -> None:
     )
     with pytest.raises(ExperimentBindingError, match="not what it says it is"):
         verify_ranking_experiment_result_fingerprint(forged)
+
+
+# ====================================================================
+# the nested Phase 10.3 results are re-established, never taken on trust
+# ====================================================================
+#
+# Every result in a stored ranking block was built by Phase 10.3 in the honest
+# case. `object.__new__(MetricResult)` produces one that never ran
+# `__post_init__`, and a contract that only checked its *type* would embed it,
+# digest it, and hand a reader a COMPUTED metric with no value behind a valid
+# fingerprint. A dataclass is not a proof token.
+
+
+def _unchecked(cls, **fields):
+    """An instance that skipped `__post_init__` entirely. The forger's tool."""
+    forged = object.__new__(cls)
+    for name, value in fields.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def _entry(result):
+    """The first contract question, carrying whatever result is given."""
+    metric, k = RANKING_EXPERIMENT_QUESTIONS[0]
+    return RankingMetricEntry(metric=metric, k_requested=k, result=result)
+
+
+def _block_with(entry_result):
+    """A ranking block whose first entry holds a forged result."""
+    records = ranked_records(size=10, ranked=6)
+    dataset = dataset_of(records)
+    healthy = ranking_of(records, coverage=fully_judged(dataset))
+    return replace(
+        healthy,
+        metric_results=(_entry(entry_result), *healthy.metric_results[1:]),
+    )
+
+
+def test_a_nested_computed_result_with_no_value_is_refused() -> None:
+    from evaluation.experiments import validate_ranking_experiment_result_structure
+    from evaluation.metrics import MetricSupport
+
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=None,
+        reason=None,
+        support=MetricSupport(k_requested=5, k_effective=5),
+    )
+    assert forged.status is MetricStatus.COMPUTED and forged.value is None
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        validate_ranking_experiment_result_structure(_block_with(forged))
+
+
+def test_a_nested_na_result_with_a_value_is_refused() -> None:
+    from evaluation.experiments import validate_ranking_experiment_result_structure
+    from evaluation.metrics import MetricSupport
+
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.N_A,
+        value=0.0,
+        reason=MetricUnavailableReason.TOP_K_NOT_FULLY_JUDGED,
+        support=MetricSupport(k_requested=5, k_effective=5),
+    )
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        validate_ranking_experiment_result_structure(_block_with(forged))
+
+
+def test_a_nested_result_whose_support_is_not_a_support_is_refused() -> None:
+    """Named, rather than an `AttributeError` escaping the verifier."""
+    from evaluation.experiments import validate_ranking_experiment_result_structure
+
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=0.5,
+        reason=None,
+        support={"k_requested": 5},
+    )
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        validate_ranking_experiment_result_structure(_block_with(forged))
+
+
+def test_a_nested_result_with_an_invented_reason_is_refused() -> None:
+    from evaluation.experiments import validate_ranking_experiment_result_structure
+    from evaluation.metrics import MetricSupport
+
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.N_A,
+        value=None,
+        reason="NOT_ENOUGH_LABELS",
+        support=MetricSupport(k_requested=5),
+    )
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        validate_ranking_experiment_result_structure(_block_with(forged))
+
+
+def test_a_nested_result_with_a_malformed_support_count_is_refused() -> None:
+    from evaluation.experiments import validate_ranking_experiment_result_structure
+    from evaluation.metrics import MetricSupport
+
+    forged = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=0.5,
+        reason=None,
+        support=_unchecked(
+            MetricSupport,
+            k_requested=5,
+            k_effective=5,
+            ranking_length=-3,
+            universe_size=None,
+            judged_count=None,
+            judged_in_top_k=None,
+            unjudged_in_top_k=(),
+            unjudged_in_universe=(),
+            relevant_count=None,
+            numerator=None,
+            denominator=None,
+        ),
+    )
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        validate_ranking_experiment_result_structure(_block_with(forged))
+
+
+def test_a_forged_nested_result_cannot_survive_the_run_verifier() -> None:
+    """The whole point: it must not reach a stored run behind a valid digest."""
+    from evaluation.experiments import (
+        build_experiment_run,
+        experiment_run_fingerprint,
+        ranking_experiment_result_fingerprint,
+        verify_experiment_run_structure,
+    )
+    from evaluation.metrics import MetricSupport
+
+    records = ranked_records(size=10, ranked=6)
+    dataset = dataset_of(records)
+    context = experiment_context(records, coverage=fully_judged(dataset))
+    run = build_experiment_run(context)
+
+    forged_result = _unchecked(
+        MetricResult,
+        metric=MetricName.PRECISION_AT_K,
+        status=MetricStatus.COMPUTED,
+        value=None,
+        reason=None,
+        support=MetricSupport(k_requested=5, k_effective=5),
+    )
+    forged_block = replace(
+        run.ranking,
+        metric_results=(
+            _entry(forged_result),
+            *run.ranking.metric_results[1:],
+        ),
+    )
+    # Digest the forged block, then the run: both identities are impeccable.
+    forged_block = replace(
+        forged_block,
+        result_fingerprint=ranking_experiment_result_fingerprint(forged_block),
+    )
+    forged = replace(run, ranking=forged_block)
+    forged = replace(
+        forged, run_fingerprint=experiment_run_fingerprint(forged)
+    )
+    with pytest.raises(ExperimentContractError, match="does not re-establish"):
+        verify_experiment_run_structure(forged)
+
+
+def test_the_nested_invariants_are_phase_10_3s_own_function() -> None:
+    """Not a second copy of "COMPUTED carries a value" living in Phase 10.5."""
+    import ast
+    import pathlib
+
+    from evaluation.metrics import validate_metric_result_structure
+
+    assert callable(validate_metric_result_structure)
+    tree = ast.parse(pathlib.Path("evaluation/experiments/schema.py").read_text())
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "evaluation.metrics"
+        for alias in node.names
+    }
+    assert "validate_metric_result_structure" in imported

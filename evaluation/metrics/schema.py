@@ -1235,6 +1235,207 @@ def metric_result_payload(result: MetricResult) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# structural re-establishment of a result, for a consumer that did not build it
+# --------------------------------------------------------------------------
+#
+# `MetricResult.__post_init__` establishes the status/value/reason invariants at
+# construction, which is enough for every caller that *constructs* one. It is
+# not enough for a caller that is **handed** one: `object.__new__(MetricResult)`
+# followed by `object.__setattr__` produces an object that never ran
+# `__post_init__` and can therefore claim COMPUTED with no value, or N_A with
+# one. A dataclass is not a proof token, and a downstream package that embeds a
+# result in an artefact of its own has to be able to re-establish what the
+# result claims rather than assume it.
+#
+# So the invariants live here, in the package that owns them, and are exported
+# for that consumer to call. They add no formula, no availability gate and no
+# identity: they are the same statements `__post_init__` makes, plus the type
+# and shape checks a constructor gets for free from its own call site and a
+# reader does not.
+
+
+def _validate_optional_count(value: Any, *, subject: str) -> int | None:
+    """`None`, or a non-negative integer. `bool` is not an integer here."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MetricContractError(
+            f"{subject} is not an integer: {value!r} ({type(value).__name__})"
+        )
+    if value < 0:
+        raise MetricContractError(f"{subject} is negative: {value!r}")
+    return value
+
+
+def _validate_optional_number(value: Any, *, subject: str) -> float | None:
+    """`None`, or a finite real number. **Never clamped and never rounded.**
+
+    Deliberately no `[0, 1]` bound, on a value or on a fraction: `formulas.py`
+    states that a metric outside that range would be a bug and must look like
+    one, so a validator that quietly refused it would be the clamping this
+    package has always declined to do — and would turn a visible bug into an
+    exception at the wrong layer.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MetricContractError(
+            f"{subject} is not a number: {value!r} ({type(value).__name__})"
+        )
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise MetricContractError(f"{subject} is not finite: {value!r}")
+    return number
+
+
+def _validate_id_tuple(value: Any, *, subject: str) -> tuple[int, ...]:
+    """A tuple of well-formed opportunity ids, holding each at most once."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise MetricContractError(
+            f"{subject} is not a sequence: {value!r} ({type(value).__name__})"
+        )
+    ids = [
+        validate_opportunity_id(item, subject=f"a member of {subject}")
+        for item in value
+    ]
+    if len(set(ids)) != len(ids):
+        duplicates = sorted({item for item in ids if ids.count(item) > 1})
+        raise MetricContractError(
+            f"{subject} repeats opportunity ids {duplicates}"
+        )
+    return tuple(ids)
+
+
+def validate_metric_support_structure(support: Any) -> MetricSupport:
+    """Re-establish every invariant a support block claims, or refuse it.
+
+    The refusal on the first line is the one worth naming: a support that is not
+    a `MetricSupport` is reported as such rather than allowed to surface three
+    attribute reads later as an `AttributeError` from inside a verifier. A
+    consumer holding a forged artefact deserves to be told what is wrong with
+    it.
+
+    Every count is an integer or absent, and `bool` is neither — `True` arriving
+    through a JSON round trip or a careless caller would otherwise read as the
+    count 1. `numerator` and `denominator` are finite reals or absent, with no
+    range bound: see `_validate_optional_number`.
+    """
+    if not isinstance(support, MetricSupport):
+        raise MetricContractError(
+            f"{support!r} ({type(support).__name__}) is not a metric support "
+            "block"
+        )
+    # `k_requested` is a cut-off and shares the cut-off rule: at least 1.
+    if support.k_requested is not None:
+        validate_k(support.k_requested)
+    for name in (
+        "k_effective",
+        "ranking_length",
+        "universe_size",
+        "judged_count",
+        "judged_in_top_k",
+        "relevant_count",
+    ):
+        _validate_optional_count(
+            getattr(support, name), subject=f"the support's {name}"
+        )
+    for name in ("unjudged_in_top_k", "unjudged_in_universe"):
+        _validate_id_tuple(
+            getattr(support, name), subject=f"the support's {name}"
+        )
+    for name in ("numerator", "denominator"):
+        _validate_optional_number(
+            getattr(support, name), subject=f"the support's {name}"
+        )
+    if (
+        support.k_requested is not None
+        and support.k_effective is not None
+        and support.k_effective > support.k_requested
+    ):
+        raise MetricContractError(
+            f"the support states an effective cut-off {support.k_effective} "
+            f"deeper than the {support.k_requested} that was requested; the "
+            "effective K is min(K, ranking length) and can only be the smaller"
+        )
+    if (
+        support.judged_in_top_k is not None
+        and support.k_effective is not None
+        and support.judged_in_top_k > support.k_effective
+    ):
+        raise MetricContractError(
+            f"the support states {support.judged_in_top_k} judged items in an "
+            f"effective top {support.k_effective}"
+        )
+    if (
+        support.judged_count is not None
+        and support.universe_size is not None
+        and support.judged_count > support.universe_size
+    ):
+        raise MetricContractError(
+            f"the support states {support.judged_count} judged items in a "
+            f"universe of {support.universe_size}"
+        )
+    return support
+
+
+def validate_metric_result_structure(result: Any) -> MetricResult:
+    """Re-establish every invariant a metric result claims, or refuse it.
+
+    The same statements `MetricResult.__post_init__` makes — COMPUTED carries a
+    value and no reason, `N_A` carries a reason and no value — **re-checked on an
+    object this caller did not construct**, together with the closed-vocabulary
+    and support-shape checks a constructor never had to make.
+
+    It computes nothing. There is no formula here, no availability gate and no
+    identity: whether the value is the number the metric yields over some
+    ranking is `formulas.py`'s question, and this function has neither the
+    ranking nor the judgements to ask it.
+    """
+    if not isinstance(result, MetricResult):
+        raise MetricContractError(
+            f"{result!r} ({type(result).__name__}) is not a metric result"
+        )
+    if not isinstance(result.metric, MetricName):
+        raise MetricContractError(
+            f"{result.metric!r} is not a metric name; this build knows "
+            f"{[str(item) for item in MetricName]}"
+        )
+    if not isinstance(result.status, MetricStatus):
+        raise MetricContractError(
+            f"{result.status!r} is not a metric status; a metric is a number "
+            "or a stated refusal"
+        )
+    validate_metric_support_structure(result.support)
+
+    if result.status is MetricStatus.COMPUTED:
+        if result.value is None:
+            raise MetricContractError(
+                f"{result.metric} is COMPUTED but states no value"
+            )
+        _validate_optional_number(
+            result.value, subject=f"the value of {result.metric}"
+        )
+        if result.reason is not None:
+            raise MetricContractError(
+                f"{result.metric} is COMPUTED and states an N_A reason "
+                f"({result.reason})"
+            )
+        return result
+
+    if result.value is not None:
+        raise MetricContractError(
+            f"{result.metric} is N_A and states value {result.value!r}; an "
+            "unavailable metric has no number, not even a zero"
+        )
+    if not isinstance(result.reason, MetricUnavailableReason):
+        raise MetricContractError(
+            f"{result.metric} is N_A and states reason {result.reason!r}, "
+            f"which is not one of {[str(item) for item in MetricUnavailableReason]}"
+        )
+    return result
+
+
+# --------------------------------------------------------------------------
 # the evaluation run contract
 # --------------------------------------------------------------------------
 

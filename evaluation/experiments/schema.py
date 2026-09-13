@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from enum import StrEnum
@@ -105,11 +106,12 @@ from evaluation.dataset import EvaluationDatasetError
 from evaluation.metrics import (
     EvaluationUniverseKind,
     EvidenceClass,
+    MetricContractError,
     MetricName,
     MetricResult,
-    MetricStatus,
     RankingSource,
     metric_result_payload,
+    validate_metric_result_structure,
 )
 
 __all__ = [
@@ -123,6 +125,7 @@ __all__ = [
     "OVERLAP_RESULT_SCHEMA_VERSION",
     "PROJECTION_ORDER",
     "PROJECTION_RESULT_SCHEMA_VERSION",
+    "PROVENANCE_PATH_FIELDS",
     "RANKING_EXPERIMENT_QUESTIONS",
     "RANKING_EXPERIMENT_RESULT_SCHEMA_VERSION",
     "SUPPORTED_EXPERIMENT_CONTRACT_VERSIONS",
@@ -165,6 +168,7 @@ __all__ = [
     "validate_experiment_count",
     "validate_experiment_fingerprint",
     "validate_experiment_opportunity_id",
+    "validate_experiment_run_provenance",
     "validate_experiment_run_structure",
     "validate_overlap_result_structure",
     "validate_projection_result_structure",
@@ -412,6 +416,40 @@ def _require_text(value: Any, *, subject: str) -> str:
 def _require_optional_text(value: Any, *, subject: str) -> str | None:
     """`None` means *not stated* and stays `None`."""
     return None if value is None else _require_text(value, subject=subject)
+
+
+#: An RFC 3339 instant with an explicit offset, spelled exactly as Phase 10.4
+#: spells one. A timestamp with no offset does not identify a moment — it
+#: identifies a moment per timezone.
+_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d{1,9})?([Zz]|[+-]\d{2}:\d{2})$"
+)
+
+
+def _require_timestamp(value: Any, *, subject: str) -> str:
+    """An RFC 3339 instant with an explicit offset, checked against the calendar.
+
+    The repository's existing convention, applied here rather than restated: the
+    pattern is Phase 10.4's, and the calendar check behind it is what stops
+    `2026-02-30T00:00:00Z` from being a well-shaped string that is not a day.
+    """
+    if not isinstance(value, str) or not _TIMESTAMP_PATTERN.match(value):
+        raise ExperimentBindingError(
+            f"{subject} is not an RFC 3339 timestamp with an explicit offset "
+            f"(e.g. 2026-03-01T09:00:00Z): {value!r}"
+        )
+    normalized = value.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise ExperimentBindingError(
+            f"{subject} is not a real instant: {value!r}"
+        ) from error
+    if parsed.tzinfo is None:  # pragma: no cover - the pattern requires one
+        raise ExperimentBindingError(
+            f"{subject} states no UTC offset: {value!r}"
+        )
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -1536,11 +1574,25 @@ def validate_ranking_experiment_result_structure(
                 f"{metric}@{k_requested}; the four questions and their order are "
                 "the contract's"
             )
-        if not isinstance(entry.result, MetricResult):
+        # **The nested result is re-established, never taken on trust.** A
+        # `MetricResult` reaching this contract was built by Phase 10.3 in every
+        # honest case — and `object.__new__(MetricResult)` followed by
+        # `object.__setattr__` produces one that never ran `__post_init__` and
+        # can claim COMPUTED with no value, `N_A` with one, or a support that is
+        # not a support at all. A dataclass is not a proof token, so Phase
+        # 10.3's own structural validator runs over each of the four before
+        # anything here reads a status, a value or a K.
+        #
+        # It is Phase 10.3's function deliberately: those invariants belong to
+        # the package that defines them, and a second copy of "COMPUTED carries
+        # a value" living here would be free to drift from the original.
+        try:
+            validate_metric_result_structure(entry.result)
+        except MetricContractError as error:
             raise ExperimentContractError(
-                f"ranking entry {position} holds {entry.result!r}, which is not a "
-                "Phase 10.3 metric result"
-            )
+                f"ranking entry {position} ({metric}@{k_requested}) does not "
+                f"re-establish as a Phase 10.3 metric result: {error}"
+            ) from error
         if entry.result.metric is not metric:
             raise ExperimentBindingError(
                 f"ranking entry {position} asks {metric} and its result is about "
@@ -1550,11 +1602,6 @@ def validate_ranking_experiment_result_structure(
             raise ExperimentBindingError(
                 f"ranking entry {position} asks K={k_requested} and its result's "
                 f"support records K={entry.result.support.k_requested!r}"
-            )
-        if entry.result.status not in (MetricStatus.COMPUTED, MetricStatus.N_A):
-            raise ExperimentContractError(
-                f"ranking entry {position} states status {entry.result.status!r}; "
-                "a Phase 10.3 metric is a number or a stated refusal"
             )
     return result
 
@@ -1697,11 +1744,71 @@ class ExperimentRunProvenance:
     benchmark_records_path: str | None = None
 
     def __post_init__(self) -> None:
-        for field in fields(self):
-            _require_optional_text(
-                getattr(self, field.name),
-                subject=f"the run provenance's {field.name}",
-            )
+        # The same authority the structural verifier calls — see
+        # `validate_experiment_run_provenance`. Constructing one checks it, and
+        # so does reading one somebody else constructed.
+        validate_experiment_run_provenance(self)
+
+
+#: The four provenance fields that are paths. `generated_at` is not among them:
+#: it is an instant and is held to the instant rule instead.
+PROVENANCE_PATH_FIELDS: tuple[str, ...] = (
+    "dataset_directory",
+    "business_metric_run_path",
+    "label_root",
+    "benchmark_records_path",
+)
+
+
+def validate_experiment_run_provenance(
+    provenance: Any,
+) -> ExperimentRunProvenance:
+    """Re-establish everything a provenance block claims, or refuse it.
+
+    **One authority, two callers.** `ExperimentRunProvenance.__post_init__`
+    calls it so a constructed block is checked, and
+    `validate_experiment_run_structure` calls it so a block this process did
+    *not* construct is checked too — `object.__new__(ExperimentRunProvenance)`
+    followed by `object.__setattr__` never runs `__post_init__`, and a verifier
+    that only checked the block's *type* would accept whatever such an object
+    happened to hold. The lesson is Phase 10.4's, arrived at the same way.
+
+    `generated_at` is an **instant**: `None`, or an RFC 3339 timestamp with an
+    explicit offset, as every other Phase 10 timestamp is spelled. A
+    `"not-a-timestamp"` that used to pass as "optional text" is refused here.
+
+    The four paths stay optional, non-empty, unpadded text — and **nothing asks
+    the filesystem whether they exist**. A path says where somebody read a file;
+    a run that was moved to another machine did not thereby become a different
+    experiment, and a verifier that failed on a path that had since been deleted
+    would make a frozen artefact unverifiable by accident.
+
+    None of this enters `run_fingerprint`. Validating the provenance does not
+    promote it to identity: it stays outside, which is exactly why two runs
+    differing only here are one run.
+    """
+    if not isinstance(provenance, ExperimentRunProvenance):
+        raise ExperimentContractError(
+            f"{provenance!r} ({type(provenance).__name__}) is not an experiment "
+            "run provenance"
+        )
+    if provenance.generated_at is not None:
+        _require_timestamp(
+            provenance.generated_at,
+            subject="the run provenance's generated_at",
+        )
+    stated = {field.name for field in fields(ExperimentRunProvenance)}
+    if stated != {"generated_at", *PROVENANCE_PATH_FIELDS}:  # pragma: no cover
+        raise ExperimentContractError(
+            f"the provenance contract states {sorted(stated)}; this validator "
+            "covers a different set and would leave a field unchecked"
+        )
+    for name in PROVENANCE_PATH_FIELDS:
+        _require_optional_text(
+            getattr(provenance, name),
+            subject=f"the run provenance's {name}",
+        )
+    return provenance
 
 
 def experiment_run_provenance_payload(
@@ -1863,10 +1970,10 @@ def validate_experiment_run_structure(run: Any) -> ExperimentRun:
             f"this run states contract version {run.contract_version!r} and its "
             f"context binding states {binding.experiment_contract_version!r}"
         )
-    if not isinstance(run.provenance, ExperimentRunProvenance):
-        raise ExperimentContractError(
-            f"{run.provenance!r} is not an experiment run provenance"
-        )
+    # Re-established field by field, not merely type-checked: a provenance
+    # built through `object.__new__` never ran `__post_init__`, so its own
+    # constructor guarantees say nothing about the object in front of us.
+    validate_experiment_run_provenance(run.provenance)
     validate_experiment_fingerprint(
         run.run_fingerprint, subject="the experiment run fingerprint"
     )
