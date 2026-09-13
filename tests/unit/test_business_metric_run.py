@@ -34,6 +34,7 @@ from evaluation.business_metrics import (
     BusinessMetricName,
     BusinessMetricRunProvenance,
     BusinessMetricStatus,
+    BusinessMetricsError,
     build_business_metric_run,
     business_metric_key_sort_key,
     business_metric_run_fingerprint,
@@ -363,6 +364,119 @@ def test_structural_verification_refuses_an_empty_run() -> None:
     run = run_over()
     with pytest.raises(BusinessMetricContractError, match="at least one result"):
         verify_business_metric_run_structure(replace(run, results=()))
+
+
+def resealed(run):
+    """The same run with its fingerprint recomputed over whatever it now holds.
+
+    What a tamperer would do, and the reason none of the tests below can be
+    satisfied by the run's own digest: it is made valid on purpose.
+    """
+    return replace(run, run_fingerprint=business_metric_run_fingerprint(run))
+
+
+def test_structural_verification_rebinds_every_result_to_the_run_context() -> None:
+    """A result sealed against *other* evidence cannot be dropped into a run.
+
+    Both runs measure the same records; their contexts differ only in the git
+    commit the declared source map was read at, which is inside that binding's
+    content fingerprint. So the two `ACTIVE_DECLARED_SOURCE_RATE` results carry
+    the same value and *different* evidence identities — and the foreign one,
+    re-sealed into a run whose fingerprint is then recomputed, is structurally
+    impeccable in every way except the one that matters.
+    """
+    records = DEFAULT_RECORDS
+    mine = run_over(records, declared_source_universe=declared_universe())
+    theirs = run_over(
+        records, declared_source_universe=declared_universe(git_commit="d" * 40)
+    )
+    key = BusinessMetricKey(BusinessMetricName.ACTIVE_DECLARED_SOURCE_RATE)
+    foreign = theirs.result_for(key)
+    ours = mine.result_for(key)
+    # Same number, and two different identities for the question and the proof.
+    assert foreign.value == ours.value
+    assert foreign.scope_fingerprint != ours.scope_fingerprint
+    assert foreign.evidence_fingerprint != ours.evidence_fingerprint
+
+    spliced = resealed(
+        replace(
+            mine,
+            results=tuple(
+                foreign if result.key == key else result for result in mine.results
+            ),
+        )
+    )
+    # Its own digest is valid, and so is the run's.
+    assert business_metric_run_fingerprint(spliced) == spliced.run_fingerprint
+    with pytest.raises(
+        BusinessMetricBindingError, match="this context asks"
+    ) as error:
+        verify_business_metric_run_structure(spliced)
+    assert str(key.metric) in str(error.value)
+
+
+def test_structural_verification_requires_every_scalar_metric() -> None:
+    """A dropped scalar metric is structural, and is refused without the records.
+
+    Which metrics the contract defines is a fact this verifier holds. A run that
+    simply omits one, re-fingerprinted over what remained, would otherwise report
+    twenty-five measurements under a complete run's name.
+    """
+    run = run_over()
+    for missing in (
+        BusinessMetricName.DESCRIPTION_PRESENCE_RATE,
+        BusinessMetricName.BROKEN_URL_RATE,
+        BusinessMetricName.OPPORTUNITY_SKILL_COVERAGE,
+    ):
+        trimmed = resealed(
+            replace(
+                run,
+                results=tuple(
+                    result for result in run.results if result.key.metric is not missing
+                ),
+            )
+        )
+        assert business_metric_run_fingerprint(trimmed) == trimmed.run_fingerprint
+        with pytest.raises(BusinessMetricBindingError, match="scalar metric"):
+            verify_business_metric_run_structure(trimmed)
+
+
+def test_a_forged_provenance_is_refused_by_the_structural_verifier() -> None:
+    """A dataclass is not a proof token, so the block is validated again.
+
+    `object.__new__` skips `__init__`, so `__post_init__` never runs and the
+    block reaches the run unchecked. The provenance is outside `run_fingerprint`
+    by design, so the digest cannot catch it either — only revalidation can.
+    """
+    run = run_over()
+    for field, value in (
+        ("generated_at", "not-a-timestamp"),
+        ("generated_at", "2026-03-01T09:15:00"),  # no offset
+        ("dataset_directory", "  padded/path  "),
+        ("dataset_directory", ""),
+        ("benchmark_records_path", 7),
+    ):
+        forged = object.__new__(BusinessMetricRunProvenance)
+        for name in ("generated_at", "dataset_directory", "benchmark_records_path"):
+            object.__setattr__(forged, name, None)
+        object.__setattr__(forged, field, value)
+
+        tampered = replace(run, provenance=forged)
+        # The run's own digest is untouched, because provenance is outside it.
+        assert tampered.run_fingerprint == run.run_fingerprint
+        with pytest.raises(BusinessMetricsError):
+            verify_business_metric_run_structure(tampered)
+
+
+def test_a_well_formed_provenance_still_passes() -> None:
+    run = run_over(
+        provenance=BusinessMetricRunProvenance(
+            generated_at="2026-07-07T07:07:07Z",
+            dataset_directory="data/evaluation/datasets/x",
+            benchmark_records_path="evaluation/benchmarks/gold.yaml",
+        )
+    )
+    assert verify_business_metric_run_structure(run) == run.run_fingerprint
 
 
 def test_structural_verification_does_not_claim_to_check_the_arithmetic() -> None:

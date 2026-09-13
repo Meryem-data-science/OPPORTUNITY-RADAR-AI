@@ -41,11 +41,20 @@ indistinguishable from a complete one once it is written to disk.
 ## Two verifications, deliberately separate
 
 `verify_business_metric_run_structure` re-establishes a run **from itself**:
-versions, structures, canonical order, a duplicate-free key set, every nested
-digest and the run's own. It does not pretend to more. It cannot re-derive the
-dynamic per-source keys, because which sources the cohort observed is a fact
-about records it does not hold, and it cannot check any arithmetic for the same
-reason. A run that passes it is well formed; it is not thereby *true*.
+versions, structures, canonical order, a duplicate-free key set, every scalar
+metric the contract defines, every nested digest and the run's own — and it
+rebinds **every result to the run's own context**, so a result sealed against a
+different assembly of evidence cannot be dropped into a run and re-fingerprinted.
+
+It does not pretend to more. It cannot re-derive the *dynamic* per-source keys,
+because which sources the cohort observed is a fact about records it does not
+hold, and it cannot check any arithmetic for the same reason. A run that passes
+it is well formed and internally coherent; it is not thereby *true*.
+
+The line between the two is drawn by where the fact lives: which scalar metrics
+exist is a property of `BusinessMetricName`, which this module has, so their
+completeness is structural. Which `source_id`s exist is a property of the frozen
+records, which it does not, so that half waits for the full verifier.
 
 `verify_business_metric_run` has the records. It rebuilds the computation
 context, re-derives the exact key set, **recomputes every metric** and requires
@@ -66,6 +75,7 @@ from services.collector.matching.fingerprint import canonical_json
 from .bindings import (
     assert_unique_business_metric_keys,
     verify_business_metric_result,
+    verify_business_metric_results,
     verify_business_metric_run_context,
 )
 from .fingerprint import (
@@ -265,11 +275,23 @@ def verify_business_metric_run_structure(run: BusinessMetricRun) -> str:
     single contract version across all three levels, one result per key in
     canonical order, and the run's own digest over all of it.
 
+    Crucially it also **rebinds every result to this run's context**, through
+    Phase 10.4a's own `verify_business_metric_results`: each result's
+    `scope_fingerprint` and `evidence_fingerprint` must be exactly the ones
+    re-projected from `run.context`. Verifying a result's own digest is not
+    enough and was the hole this closes — a result sealed against *another*
+    context is internally impeccable, and dropping it into a run whose
+    fingerprint was then recomputed produced a document that passed every check
+    and described two different assemblies of evidence at once.
+
     What it deliberately does **not** claim, and the name says so:
 
     * it cannot re-derive the dynamic `OBSERVED_SOURCE_CONTRIBUTION` keys. Which
       sources the cohort observed is a fact about records this function does not
-      hold, so a run that omits one — or invents one — passes here;
+      hold, so a run that omits one — or invents one — passes here. The *scalar*
+      half of the key set is another matter and is required, by
+      `validate_business_metric_run_structure`: which metrics the contract
+      defines is not a fact about records;
     * it proves no arithmetic. A SHA-256 identifies content; it does not say that
       a value is the value the metric's formula yields over the frozen records.
 
@@ -278,8 +300,11 @@ def verify_business_metric_run_structure(run: BusinessMetricRun) -> str:
     validate_business_metric_run_structure(run)
     verify_business_metric_run_context(run.context)
     verify_business_metric_run_context_fingerprint(run.context)
-    for result in run.results:
-        verify_business_metric_result_fingerprint(result)
+    # Re-establishes each result against this context — its own digest, its
+    # structure, the projections it claims, the universe's real size and the
+    # condition of any refusal. It recomputes no arithmetic: that needs the
+    # records, which this function does not have.
+    verify_business_metric_results(run.results, context=run.context)
     return verify_business_metric_run_fingerprint(run)
 
 

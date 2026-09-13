@@ -21,12 +21,16 @@ human label. It writes one JSON file and reads it back.
                             that is actually on disk
     present and different   raise, and change nothing
 
-"Identical" is decided **semantically**, over the whole document minus the
-provenance — never by comparing the stored `run_fingerprint`, which is a claim
-the file makes about itself. A file can be edited while keeping the digest it
-claims, and such a file must never pass as UNCHANGED. Two runs differing only in
-when they were generated or which directory they were read from are the same
-measurement, report UNCHANGED, and rewrite not one byte.
+"Identical" is decided by the contract's own **identity projection** — the
+canonical D9 payload `run_fingerprint` is taken over — and only after *both* runs
+have been fully structurally verified, which recomputes every nested digest and
+each run's own. Neither the stored `run_fingerprint` nor the file's bytes decide
+it: the first is a claim a document makes about itself and an edited file can
+keep it, and the second carries provenance that identity deliberately excludes.
+So two runs of the same measurement differing only in when they were generated,
+which directory the dataset was read from, or **where a nested source map or
+benchmark file happened to live** are one run: UNCHANGED, and not a byte
+rewritten.
 
 The run returned on UNCHANGED is the one **read back from disk**, with its
 original provenance. A caller that was handed its own in-memory run instead would
@@ -36,10 +40,21 @@ that is actually stored.
 There is no repair, no overwrite and no deletion. An incomplete directory,
 unreadable JSON, an unknown schema version, a nested artefact whose digest does
 not survive recomputation, or content that diverges from this run: each raises
-and leaves the directory exactly as it was. A partial write cannot be mistaken
-for a run, because the document is published into place by an atomic rename from
-a temporary file — a crash leaves either no directory or an empty one, and an
-empty one is refused on the next read rather than trusted.
+and leaves the directory exactly as it was.
+
+A partial write cannot be mistaken for a run, and neither can a lost race. The
+document is written to a temporary file, fsynced, and then published by a **hard
+link**, which is atomic *and* fails when the destination already exists — unlike
+a rename, which would need a prior `exists()` check and could be overtaken
+between the check and the call.
+
+So a crash leaves one of exactly three states, and none of them is a half-written
+run: no directory at all; an empty directory, which the next read refuses rather
+than trusts; or — once the link has returned — a **complete, valid run** whose
+temporary name simply has not been cleaned up yet. That third state is a stray
+hidden `.tmp` file beside the run directories, read by nothing, and the run in it
+is frozen and correct. Removing that name is best-effort housekeeping: it cannot
+fail the write, and it never touches `run.json`.
 
 ## The bytes are stable
 
@@ -74,6 +89,7 @@ from typing import Any
 
 from services.collector.matching.fingerprint import canonical_json
 
+from .fingerprint import canonical_business_metric_run_payload
 from .run import verify_business_metric_run_structure
 from .schema import (
     BusinessEvidenceClass,
@@ -186,22 +202,27 @@ def _render(run: BusinessMetricRun) -> str:
     )
 
 
-def _semantic_document(run: BusinessMetricRun) -> str:
-    """The run's document minus its provenance, canonically, for comparison.
+def _semantic_identity(run: BusinessMetricRun) -> str:
+    """What "the same run" means: the contract's own identity projection.
 
-    What "the same run" means on disk. The provenance is excluded because it is
-    execution metadata — when this was generated, which directory the dataset was
-    read from — and a second computation of the same metrics differing only in
-    those is the same measurement.
+    The canonical D9 payload — the one `business_metric_run_fingerprint` digests
+    — and **not** the stored document with a block deleted from it. An earlier
+    version compared the full persisted document minus `run.provenance`, which
+    was wrong in a way that only showed up on nested artefacts: a
+    `DeclaredSourceUniverseEvidence` and a `BenchmarkBinding` each carry a
+    `provenance_path`, deliberately outside their own digests because a path says
+    where a file was read rather than what it says. Two runs of the identical
+    measurement, one made from a checkout at another path, therefore produced the
+    same `run_fingerprint` and two different "semantic documents" — and the
+    second was refused as divergent.
 
-    Deliberately **not** a comparison of the two `run_fingerprint` fields: that
-    digest is a claim a document makes about itself, and a file edited by hand, a
-    partial restore or a script can keep the claim while its results now say
-    something else entirely.
+    Comparing the identity projection instead is not a weakening. Both runs have
+    been **fully structurally verified** before this is called, which recomputes
+    every nested digest and the run's own, so neither is a document making
+    unchecked claims about itself. Once that holds, what the contract says two
+    runs must agree on to be the same run is exactly this.
     """
-    payload = business_metric_run_payload(run)
-    payload.pop("provenance", None)
-    return canonical_json(payload)
+    return canonical_json(canonical_business_metric_run_payload(run))
 
 
 # --------------------------------------------------------------------------
@@ -866,6 +887,71 @@ def _read_verified_run(directory: Path, run_file: Path) -> BusinessMetricRun:
 # --------------------------------------------------------------------------
 
 
+def _publish(temporary: Path, run_file: Path) -> None:
+    """Move a complete document into its official place, or refuse. **Atomic.**
+
+    `os.link` and deliberately **not** `os.replace`. Both are atomic; only one of
+    them refuses an existing destination. `os.replace` silently overwrites, so
+    the guard it needs is a prior `exists()` check — and between that check and
+    the call there is a window in which another writer can publish. Losing that
+    race means destroying a frozen run, which is the one thing this store exists
+    to make impossible, so the check-then-act pair is replaced by a single
+    primitive that cannot lose it: the link either creates the name or raises
+    `FileExistsError`, decided by the filesystem under its own lock.
+
+    The temporary file is fully written and fsynced before this is called, so the
+    name that appears is a complete document from the instant it exists — there
+    is no moment at which `run.json` is half a run. Afterwards both paths name
+    one inode, and the caller drops the temporary one through `_discard` — best
+    effort, because by then the run is already frozen and a failure to tidy up
+    must not be reported as a failure to write.
+
+    Portable to the platforms this project targets: `os.link` is implemented on
+    POSIX and, on Windows, via `CreateHardLinkW` on NTFS. Both paths live under
+    the same root and therefore the same filesystem, which hard links require.
+    """
+    try:
+        os.link(temporary, run_file)
+    except FileExistsError as error:
+        raise BusinessMetricBindingError(
+            f"{run_file} already exists; refusing to publish over a frozen run. "
+            "The official document is written by a link that fails when the "
+            "destination is taken, so this call lost a race rather than winning "
+            "one it should not have entered"
+        ) from error
+
+
+def _discard(temporary: Path | None) -> None:
+    """Drop the temporary name for a document, best effort. **Never raises.**
+
+    Deliberately silent about its own failure, and the asymmetry is the point.
+    Before publication the temporary file is the only copy and its removal is
+    cleanup after an error that is already being raised — masking that error with
+    a second one would report the wrong cause. After publication it is one of two
+    names for an inode `run.json` also holds, so failing to remove it costs a
+    stray dotfile and nothing else: the run is frozen, complete and readable
+    either way.
+
+    What it must never do is turn a successful publication into a failure. An
+    earlier version unlinked inside the `try`, where an `OSError` from the
+    cleanup was caught by the publication's own handler and re-raised as "cannot
+    write the business metric run" — telling the caller nothing had been stored
+    while `run.json` sat there, correct and complete.
+
+    Nothing reads the name this removes: readers open `<fingerprint>/run.json`
+    and temporary files are hidden, suffixed `.tmp`, and live beside the run
+    directories rather than inside one.
+    """
+    if temporary is None:
+        return
+    try:
+        temporary.unlink(missing_ok=True)
+    except OSError:
+        # Housekeeping only. The caller's outcome — CREATED, or the error being
+        # raised through this `finally` — is already decided and stands.
+        pass
+
+
 def write_business_metric_run(
     run: BusinessMetricRun,
     root: str | Path = DEFAULT_BUSINESS_METRIC_RUN_ROOT,
@@ -894,12 +980,20 @@ def write_business_metric_run(
 
     if directory.exists():
         stored = _read_verified_run(directory, run_file)
-        if _semantic_document(stored) != _semantic_document(run):
+        if _semantic_identity(stored) != _semantic_identity(run):
+            # A backstop rather than a routine outcome, and worth saying why:
+            # both runs have been verified, so each one's fingerprint has been
+            # recomputed from its content, and the stored run's was additionally
+            # required to equal this directory's name — which is this run's
+            # fingerprint. Two identity projections that differ here would mean
+            # two different contents digesting to one SHA-256. It raises rather
+            # than assuming, because the alternative is overwriting a frozen run
+            # on the strength of an assumption.
             raise BusinessMetricBindingError(
                 f"a different business metric run is already stored at "
                 f"{directory}; it states fingerprint {stored.run_fingerprint} and "
-                f"this one states {run.run_fingerprint}, and their documents do "
-                "not agree — refusing to overwrite a frozen run"
+                f"this one states {run.run_fingerprint}, and their canonical "
+                "identities do not agree — refusing to overwrite a frozen run"
             )
         # Identical measurement. A provenance that differs — another moment,
         # another directory — is not a difference in what was measured, so
@@ -927,27 +1021,25 @@ def write_business_metric_run(
         # believe they created it, and neither can land on a directory somebody
         # else is publishing into.
         directory.mkdir(parents=False, exist_ok=False)
-        if run_file.exists():
-            raise BusinessMetricBindingError(
-                f"{run_file} already exists in a directory this call just "
-                "created; refusing to publish over it"
-            )
-        os.replace(temporary, run_file)
-        temporary = None
+        _publish(temporary, run_file)
+        # **The run is frozen from here.** `_publish` returned, so `run.json`
+        # exists, complete, under its own fingerprint. Nothing below may undo
+        # that: the only step left is discarding the temporary *name* for an
+        # inode the official path now also holds, and that is housekeeping rather
+        # than part of the write. It is done in `finally`, by a helper that
+        # cannot raise, so there is no statement between here and the CREATED
+        # return that could fail.
     except FileExistsError as error:
         raise BusinessMetricBindingError(
-            f"the business metric run directory {directory} appeared while this "
-            "run was being written; refusing to publish into it"
+            f"a business metric run appeared at {directory} while this one was "
+            "being written; refusing to publish over it"
         ) from error
     except OSError as error:
         raise BusinessMetricBindingError(
             f"cannot write the business metric run to {directory}: {error}"
         ) from error
     finally:
-        if temporary is not None and temporary.exists():
-            # The partial document never had a name anything reads, and it does
-            # not keep one now.
-            temporary.unlink(missing_ok=True)
+        _discard(temporary)
 
     return BusinessMetricRunStorageResult(
         directory=directory,

@@ -355,8 +355,14 @@ def declared_universe(
     *,
     scope_country: str = TARGET_COUNTRY,
     git_commit: str = GIT_COMMIT,
+    provenance_path: str | None = "evaluation/source_coverage/invented.yaml",
 ):
-    """A declared source universe, through the one public builder."""
+    """A declared source universe, through the one public builder.
+
+    `provenance_path` is a parameter because it is deliberately **outside** this
+    artefact's digest: two bindings differing only in it are the same declared
+    universe, and the storage tests need to build exactly that pair.
+    """
     source_map = FakeSourceMap(
         sources=(
             entries
@@ -371,7 +377,7 @@ def declared_universe(
     return declared_source_universe_from_source_map(
         source_map,
         git_commit=git_commit,
-        provenance_path="evaluation/source_coverage/invented.yaml",
+        provenance_path=provenance_path,
     )
 
 
@@ -468,11 +474,15 @@ def benchmark(
     target: int = 60,
     scope_country: str = TARGET_COUNTRY,
     records: tuple[dict[str, Any], ...] | None = None,
+    provenance_path: str | None = None,
 ):
     """A benchmark binding derived from a manifest and the rows it describes.
 
     `ready=True` needs at least `target` rows, because the binding refuses a
     manifest that claims readiness below its own declared target.
+
+    `provenance_path` is outside the binding's digest, for the same reason as
+    above: where a gold file was read is not what it says.
     """
     supplied = benchmark_rows(rows) if records is None else tuple(records)
     manifest = {
@@ -484,7 +494,9 @@ def benchmark(
         "current_rows": len(supplied),
         "evaluation_ready": ready,
     }
-    return build_benchmark_binding(manifest, supplied)
+    return build_benchmark_binding(
+        manifest, supplied, provenance_path=provenance_path
+    )
 
 
 def ready_benchmark(rows: int = 3):

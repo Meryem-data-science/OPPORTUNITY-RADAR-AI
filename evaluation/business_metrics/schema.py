@@ -209,6 +209,7 @@ __all__ = [
     "validate_business_metric_evidence_structure",
     "validate_business_metric_result_structure",
     "validate_business_metric_run_context_structure",
+    "validate_business_metric_run_provenance",
     "validate_business_metric_run_structure",
     "validate_business_metric_scope_structure",
     "validate_count",
@@ -4340,17 +4341,41 @@ class BusinessMetricRunProvenance:
     benchmark_records_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.generated_at is not None:
-            validate_timestamp(
-                self.generated_at, subject="the run's generated_at"
-            )
-        validate_optional_text(
-            self.dataset_directory, subject="the run's dataset directory"
+        validate_business_metric_run_provenance(self)
+
+
+def validate_business_metric_run_provenance(
+    provenance: Any,
+) -> BusinessMetricRunProvenance:
+    """Re-establish every invariant a provenance block claims. **Not a formality.**
+
+    `__post_init__` calls this, and so does
+    `validate_business_metric_run_structure` — deliberately both, because a
+    dataclass is not a proof token. `object.__new__` bypasses `__init__`
+    entirely, a stored document is reconstructed field by field, and either route
+    could otherwise put an unparseable timestamp or a padded path inside a run
+    that every other check would wave through.
+
+    The paths are validated as *text* and nothing here asks the filesystem
+    whether they exist: a path says where somebody read a file, and a run carried
+    to another machine did not thereby become a different measurement.
+    """
+    if not isinstance(provenance, BusinessMetricRunProvenance):
+        raise BusinessMetricContractError(
+            f"{provenance!r} is not a business metric run provenance block"
         )
-        validate_optional_text(
-            self.benchmark_records_path,
-            subject="the run's benchmark records path",
+    if provenance.generated_at is not None:
+        validate_timestamp(
+            provenance.generated_at, subject="the run's generated_at"
         )
+    validate_optional_text(
+        provenance.dataset_directory, subject="the run's dataset directory"
+    )
+    validate_optional_text(
+        provenance.benchmark_records_path,
+        subject="the run's benchmark records path",
+    )
+    return provenance
 
 
 @dataclass(frozen=True)
@@ -4650,11 +4675,57 @@ def validate_business_metric_run_structure(run: Any) -> BusinessMetricRun:
             "run is a set of answers, and it is held in the one order two equal "
             "runs are guaranteed to agree on"
         )
+    _require_scalar_metric_completeness(run)
     validate_fingerprint(
         run.run_fingerprint, subject="the business metric run fingerprint"
     )
-    if not isinstance(run.provenance, BusinessMetricRunProvenance):
-        raise BusinessMetricContractError(
-            f"{run.provenance!r} is not a business metric run provenance block"
-        )
+    validate_business_metric_run_provenance(run.provenance)
     return run
+
+
+def _require_scalar_metric_completeness(run: BusinessMetricRun) -> None:
+    """Every non-dimensional metric of the contract, present exactly once.
+
+    **This much completeness is structural**, and an earlier version of this
+    validator did not ask for it. Which sources a cohort observed is a fact about
+    records — so the dimensional half of a run's key set can only be re-derived
+    by the full verifier — but *which scalar metrics exist* is a fact about
+    `BusinessMetricName`, and this module holds that. A run missing
+    `DESCRIPTION_PRESENCE_RATE`, re-fingerprinted over what remained, was
+    otherwise a structurally impeccable document that quietly reported
+    twenty-five metrics as a complete run.
+
+    What stays out of reach here, and is deliberately left to
+    `run.verify_business_metric_run`: **how many** `OBSERVED_SOURCE_CONTRIBUTION`
+    keys there should be, and **which** `source_id` each should name.
+    """
+    expected = {
+        metric
+        for metric in BusinessMetricName
+        if metric not in DIMENSIONAL_BUSINESS_METRICS
+    }
+    seen: set[BusinessMetricName] = set()
+    for result in run.results:
+        key = result.key
+        if key.dimension_kind is BusinessMetricDimension.NONE:
+            seen.add(key.metric)
+            continue
+        # `BusinessMetricKey` already refuses a dimension on a metric the
+        # contract does not state per source. Restated here because a run
+        # reconstructed from a document is only ever as safe as the checks that
+        # run over it, and this one is cheap.
+        if key.metric not in DIMENSIONAL_BUSINESS_METRICS:
+            raise BusinessMetricContractError(
+                f"the run states {key.metric} with a {key.dimension_kind} "
+                f"dimension; the metrics this contract states per dimension are "
+                f"{sorted(str(item) for item in DIMENSIONAL_BUSINESS_METRICS)}"
+            )
+    missing = sorted(str(metric) for metric in expected - seen)
+    if missing:
+        raise BusinessMetricBindingError(
+            f"the run answers {len(seen)} of the contract's {len(expected)} "
+            f"scalar metrics and states no result for {missing}; a business "
+            "metric run is every metric or it is not a run, and a document that "
+            "simply omits one reports a smaller measurement under a complete "
+            "run's name"
+        )
