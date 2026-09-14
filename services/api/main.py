@@ -1,7 +1,7 @@
 """FastAPI application: the read surfaces of the radar, and the writes a person makes.
 
 Everything the radar itself produces — opportunities, matching, priority, the
-Portfolio, source health — is exposed read-only. The two write surfaces exist
+Portfolio, the Recommendation, source health — is exposed read-only. The two write surfaces exist
 because a person acted: opting a browser into notifications, and tracking a
 candidature. Both resolve the profile on the server; neither accepts one.
 """
@@ -51,6 +51,12 @@ from services.api.portfolio import (
     PortfolioApiReadError,
     PortfolioResponse,
     read_portfolio_surface,
+)
+from services.api.recommendation import (
+    PUBLIC_RECOMMENDATION_ERROR,
+    RecommendationApiReadError,
+    RecommendationResponse,
+    read_recommendation_surface,
 )
 from services.api.applications import (
     PUBLIC_APPLICATION_ERROR,
@@ -132,6 +138,18 @@ def get_portfolio() -> PortfolioResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_PORTFOLIO_ERROR,
+        ) from None
+
+
+@app.get("/api/recommendation", response_model=RecommendationResponse)
+def get_recommendation() -> RecommendationResponse:
+    """Return the audited persisted Recommendation for the server profile."""
+    try:
+        return read_recommendation_surface()
+    except RecommendationApiReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_RECOMMENDATION_ERROR,
         ) from None
 
 
