@@ -59,6 +59,9 @@ export default async function Home() {
           </p>
         </div>
         <nav className="hero-links" aria-label="Pages de supervision">
+          <Link className="health-link" href="/recommendation">
+            Recommandé pour mon CV
+          </Link>
           <Link className="health-link" href="/applications">
             Mes candidatures
           </Link>

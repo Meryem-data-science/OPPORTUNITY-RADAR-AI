@@ -46,6 +46,13 @@ describe("Home", () => {
     expect(html).toContain("Voir mon matching");
   });
 
+  it("links to the recommendation read surface", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    const html = await renderHome();
+    expect(html).toContain('href="/recommendation"');
+    expect(html).toContain("Recommandé pour mon CV");
+  });
+
   it("renders API opportunity fields and the exact original URL", async () => {
     loadOpportunitiesMock.mockResolvedValue(fixture);
     const html = await renderHome();
