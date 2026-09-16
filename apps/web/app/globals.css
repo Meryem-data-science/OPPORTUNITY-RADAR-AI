@@ -246,3 +246,32 @@ h1 {
   font: inherit;
 }
 .application-timeline { margin: 0; padding-left: 1.2rem; color: #53615a; line-height: 1.6; }
+
+/* Phase 11.1B — persisted Recommendation. One column, in the received order. */
+.recommendation-list { display: flex; flex-direction: column; gap: 1rem; }
+.recommendation-card { display: flex; flex-direction: column; gap: 0.75rem; padding: 1.5rem; border: 1px solid #dce4e0; border-radius: 14px; background: #fff; box-shadow: 0 7px 24px rgb(26 57 43 / 5%); }
+.recommendation-card h3 { margin: 0; font-size: 1.35rem; line-height: 1.25; }
+.recommendation-card .organization, .recommendation-card .location, .recommendation-card .matching-scores { margin: 0; }
+.recommendation-card-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.recommendation-rank { font-size: 1.1rem; font-weight: 700; }
+.recommendation-badge { padding: 0.3rem 0.65rem; border-radius: 999px; background: #eef2f0; font-size: 0.78rem; font-weight: 700; }
+.recommendation-badge-recommended { background: #e4f1eb; color: #176b49; }
+.recommendation-badge-uncertain { background: #eef1f6; color: #3c4f6b; }
+.recommendation-badge-outside_preferences { background: #fdf6ec; color: #8a5300; }
+.recommendation-badge-known_blocker { background: #f8e8e8; color: #8a2f2f; }
+.recommendation-category { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0; }
+.recommendation-reason-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
+.recommendation-reasons { padding: 0.75rem; border-left: 3px solid #cad5cf; background: #f8faf9; }
+.recommendation-reasons h4 { margin: 0 0 0.4rem; font-size: 0.9rem; }
+.recommendation-reasons ul { margin: 0; padding-left: 1.1rem; line-height: 1.45; font-size: 0.88rem; }
+.recommendation-reasons-empty { margin: 0; color: #7a8780; font-size: 0.85rem; }
+.recommendation-reasons-strengths { border-left-color: #2f8a63; }
+.recommendation-reasons-gaps { border-left-color: #b0563f; }
+.recommendation-reasons-unknowns { border-left-color: #8a958f; }
+.recommendation-reasons code, .recommendation-issues code { overflow-wrap: anywhere; font-size: 0.8rem; }
+.recommendation-issues { margin-top: 1rem; text-align: left; }
+.recommendation-issues ul { color: #53615a; line-height: 1.6; }
+
+@media (max-width: 720px) {
+  .recommendation-reason-groups { grid-template-columns: 1fr; }
+}
