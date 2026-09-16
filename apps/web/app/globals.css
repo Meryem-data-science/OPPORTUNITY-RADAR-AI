@@ -275,3 +275,29 @@ h1 {
 @media (max-width: 720px) {
   .recommendation-reason-groups { grid-template-columns: 1fr; }
 }
+
+/* Phase 11.1D — Explorer Data & AI. Navigation over persisted opportunities, in API order. */
+.explorer-filters { margin-top: 2rem; padding: 1.25rem; border: 1px solid #dce4e0; border-radius: 14px; background: #fff; }
+.explorer-filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; }
+.explorer-filter-grid label { display: flex; flex-direction: column; gap: 0.35rem; color: #53615a; font-size: 0.82rem; font-weight: 700; }
+.explorer-filter-grid select { width: 100%; padding: 0.45rem 0.5rem; border: 1px solid #cfdad4; border-radius: 8px; background: #fff; color: #17221d; font: inherit; font-weight: 400; }
+.explorer-filter-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-top: 1rem; }
+.explorer-filter-actions button { padding: 0.6rem 1rem; border: 1px solid #176b49; border-radius: 999px; background: #176b49; color: #fff; font: inherit; font-size: 0.85rem; cursor: pointer; }
+.explorer-list { display: flex; flex-direction: column; gap: 1rem; }
+.explorer-card { display: flex; flex-direction: column; gap: 0.75rem; padding: 1.5rem; border: 1px solid #dce4e0; border-radius: 14px; background: #fff; box-shadow: 0 7px 24px rgb(26 57 43 / 5%); }
+.explorer-card h3 { margin: 0; font-size: 1.35rem; line-height: 1.25; }
+.explorer-card .organization, .explorer-card .location { margin: 0; }
+.explorer-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin: 0; }
+.explorer-meta div { display: flex; flex-direction: column; gap: 0.25rem; }
+.explorer-meta dt { color: #53615a; font-size: 0.78rem; font-weight: 700; }
+.explorer-meta dd { margin: 0; overflow-wrap: anywhere; }
+.explorer-meta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; font-size: 0.88rem; }
+.explorer-meta-row strong { color: #53615a; font-size: 0.78rem; }
+.explorer-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+.explorer-chips li { padding: 0.2rem 0.55rem; border-radius: 999px; background: #eef2f0; font-size: 0.8rem; overflow-wrap: anywhere; }
+.explorer-unresolved { color: #7a8780; font-style: italic; }
+.explorer-pagination { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.75rem; margin-top: 1.5rem; }
+
+@media (max-width: 720px) {
+  .explorer-filter-grid, .explorer-meta { grid-template-columns: 1fr; }
+}

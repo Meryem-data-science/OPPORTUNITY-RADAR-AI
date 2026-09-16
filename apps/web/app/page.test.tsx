@@ -53,6 +53,14 @@ describe("Home", () => {
     expect(html).toContain("Recommandé pour mon CV");
   });
 
+  it("links to the Explorer Data & AI surface", async () => {
+    loadOpportunitiesMock.mockResolvedValue(fixture);
+    const html = await renderHome();
+    expect(html).toContain('href="/explorer"');
+    expect(html).toContain("Explorer Data &amp; AI");
+    expect(html).toContain('href="/recommendation"');
+  });
+
   it("renders API opportunity fields and the exact original URL", async () => {
     loadOpportunitiesMock.mockResolvedValue(fixture);
     const html = await renderHome();
