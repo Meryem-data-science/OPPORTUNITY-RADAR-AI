@@ -62,6 +62,9 @@ export default async function Home() {
           <Link className="health-link" href="/recommendation">
             Recommandé pour mon CV
           </Link>
+          <Link className="health-link" href="/explorer">
+            Explorer Data & AI
+          </Link>
           <Link className="health-link" href="/applications">
             Mes candidatures
           </Link>
