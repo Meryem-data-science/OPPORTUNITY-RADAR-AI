@@ -1,7 +1,7 @@
 """FastAPI application: the read surfaces of the radar, and the writes a person makes.
 
 Everything the radar itself produces — opportunities, matching, priority, the
-Portfolio, the Recommendation, source health — is exposed read-only. The two write surfaces exist
+Portfolio, the Recommendation, the Explorer, source health — is exposed read-only. The two write surfaces exist
 because a person acted: opting a browser into notifications, and tracking a
 candidature. Both resolve the profile on the server; neither accepts one.
 """
@@ -58,6 +58,18 @@ from services.api.recommendation import (
     RecommendationResponse,
     read_recommendation_surface,
 )
+from services.api.explorer import (
+    DEFAULT_LIMIT as EXPLORER_DEFAULT_LIMIT,
+    MAX_LIMIT as EXPLORER_MAX_LIMIT,
+    PUBLIC_EXPLORER_ERROR,
+    ExplorerApiReadError,
+    ExplorerFreshness,
+    ExplorerQuery,
+    ExplorerResponse,
+    read_explorer_surface,
+)
+from services.collector.qualification.fine_taxonomy import FineCategory
+from services.digital_twin.preferences.models import OpportunityType
 from services.api.applications import (
     PUBLIC_APPLICATION_ERROR,
     PUBLIC_APPLICATION_REQUEST_ERROR,
@@ -150,6 +162,38 @@ def get_recommendation() -> RecommendationResponse:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=PUBLIC_RECOMMENDATION_ERROR,
+        ) from None
+
+
+@app.get("/api/explorer", response_model=ExplorerResponse)
+def get_explorer(
+    country: Annotated[str | None, Query(pattern=r"^[A-Z]{2}$")] = None,
+    city: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    opportunity_type: OpportunityType | None = None,
+    domain: FineCategory | None = None,
+    source: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    freshness: ExplorerFreshness | None = None,
+    limit: Annotated[int, Query(ge=1, le=EXPLORER_MAX_LIMIT)] = EXPLORER_DEFAULT_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ExplorerResponse:
+    """Explore the persisted Data/AI corpus; no profile, no score, no ranking."""
+    try:
+        return read_explorer_surface(
+            ExplorerQuery(
+                country=country,
+                city=city,
+                opportunity_type=opportunity_type,
+                domain=domain,
+                source=source,
+                freshness=freshness,
+                limit=limit,
+                offset=offset,
+            )
+        )
+    except ExplorerApiReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_EXPLORER_ERROR,
         ) from None
 
 
