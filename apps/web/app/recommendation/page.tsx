@@ -66,6 +66,30 @@ const reasonLabels: Record<string, string> = {
 
 const percent = (value: number) => `${Math.round(value * 100)} %`;
 
+// The final product targets one geography and one family of opportunity types,
+// and both are decided upstream: Phase 7A.1 against the profile's own mobility,
+// Phase 7B.1 against its declared types. An item is shown only when Phase 9
+// persisted *positive* evidence for both — the codes below, in the strengths
+// partition the engine itself put them in. Nothing here reads a location
+// string, a country or a type: an absent code is an unknown, never a match,
+// and an unknown is not displayed as a confirmed opportunity.
+const GEOGRAPHY_CONFIRMED = "GEOGRAPHY_MATCHED";
+const OPPORTUNITY_TYPE_CONFIRMED = "OPPORTUNITY_TYPE_ALLOWED";
+
+//: The two dispositions that still describe a pursuable opportunity. An
+//: OUTSIDE_PREFERENCES or KNOWN_BLOCKER item stays persisted and stays out of
+//: this surface.
+const SHOWN_DISPOSITIONS: RecommendationDisposition[] = ["RECOMMENDED", "UNCERTAIN"];
+
+function isConfirmedForTarget(item: RecommendationItem): boolean {
+  const { disposition, strengths } = item.recommendation;
+  return (
+    SHOWN_DISPOSITIONS.includes(disposition) &&
+    strengths.includes(GEOGRAPHY_CONFIRMED) &&
+    strengths.includes(OPPORTUNITY_TYPE_CONFIRMED)
+  );
+}
+
 function fineCategoryLabel(opportunity: RecommendationOpportunity): string {
   if (opportunity.fine_primary_category !== null) return fineCategoryLabels[opportunity.fine_primary_category];
   // Null is not OTHER: either the classifier never ran, or it retained nothing.
@@ -110,15 +134,22 @@ function RecommendationCard({ item, trackedStatus }: { item: RecommendationItem;
 
 function Ready({ recommendation, tracked }: { recommendation: RecommendationResponse; tracked: Map<number, ApplicationStatus> }) {
   const run = recommendation.current_run!;
+  // `filter` keeps the received sequence, so the persisted Phase 9 ranking and
+  // every `rank_position` survive untouched; nothing is re-scored or re-ordered.
+  const shown = run.items.filter(isConfirmedForTarget);
   return <>
     <section aria-labelledby="recommendation-heading">
       <div className="section-heading">
-        <div><h2 id="recommendation-heading">Recommandations</h2><p>{run.assessment_count} opportunités classées</p></div>
+        <div>
+          <h2 id="recommendation-heading">Recommandations</h2>
+          <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""}</p>
+          <p className="recommendation-target-note">Seules les opportunités dont la géographie ciblée et le type d’opportunité sont confirmés par la recommandation enregistrée sont affichées.</p>
+        </div>
         <p>{recommendation.history_count} snapshot{recommendation.history_count > 1 ? "s" : ""} enregistré{recommendation.history_count > 1 ? "s" : ""}</p>
       </div>
-      {run.items.length === 0 ? <div className="status-panel" role="status"><p>Aucune opportunité dans cette recommandation.</p></div>
+      {shown.length === 0 ? <div className="status-panel" role="status"><p>Aucune opportunité confirmée pour la géographie et le type d’opportunité ciblés dans cette recommandation.</p></div>
         // Rendered in exactly the order the API returned: the ranking is Phase 9's.
-        : <div className="recommendation-list">{run.items.map((item) => <RecommendationCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
+        : <div className="recommendation-list">{shown.map((item) => <RecommendationCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
     </section>
     <details className="technical-details"><summary>Détails techniques</summary><dl>
       <dt>run_id</dt><dd>{run.run_id}</dd><dt>created_at</dt><dd>{run.created_at}</dd>
