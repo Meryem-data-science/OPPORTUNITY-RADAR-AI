@@ -12,6 +12,8 @@ import { loadApplications } from "@/lib/applications";
 const loadRecommendationMock = vi.mocked(loadRecommendation);
 const loadApplicationsMock = vi.mocked(loadApplications);
 
+const CONFIRMED_TARGET_STRENGTHS = ["GEOGRAPHY_MATCHED", "OPPORTUNITY_TYPE_ALLOWED"];
+
 function item(id: number, rank: number, score: number | null, overrides: {
   fine?: RecommendationItem["opportunity"]["fine_primary_category"]; classified?: boolean; location?: string | null;
   strengths?: string[]; gaps?: string[]; unknowns?: string[]; coverage?: number;
@@ -33,7 +35,10 @@ function item(id: number, rank: number, score: number | null, overrides: {
     recommendation: {
       disposition: overrides.disposition ?? "RECOMMENDED", recommendation_score: score,
       evidence_coverage: overrides.coverage ?? 0.62, assessment_fingerprint: `a-${id}`,
-      strengths: overrides.strengths ?? [], confirmed_gaps: overrides.gaps ?? [], unknowns: overrides.unknowns ?? [],
+      // The page shows an item only when the persisted strengths confirm both the
+      // targeted geography and the opportunity type, so that is the default here.
+      strengths: overrides.strengths ?? [...CONFIRMED_TARGET_STRENGTHS],
+      confirmed_gaps: overrides.gaps ?? [], unknowns: overrides.unknowns ?? [],
       explanation: { result: {} },
     },
   };
@@ -109,7 +114,7 @@ describe("RecommendationPage", () => {
   it("renders READY cards with persisted fields and the exact original URL", async () => {
     loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.83, { coverage: 0.5 })]));
     const html = await render();
-    expect(html).toContain("1 opportunités classées");
+    expect(html).toContain("1 opportunité confirmée sur 1 classée");
     expect(html).toContain("n° 1");
     expect(html).toContain("Org 7");
     expect(html).toContain("Role 7");
@@ -172,7 +177,7 @@ describe("RecommendationPage", () => {
   it("keeps strengths, confirmed gaps and unknowns in their own groups", async () => {
     loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.5, {
       disposition: "UNCERTAIN",
-      strengths: ["GEOGRAPHY_MATCHED"],
+      strengths: ["GEOGRAPHY_MATCHED", "OPPORTUNITY_TYPE_ALLOWED"],
       gaps: ["WORK_MODE_OUTSIDE_PREFERENCES"],
       unknowns: ["REQUIRED_SKILLS_NOT_ALL_CONFIRMED", "FUTURE_CODE_NOT_KNOWN"],
     })]));
@@ -194,7 +199,6 @@ describe("RecommendationPage", () => {
   it("renders empty partitions without inventing reasons", async () => {
     loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.5)]));
     const html = await render();
-    expect(html).toContain("Aucune force établie.");
     expect(html).toContain("Aucun écart confirmé.");
     expect(html).toContain("Aucun point à confirmer.");
   });
@@ -208,6 +212,109 @@ describe("RecommendationPage", () => {
     const html = await render();
     const category = [...html.matchAll(/Catégorie Data\/IA<\/strong><span>(.*?)<\/span>/g)].map((match) => match[1]);
     expect(category).toEqual(["Data/IA — autre catégorie", "Non classée finement", "Aucune catégorie fine retenue"]);
+  });
+
+  it("hides an item whose geography the recommendation did not confirm", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { strengths: ["OPPORTUNITY_TYPE_ALLOWED"], unknowns: ["GEOGRAPHY_UNKNOWN"], disposition: "UNCERTAIN" }),
+      item(2, 2, 0.8, { strengths: ["OPPORTUNITY_TYPE_ALLOWED"], gaps: ["GEOGRAPHY_OUT_OF_TARGET"] }),
+      item(3, 3, 0.7),
+    ]));
+    const html = await render();
+    expect(html).not.toContain("Role 1");
+    expect(html).not.toContain("Role 2");
+    expect(html).toContain("Role 3");
+  });
+
+  it("hides an item whose opportunity type the recommendation did not confirm", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { strengths: ["GEOGRAPHY_MATCHED"], unknowns: ["OPPORTUNITY_TYPE_UNKNOWN"], disposition: "UNCERTAIN" }),
+      item(2, 2, 0.8, { strengths: ["GEOGRAPHY_MATCHED"], gaps: ["OPPORTUNITY_TYPE_OUTSIDE_PREFERENCES"] }),
+      item(3, 3, 0.7),
+    ]));
+    const html = await render();
+    expect(html).not.toContain("Role 1");
+    expect(html).not.toContain("Role 2");
+    expect(html).toContain("Role 3");
+  });
+
+  it("hides items outside preferences or with a known blocker even when both targets are confirmed", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { disposition: "OUTSIDE_PREFERENCES" }),
+      item(2, 2, 0.8, { disposition: "KNOWN_BLOCKER" }),
+      item(3, 3, 0.7, { disposition: "RECOMMENDED" }),
+      item(4, 4, 0.6, { disposition: "UNCERTAIN" }),
+    ]));
+    const html = await render();
+    expect(html).not.toContain("Role 1");
+    expect(html).not.toContain("Role 2");
+    expect(html).toContain("Role 3");
+    expect(html).toContain("Role 4");
+  });
+
+  it("keeps a confirmed UNCERTAIN item visible with its unknowns", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.4, {
+      disposition: "UNCERTAIN", unknowns: ["REQUIRED_SKILLS_NOT_ALL_CONFIRMED"],
+    })]));
+    const html = await render();
+    expect(html).toContain("Role 7");
+    expect(html).toContain("Des incertitudes restent à lever");
+    expect(html).toContain("Certaines compétences requises restent à confirmer.");
+  });
+
+  it("preserves the persisted order and rank of the confirmed items", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(10, 1, 0.2),
+      item(20, 2, 0.95, { strengths: ["GEOGRAPHY_MATCHED"] }),
+      item(30, 3, 0.9),
+      item(40, 4, 0.99, { disposition: "OUTSIDE_PREFERENCES" }),
+      item(50, 5, 0.1),
+    ]));
+    const html = await render();
+    expect(html).not.toContain("Role 20");
+    expect(html).not.toContain("Role 40");
+    const positions = order(html, ["Role 10", "Role 30", "Role 50"]);
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    const ranks = order(html, ["n° 1", "n° 3", "n° 5"]);
+    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+    expect(html).not.toContain("n° 2");
+    expect(html).not.toContain("n° 4");
+  });
+
+  it("states how many of the ranked opportunities are confirmed", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9),
+      item(2, 2, 0.8, { disposition: "OUTSIDE_PREFERENCES" }),
+      item(3, 3, 0.7, { strengths: [] }),
+    ]));
+    const html = await render();
+    expect(html).toContain("1 opportunité confirmée sur 3 classées");
+    expect(html).toContain("géographie ciblée");
+  });
+
+  it("explains an empty confirmed set instead of showing unconfirmed items", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { strengths: [], disposition: "UNCERTAIN" }),
+      item(2, 2, 0.8, { disposition: "OUTSIDE_PREFERENCES" }),
+    ]));
+    const html = await render();
+    expect(html).toContain("Aucune opportunité confirmée");
+    expect(html).not.toContain("recommendation-card");
+    expect(html).not.toContain("Role 1");
+    expect(html).not.toContain("Role 2");
+  });
+
+  it("never reads a location, a country or a type to decide what to show", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { location: "Casablanca, Maroc", strengths: ["OPPORTUNITY_TYPE_ALLOWED"] }),
+      item(2, 2, 0.8, { location: "Paris, France" }),
+    ]));
+    const html = await render();
+    // Only the persisted evidence decides: the Moroccan item is unconfirmed, the French one is confirmed.
+    expect(html).not.toContain("Role 1");
+    expect(html).toContain("Role 2");
+    expect(html).toContain("Paris, France");
   });
 
   it("renders the existing application actions on every card", async () => {
