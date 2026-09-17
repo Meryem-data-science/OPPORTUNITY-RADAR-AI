@@ -6,6 +6,9 @@ they are.
 """
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import re
+import tomllib
 
 import pytest
 
@@ -277,6 +280,19 @@ def test_the_day_boundary_is_decided_by_the_named_timezone():
     assert resolve_local_day("America/New_York", instant).date == "2026-09-03"
     assert resolve_local_day("Pacific/Kiritimati", instant).date == "2026-09-04"
     assert resolve_local_day("Pacific/Niue", instant).date == "2026-09-03"
+
+
+def test_the_project_declares_the_iana_timezone_data_it_resolves_with():
+    """`zoneinfo` has no system database on Windows; `tzdata` must be a runtime dependency."""
+    project = tomllib.loads(
+        (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    declared = {
+        re.split(r"[\s<>=!~;\[]", requirement, maxsplit=1)[0].lower()
+        for requirement in project["dependencies"]
+    }
+
+    assert "tzdata" in declared
 
 
 def test_the_boundary_is_exact_to_the_second():
