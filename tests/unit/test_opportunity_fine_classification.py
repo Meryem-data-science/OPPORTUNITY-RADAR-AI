@@ -45,6 +45,49 @@ def test_basic_role_titles_map_to_one_fine_category(title: str, category: FineCa
     assert all(item.field is EvidenceField.TITLE for item in result.evidence)
 
 
+@pytest.mark.parametrize("title", [
+    "Software Engineer & IA (Stage)",
+    "Ingénieur IA",
+    "Ingénieure IA",
+    "Développeur IA",
+    "Développeuse IA",
+])
+def test_a_french_ia_role_phrase_receives_the_same_sub_domain_as_its_english_spelling(title: str) -> None:
+    """Phase 11.3A-R4A: "Ingénieur IA" is an AI role, not a Data/AI posting with no sub-domain."""
+    result = fine(title, "Stage. Missions générales.")
+
+    assert result.primary_category is FineCategory.ARTIFICIAL_INTELLIGENCE
+    assert result.classifier_version == FINE_CLASSIFIER_VERSION
+    assert all(item.field is EvidenceField.TITLE for item in result.evidence)
+
+
+def test_the_english_and_french_spellings_agree_on_the_fine_category() -> None:
+    english = fine("Software Engineer & AI (Stage)", "Stage.")
+    french = fine("Software Engineer & IA (Stage)", "Stage.")
+
+    assert english.primary_category is french.primary_category is FineCategory.ARTIFICIAL_INTELLIGENCE
+
+
+@pytest.mark.parametrize("title, description", [
+    ("AI Film maker & Content Creator (Stage)", "Création de contenu vidéo."),
+    ("Vidéaste & Photographe | Spécialiste IA & Création de Contenu", "Photographie et vidéo."),
+    ("Chargé de communication", "Nous utilisons l'IA et l'IA générative pour nos campagnes."),
+])
+def test_an_unqualified_posting_mentioning_ia_receives_no_fine_category(title: str, description: str) -> None:
+    result = fine(title, description)
+
+    assert result.primary_category is None
+    assert result.secondary_categories == ()
+
+
+def test_the_bare_french_abbreviation_is_not_a_fine_signal() -> None:
+    from services.collector.qualification.fine_taxonomy import FINE_ROLE_SIGNALS
+
+    for signals in FINE_ROLE_SIGNALS.values():
+        assert "ia" not in signals
+        assert "ai" not in signals
+
+
 def test_a_role_phrase_suppresses_the_broader_phrases_nested_inside_it() -> None:
     """"Generative AI Engineer" contains "ai engineer"; only the specific role counts."""
     result = fine("Generative AI Engineer")
@@ -271,13 +314,15 @@ def test_the_fine_version_is_distinct_from_the_coarse_classifier_version() -> No
     """Phase 8A.2 changed observable fine rules, so the fine version had to move.
 
     The pin was ``fine-data-ai-rules-v1`` until the single-concept fallback and
-    the concrete NLP/computer-vision concepts changed observable output. The two
-    versions stay independent: each moves only when its own rules change.
+    the concrete NLP/computer-vision concepts changed observable output, and
+    ``v2`` until the Phase 11.3A-R4A French "IA" role phrases were added to the
+    artificial-intelligence row. The two versions stay independent: each moves
+    only when its own rules change, and that correction touched both tables.
     """
     from services.collector.qualification import CLASSIFIER_VERSION
 
-    assert FINE_CLASSIFIER_VERSION == "fine-data-ai-rules-v2"
-    assert CLASSIFIER_VERSION == "qualification-rules-v2"
+    assert FINE_CLASSIFIER_VERSION == "fine-data-ai-rules-v3"
+    assert CLASSIFIER_VERSION == "qualification-rules-v3"
     assert FINE_CLASSIFIER_VERSION != CLASSIFIER_VERSION
 
 

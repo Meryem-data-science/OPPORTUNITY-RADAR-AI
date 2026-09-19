@@ -20,7 +20,16 @@ from .taxonomy import (
 #: Bumped from ``qualification-rules-v1`` by the Phase 8A.2 calibration: the
 #: broadened role families, the CORE/ADJACENT domain split and the concrete
 #: NLP/CV description concepts all change observable qualification output.
-CLASSIFIER_VERSION = "qualification-rules-v2"
+#: Bumped again to ``v3`` by the Phase 11.3A-R4A French correction: the CORE
+#: machine-learning row now also names the French "IA" role phrases, so a
+#: posting written "Ingénieur IA" or "Software Engineer & IA" qualifies exactly
+#: as its English spelling already did. The same stored text can therefore
+#: produce a different coarse answer, which is what a version is for. That
+#: correction also added the same phrases to the fine artificial-intelligence
+#: row, so ``FINE_CLASSIFIER_VERSION`` moves too — independently, in
+#: ``fine_classifier.py``, because the two rule systems stay separate and each
+#: version answers only for its own table.
+CLASSIFIER_VERSION = "qualification-rules-v3"
 
 TECHNICAL_STRUCTURAL_REASON = "technical role family + explicit Data/AI title context"
 EXPLICIT_STRUCTURAL_REASON = "role family + explicit Data/AI domain phrase in title"

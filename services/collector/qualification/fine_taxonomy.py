@@ -101,6 +101,12 @@ FINE_ROLE_SIGNALS: dict[FineCategory, tuple[str, ...]] = {
         "ai scientist", "artificial intelligence scientist",
         "applied scientist ai", "research scientist ai", "software engineer ai",
         "ingenieur intelligence artificielle", "ingenieure intelligence artificielle",
+        # The French abbreviation, in complete role phrases only, mirroring the
+        # coarse core row one for one. Bare "ia" is no more a signal here than
+        # bare "ai" is: a qualified posting that merely mentions "IA" keeps
+        # falling through to OTHER, which is what OTHER is for.
+        "ingenieur ia", "ingenieure ia", "developpeur ia", "developpeuse ia",
+        "software engineer ia",
     ),
     FineCategory.GENERATIVE_AI: (
         "generative ai engineer", "genai engineer", "gen ai engineer", "llm engineer",

@@ -27,7 +27,11 @@ from .taxonomy import Qualification
 #: Bumped from ``fine-data-ai-rules-v1`` by the Phase 8A.2 calibration: the
 #: single-concept fallback and the concrete NLP/computer-vision concepts change
 #: observable fine output. It stays independent of ``CLASSIFIER_VERSION``.
-FINE_CLASSIFIER_VERSION = "fine-data-ai-rules-v2"
+#: Bumped to ``v3`` by the Phase 11.3A-R4A French correction: the artificial
+#: intelligence role row now also names the French "IA" phrases, so a posting
+#: written "Ingénieur IA" receives the same sub-domain its English spelling
+#: already did instead of falling through to ``OTHER``.
+FINE_CLASSIFIER_VERSION = "fine-data-ai-rules-v3"
 
 #: Only these two coarse outcomes are demonstrably Data/AI. ``UNCERTAIN`` and
 #: ``OUT_OF_SCOPE`` receive no fine category at all, because absence of evidence
