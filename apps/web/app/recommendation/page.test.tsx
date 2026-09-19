@@ -178,16 +178,18 @@ describe("RecommendationPage", () => {
     loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.5, {
       disposition: "UNCERTAIN",
       strengths: ["GEOGRAPHY_MATCHED", "OPPORTUNITY_TYPE_ALLOWED"],
-      gaps: ["WORK_MODE_OUTSIDE_PREFERENCES"],
+      // A domain gap, not a work-mode one: a contradicted work mode routes the
+      // Phase 9 disposition to OUTSIDE_PREFERENCES, so it cannot occur here.
+      gaps: ["DOMAIN_OUTSIDE_PREFERENCES"],
       unknowns: ["REQUIRED_SKILLS_NOT_ALL_CONFIRMED", "FUTURE_CODE_NOT_KNOWN"],
     })]));
     const html = await render();
     const group = (kind: string) => html.match(new RegExp(`recommendation-reasons-${kind}">(.*?)</section>`))![1];
     expect(group("strengths")).toContain("Forces");
     expect(group("strengths")).toContain("La localisation correspond à la zone ciblée.");
-    expect(group("strengths")).not.toMatch(/mode de travail|compétences/);
+    expect(group("strengths")).not.toMatch(/domaine|compétences/);
     expect(group("gaps")).toContain("Écarts confirmés");
-    expect(group("gaps")).toContain("Le mode de travail est hors des préférences déclarées.");
+    expect(group("gaps")).toContain("Le domaine est hors des préférences déclarées.");
     expect(group("gaps")).not.toMatch(/compétences|localisation/);
     expect(group("unknowns")).toContain("À confirmer");
     expect(group("unknowns")).toContain("Certaines compétences requises restent à confirmer.");
@@ -238,18 +240,105 @@ describe("RecommendationPage", () => {
     expect(html).toContain("Role 3");
   });
 
-  it("hides items outside preferences or with a known blocker even when both targets are confirmed", async () => {
+  // C. An eligibility blocker is established from the person's own Digital Twin
+  // facts, so hiding it would make the visible set depend on whose CV is loaded.
+  it("keeps a confirmed item with a known eligibility blocker visible and names the blocker", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([item(9, 1, 0.55, {
+      disposition: "KNOWN_BLOCKER", gaps: ["ELIGIBILITY_KNOWN_BLOCKER"],
+    })]));
+    const html = await render();
+    expect(html).toContain("Role 9");
+    expect(html).toContain("Un obstacle connu existe");
+    expect(html).toContain("recommendation-badge-known_blocker");
+    // The persisted gap is still shown, in its own partition.
+    const gaps = html.match(/recommendation-reasons-gaps">(.*?)<\/section>/)![1];
+    expect(gaps).toContain("Un obstacle d’éligibilité connu existe.");
+    // It is never relabelled as a clean recommendation.
+    expect(html).not.toContain("Recommandée");
+  });
+
+  // D. KNOWN_BLOCKER outranks OUTSIDE_PREFERENCES in Phase 9, so the stronger
+  // label must not smuggle back a positively contradicted work mode.
+  it("hides a known blocker whose work mode was positively contradicted", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { disposition: "KNOWN_BLOCKER", gaps: ["ELIGIBILITY_KNOWN_BLOCKER", "WORK_MODE_OUTSIDE_PREFERENCES"] }),
+      item(2, 2, 0.8, { disposition: "KNOWN_BLOCKER", gaps: ["ELIGIBILITY_KNOWN_BLOCKER"] }),
+    ]));
+    const html = await render();
+    expect(html).not.toContain("Role 1");
+    expect(html).toContain("Role 2");
+  });
+
+  it("never reads an unknown work mode as a contradiction", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([item(7, 1, 0.5, {
+      disposition: "UNCERTAIN", unknowns: ["WORK_MODE_UNKNOWN"],
+    })]));
+    expect(await render()).toContain("Role 7");
+  });
+
+  // E. The search itself was contradicted there, which is the person's stated
+  // criteria talking rather than their CV.
+  it("hides items outside preferences even when both targets are confirmed", async () => {
     loadRecommendationMock.mockResolvedValue(ready([
       item(1, 1, 0.9, { disposition: "OUTSIDE_PREFERENCES" }),
-      item(2, 2, 0.8, { disposition: "KNOWN_BLOCKER" }),
       item(3, 3, 0.7, { disposition: "RECOMMENDED" }),
       item(4, 4, 0.6, { disposition: "UNCERTAIN" }),
     ]));
     const html = await render();
     expect(html).not.toContain("Role 1");
-    expect(html).not.toContain("Role 2");
     expect(html).toContain("Role 3");
     expect(html).toContain("Role 4");
+  });
+
+  // B. Unconfirmed or unavailable skills are evidence, never a reason to hide.
+  it("keeps a confirmed item visible whatever the CV evidence says about skills", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, 0.9, { disposition: "UNCERTAIN", unknowns: ["REQUIRED_SKILLS_NOT_ALL_CONFIRMED"] }),
+      item(2, 2, 0.2, { disposition: "UNCERTAIN", unknowns: ["REQUIRED_SKILLS_UNAVAILABLE", "SEMANTIC_EVIDENCE_UNAVAILABLE"] }),
+    ]));
+    const html = await render();
+    expect(html).toContain("Role 1");
+    expect(html).toContain("Role 2");
+    expect(html).toContain("Certaines compétences requises restent à confirmer.");
+  });
+
+  // I. The property itself: the same search, two different CV outcomes.
+  it("shows the same opportunities whatever the CV produced", async () => {
+    const richCv = [
+      item(101, 1, 0.94, { disposition: "RECOMMENDED" }),
+      item(202, 2, 0.81, { disposition: "UNCERTAIN", unknowns: ["ELIGIBILITY_UNKNOWN"] }),
+      item(303, 3, 0.66, { disposition: "UNCERTAIN" }),
+    ];
+    const thinCv = [
+      item(101, 1, 0.12, { disposition: "UNCERTAIN", unknowns: ["REQUIRED_SKILLS_NOT_ALL_CONFIRMED"] }),
+      // The same opportunity, now positively blocked by this person's own facts.
+      item(202, 2, null, { disposition: "KNOWN_BLOCKER", gaps: ["ELIGIBILITY_KNOWN_BLOCKER"] }),
+      item(303, 3, 0.05, { disposition: "UNCERTAIN", unknowns: ["REQUIRED_SKILLS_UNAVAILABLE"] }),
+    ];
+    const visible = async (items: RecommendationItem[]) => {
+      loadRecommendationMock.mockResolvedValue(ready(items));
+      const html = await render();
+      return [...html.matchAll(/data-opportunity-id="(\d+)"/g)].map((match) => match[1]);
+    };
+
+    const fromRich = await visible(richCv);
+    const fromThin = await visible(thinCv);
+
+    expect(fromRich).toEqual(["101", "202", "303"]);
+    expect(fromThin).toEqual(fromRich);
+  });
+
+  it("never hides an item because its score is null or zero", async () => {
+    loadRecommendationMock.mockResolvedValue(ready([
+      item(1, 1, null, { disposition: "UNCERTAIN" }),
+      item(2, 2, 0, { disposition: "RECOMMENDED" }),
+      item(3, 3, 0, { disposition: "KNOWN_BLOCKER", gaps: ["ELIGIBILITY_KNOWN_BLOCKER"] }),
+    ]));
+    const html = await render();
+    expect(html).toContain("Role 1");
+    expect(html).toContain("Role 2");
+    expect(html).toContain("Role 3");
+    expect(html).toContain("Score non disponible");
   });
 
   it("keeps a confirmed UNCERTAIN item visible with its unknowns", async () => {

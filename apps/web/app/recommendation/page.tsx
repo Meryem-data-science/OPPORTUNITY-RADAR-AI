@@ -76,17 +76,34 @@ const percent = (value: number) => `${Math.round(value * 100)} %`;
 const GEOGRAPHY_CONFIRMED = "GEOGRAPHY_MATCHED";
 const OPPORTUNITY_TYPE_CONFIRMED = "OPPORTUNITY_TYPE_ALLOWED";
 
-//: The two dispositions that still describe a pursuable opportunity. An
-//: OUTSIDE_PREFERENCES or KNOWN_BLOCKER item stays persisted and stays out of
-//: this surface.
-const SHOWN_DISPOSITIONS: RecommendationDisposition[] = ["RECOMMENDED", "UNCERTAIN"];
+// The dispositions this surface shows. KNOWN_BLOCKER is among them on purpose:
+// a blocker is established from the person's own Digital Twin facts — a
+// diploma, a language, an authorisation — so hiding it would make the visible
+// set depend on whose CV is loaded. Two people searching for the same thing
+// must see the same opportunities; what differs is the score, the ranking and
+// the explanation. The blocker is therefore *shown and named*, never silently
+// dropped and never dressed up as a clean recommendation.
+//
+// OUTSIDE_PREFERENCES stays hidden: there it is the search itself that was
+// contradicted — geography, opportunity type or work mode — and that is the
+// person's stated criteria talking, not their CV.
+const SHOWN_DISPOSITIONS: RecommendationDisposition[] = ["RECOMMENDED", "UNCERTAIN", "KNOWN_BLOCKER"];
+
+// Phase 9 ranks KNOWN_BLOCKER above OUTSIDE_PREFERENCES, so one assessment can
+// carry an eligibility blocker *and* a positively contradicted work mode at the
+// same time, and only the blocker reaches the disposition. This code reads the
+// persisted gap directly so that the stronger label cannot smuggle back in an
+// opportunity the person's own work-mode preference already ruled out. An
+// UNKNOWN work mode is not a contradiction and is never treated as one.
+const WORK_MODE_CONTRADICTED = "WORK_MODE_OUTSIDE_PREFERENCES";
 
 function isConfirmedForTarget(item: RecommendationItem): boolean {
-  const { disposition, strengths } = item.recommendation;
+  const { disposition, strengths, confirmed_gaps } = item.recommendation;
   return (
     SHOWN_DISPOSITIONS.includes(disposition) &&
     strengths.includes(GEOGRAPHY_CONFIRMED) &&
-    strengths.includes(OPPORTUNITY_TYPE_CONFIRMED)
+    strengths.includes(OPPORTUNITY_TYPE_CONFIRMED) &&
+    !confirmed_gaps.includes(WORK_MODE_CONTRADICTED)
   );
 }
 
@@ -143,7 +160,7 @@ function Ready({ recommendation, tracked }: { recommendation: RecommendationResp
         <div>
           <h2 id="recommendation-heading">Recommandations</h2>
           <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""}</p>
-          <p className="recommendation-target-note">Seules les opportunités dont la géographie ciblée et le type d’opportunité sont confirmés par la recommandation enregistrée sont affichées.</p>
+          <p className="recommendation-target-note">Seules les opportunités dont la géographie ciblée et le type d’opportunité sont confirmés par la recommandation enregistrée sont affichées. Cette confirmation porte uniquement sur ces deux critères de recherche : elle ne dit rien de votre compatibilité globale ni de votre éligibilité, que chaque carte détaille séparément.</p>
         </div>
         <p>{recommendation.history_count} snapshot{recommendation.history_count > 1 ? "s" : ""} enregistré{recommendation.history_count > 1 ? "s" : ""}</p>
       </div>
