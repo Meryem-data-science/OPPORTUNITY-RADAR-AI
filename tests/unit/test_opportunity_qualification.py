@@ -132,6 +132,62 @@ def test_normalization_is_nfkc_casefolded_boundary_safe_and_explainable() -> Non
     assert french.matched_title_signals == ("ingenieur intelligence artificielle",)
 
 
+# The French abbreviation of "intelligence artificielle". The rows below are the
+# Phase 11.3A-R4A correction: a real Moroccan posting titled "Software Engineer &
+# IA (Stage)" was read as UNCERTAIN while its English spelling qualified, so the
+# CORE machine-learning row now names the French role phrases too — and only the
+# phrases, never the bare token.
+@pytest.mark.parametrize("title", [
+    "Software Engineer & IA (Stage)",
+    "Ingénieur IA",
+    "Ingénieure IA",
+    "Développeur IA",
+    "Développeuse IA",
+])
+def test_a_french_ia_role_phrase_qualifies_exactly_like_its_english_spelling(title: str) -> None:
+    result = classify_opportunity(title, "Stage. Missions générales.")
+
+    assert result.qualification is Qualification.CORE_TARGET
+    assert result.primary_domain is Domain.MACHINE_LEARNING_AI
+
+
+def test_the_english_ai_spelling_is_unchanged_by_the_french_rows() -> None:
+    english = classify_opportunity("Software Engineer & AI (Stage)", "Stage.")
+    french = classify_opportunity("Software Engineer & IA (Stage)", "Stage.")
+
+    assert english.qualification is french.qualification is Qualification.CORE_TARGET
+    assert english.primary_domain is french.primary_domain is Domain.MACHINE_LEARNING_AI
+    assert "software engineer ai" in english.matched_title_signals
+    assert "software engineer ia" in french.matched_title_signals
+
+
+@pytest.mark.parametrize("title, description", [
+    # A media role that merely works with AI tooling is not a Data/AI job family.
+    ("AI Film maker & Content Creator (Stage)", "Création de contenu vidéo."),
+    ("Vidéaste & Photographe | Spécialiste IA & Création de Contenu", "Photographie et vidéo."),
+    # Prose containing the abbreviation, with no Data/AI role phrase at all.
+    ("Chargé de communication", "Nous utilisons l'IA et l'IA générative pour nos campagnes."),
+    ("Assistant administratif", "Le service IA est au deuxième étage."),
+])
+def test_the_bare_french_abbreviation_never_qualifies_on_its_own(title: str, description: str) -> None:
+    result = classify_opportunity(title, description)
+
+    assert result.qualification is Qualification.UNCERTAIN
+    assert result.primary_domain is Domain.UNKNOWN
+
+
+def test_no_bare_two_letter_abbreviation_is_a_signal_anywhere() -> None:
+    """`ia` alone collides with ordinary prose, exactly as bare `ai` does."""
+    from services.collector.qualification.taxonomy import (
+        ADJACENT_SIGNALS, CORE_SIGNALS, DOMAIN_CONTEXT_SIGNALS,
+    )
+
+    for table in (CORE_SIGNALS, ADJACENT_SIGNALS, DOMAIN_CONTEXT_SIGNALS):
+        for signals in table.values():
+            assert "ia" not in signals
+            assert "ai" not in signals
+
+
 @pytest.mark.parametrize("location", ["Casablanca", "Paris", "London", "New York", "Remote"])
 def test_geography_never_changes_topical_qualification(location: str) -> None:
     result = classify_opportunity("Data Engineer", location=location)

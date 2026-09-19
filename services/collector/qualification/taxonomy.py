@@ -96,6 +96,18 @@ CORE_SIGNALS = {
         "deep learning engineer", "ingenieur intelligence artificielle",
         "ingenieure intelligence artificielle", "ingenieur machine learning",
         "ingenieure machine learning",
+        # The French abbreviation of "intelligence artificielle", and only ever
+        # inside a complete role phrase. The bare "ia" is never a signal: it is
+        # a two-letter token that appears in ordinary prose and in product
+        # wording, so a posting that merely mentions "IA" stays UNCERTAIN —
+        # exactly as "AI" alone does on the English side, where the table lists
+        # "ai engineer" and "software engineer ai" rather than "ai". These
+        # phrases mirror, one for one, the English rows already present above;
+        # `normalize_text` folds accents and punctuation, so "Ingénieur IA" and
+        # "Software Engineer & IA" reach the table in this spelling.
+        "ingenieur ia", "ingenieure ia",
+        "developpeur ia", "developpeuse ia",
+        "software engineer ia",
     ),
     Domain.GENAI_LLM: (
         "generative ai engineer", "genai engineer", "llm engineer",
