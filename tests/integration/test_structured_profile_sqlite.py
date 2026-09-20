@@ -229,6 +229,7 @@ def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
             "0024",
             "0025",
             "0026",
+            "0027",
         ]
 
         assert {"profile_experiences", "profile_projects"} <= _tables(connection)

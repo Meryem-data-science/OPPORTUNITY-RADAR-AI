@@ -217,7 +217,9 @@ def test_a_database_below_0026_has_none_of_the_three_tables(tmp_path: Path):
         assert MIGRATION not in applied
         assert not set(TABLES) & tables_of(connection)
 
-        assert apply_migrations(connection) == [MIGRATION]
+        # 0026 and everything recorded after it, which today is the 0027 CV
+        # replacement staging. The three tables below are 0026's.
+        assert apply_migrations(connection) == [MIGRATION, "0027"]
         assert set(TABLES) <= tables_of(connection)
     finally:
         connection.close()
@@ -225,12 +227,15 @@ def test_a_database_below_0026_has_none_of_the_three_tables(tmp_path: Path):
 
 def test_0026_is_recorded_once_and_seeds_nothing(migrated):
     assert apply_migrations(migrated) == []
-    assert (
-        migrated.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall()[-1]
-        == (MIGRATION,)
-    )
+    # Recorded once, which is this test's subject. It is deliberately not
+    # asserted to be the *last* migration: later phases add their own, and a
+    # pin on the tail would fail every time one does without saying anything
+    # about 0026.
+    recorded = [
+        row[0]
+        for row in migrated.execute("SELECT version FROM schema_migrations")
+    ]
+    assert recorded.count(MIGRATION) == 1
     for table in TABLES:
         assert migrated.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 

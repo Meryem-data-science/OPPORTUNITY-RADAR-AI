@@ -269,6 +269,9 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
     experiences and projects, then onto structured education, certifications
     and languages, then onto the availability, mobility, preferences and career
     objectives a person states — and none of them adds a column to it.
+
+    `0027` stages a CV replacement beside it. It references a fact through the
+    composite key `0009` already indexed, and adds no column here either.
     """
     names = [path.name for path in sorted(Path("migrations").glob("*.sql"))]
 
@@ -299,6 +302,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0024_opportunity_location_resolutions.sql",
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
+        "0027_cv_staging.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",

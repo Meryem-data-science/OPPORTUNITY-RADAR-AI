@@ -73,6 +73,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0024",
             "0025",
             "0026",
+            "0027",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -102,6 +103,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0024",),
         ("0025",),
         ("0026",),
+        ("0027",),
     ]
 
 
@@ -134,6 +136,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0024",
             "0025",
             "0026",
+            "0027",
         ]
         assert apply_migrations(connection) == []
 
@@ -180,6 +183,11 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
                 "recommendation_runs",
                 "recommendation_assessments",
                 "recommendation_profile_state",
+                "profile_cv_documents",
+                "profile_cv_extractions",
+                "profile_cv_candidates",
+                "profile_cv_replacements",
+                "profile_cv_replacement_decisions",
             )
         }
         migration_count = connection.execute(
@@ -227,8 +235,13 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "recommendation_runs": 0,
         "recommendation_assessments": 0,
         "recommendation_profile_state": 0,
+        "profile_cv_documents": 0,
+        "profile_cv_extractions": 0,
+        "profile_cv_candidates": 0,
+        "profile_cv_replacements": 0,
+        "profile_cv_replacement_decisions": 0,
     }
-    assert migration_count == 26
+    assert migration_count == 27
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:
