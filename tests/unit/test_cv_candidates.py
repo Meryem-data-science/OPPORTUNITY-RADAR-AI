@@ -1160,6 +1160,18 @@ def _statements(migration: Path) -> str:
 #: The one migration allowed to know the words `profile_facts`: it is the
 #: Phase 3.3A validation foundation, not this slice.
 PROFILE_FACTS_MIGRATION = "0007_profile_facts.sql"
+#: Phase 11.3A-R4C-B1a owns the inert CV replacement staging. It is a
+#: different, later slice than the Phase 3.2B extractor this file is about, and
+#: it is exempted from exactly two of the three checks below, by name:
+#:
+#: * `cv_candidate`, because recording the extracted candidates *is* what that
+#:   migration is for;
+#: * `profile_facts`, because its decision table names a fact through the
+#:   composite foreign key `(fact_id, profile_id)`.
+#:
+#: It is **not** exempted from `cv_version`: it stores no CV version, and that
+#: assertion stays active for every migration without exception.
+CV_STAGING_MIGRATION = "0027_cv_staging.sql"
 
 
 def test_this_slice_still_creates_no_table_of_its_own() -> None:
@@ -1193,6 +1205,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0024_opportunity_location_resolutions.sql",
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
+        "0027_cv_staging.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications
@@ -1209,10 +1222,12 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
     )
     for migration in migrations:
         statements = _statements(migration)
-        assert "cv_candidate" not in statements
+        # No migration stores a CV version. Not one, 0027 included.
         assert "cv_version" not in statements
-        if migration.name not in fact_aware:
-            assert "profile_facts" not in statements
+        if migration.name != CV_STAGING_MIGRATION:
+            assert "cv_candidate" not in statements
+            if migration.name not in fact_aware:
+                assert "profile_facts" not in statements
 
 
 def test_the_extractor_never_reaches_the_phase_33a_persistence() -> None:
