@@ -293,8 +293,10 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
 
     `0008` belongs to the Phase 3.4A skill projection, `0009` to the Phase
     3.4B1 structured projection and `0010` to the Phase 3.4B2 one; all three
-    read accepted facts and none is part of this bridge. The list is written
-    out so a migration added without a decided owner shows up here.
+    read accepted facts and none is part of this bridge. `0027` belongs to the
+    Phase 11.3A-R4C-B1a replacement staging, which imports nothing and is not
+    part of this bridge either. The list is written out so a migration added
+    without a decided owner shows up here.
     """
     migrations = sorted(Path("migrations").glob("*.sql"))
 
@@ -325,6 +327,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0024_opportunity_location_resolutions.sql",
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
+        "0027_cv_staging.sql",
     ]
 
 
