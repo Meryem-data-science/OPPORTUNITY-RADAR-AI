@@ -150,7 +150,7 @@ def _accepted_user_input_facts(fact_type: str) -> str:
         "SELECT f.id, f.value FROM profile_facts AS f "
         "WHERE f.profile_id = ? "
         f"AND f.fact_type = '{fact_type}' "
-        "AND f.status = 'ACCEPTED' "
+        "AND f.status = 'ACCEPTED' AND f.retired_at IS NULL "
         f"{_USER_INPUT_EVIDENCE}"
         "ORDER BY f.id"
     )

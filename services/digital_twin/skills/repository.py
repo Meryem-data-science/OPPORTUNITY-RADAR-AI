@@ -44,6 +44,7 @@ from services.digital_twin.skills.normalizer import normalize_skill
 _VERIFIED_SKILL_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'SKILL' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 

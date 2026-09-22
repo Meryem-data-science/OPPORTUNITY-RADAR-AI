@@ -59,9 +59,11 @@ from services.digital_twin.facts.repository import (
     FactCorrection,
     FactProposal,
     FactProvenanceAttachment,
+    FactNotRetirableError,
     InvalidFactTransitionError,
     ProfileFactError,
     ProfileFactNotFoundError,
+    RetiredFactNotMutableError,
     accept_profile_fact,
     add_profile_fact_provenance,
     correct_profile_fact,
@@ -75,6 +77,7 @@ from services.digital_twin.facts.repository import (
     list_verified_profile_facts,
     propose_profile_fact,
     reject_profile_fact,
+    retire_profile_fact_in_transaction,
 )
 
 __all__ = [
@@ -88,10 +91,12 @@ __all__ = [
     "FactProvenanceAttachment",
     "FactSourceType",
     "FactStatus",
+    "FactNotRetirableError",
     "InvalidFactTransitionError",
     "ProfileFact",
     "ProfileFactError",
     "ProfileFactNotFoundError",
+    "RetiredFactNotMutableError",
     "ProfileFactType",
     "ProfileFactValueError",
     "ProvenanceInput",
@@ -110,4 +115,5 @@ __all__ = [
     "list_verified_profile_facts",
     "propose_profile_fact",
     "reject_profile_fact",
+    "retire_profile_fact_in_transaction",
 ]

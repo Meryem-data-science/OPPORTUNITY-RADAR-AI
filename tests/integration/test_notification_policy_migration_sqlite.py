@@ -110,7 +110,7 @@ def test_0019_upgrades_an_existing_database_without_touching_its_data(tmp_path):
         ).fetchall()
 
         assert apply_migrations(connection) == [
-            "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027",
+            "0019", "0020", "0021", "0022", "0023", "0024", "0025", "0026", "0027", "0028",
         ]
 
         assert (

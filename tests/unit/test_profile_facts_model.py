@@ -303,6 +303,7 @@ def test_0007_adds_only_the_two_fact_tables() -> None:
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
         "0027_cv_staging.sql",
+        "0028_cv_activation.sql",
     ]
     for projection in (
         "migrations/0008_normalized_profile_skills.sql",

@@ -74,6 +74,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
             "0025",
             "0026",
             "0027",
+            "0028",
         ]
     assert EXPECTED_TABLES <= tables
     assert recorded == [
@@ -104,6 +105,7 @@ def test_empty_database_receives_foundation_schema(tmp_path) -> None:
         ("0025",),
         ("0026",),
         ("0027",),
+        ("0028",),
     ]
 
 
@@ -137,6 +139,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
             "0025",
             "0026",
             "0027",
+            "0028",
         ]
         assert apply_migrations(connection) == []
 
@@ -188,6 +191,7 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
                 "profile_cv_candidates",
                 "profile_cv_replacements",
                 "profile_cv_replacement_decisions",
+                "profile_downstream_sync_watermark",
             )
         }
         migration_count = connection.execute(
@@ -240,8 +244,9 @@ def test_migrations_are_idempotent_and_do_not_seed_data(tmp_path) -> None:
         "profile_cv_candidates": 0,
         "profile_cv_replacements": 0,
         "profile_cv_replacement_decisions": 0,
+        "profile_downstream_sync_watermark": 0,
     }
-    assert migration_count == 27
+    assert migration_count == 28
 
 
 def test_opportunity_requires_source_url(tmp_path) -> None:

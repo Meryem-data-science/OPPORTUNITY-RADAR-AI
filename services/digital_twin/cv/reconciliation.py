@@ -636,6 +636,11 @@ class SupersededOutcome:
 ALREADY_REJECTED = "ALREADY_REJECTED"
 TERMINAL_CORRECTED = "TERMINAL_CORRECTED"
 UNDECIDED = "UNDECIDED"
+#: The old reading was accepted once and a CV replacement later removed it from
+#: the current profile. It is already not active truth, so there is nothing for
+#: a reconciliation to supersede, and rejecting it would claim the person
+#: refused a claim they had in fact accepted.
+ALREADY_RETIRED = "ALREADY_RETIRED"
 
 
 @dataclass(frozen=True)
@@ -700,7 +705,9 @@ def _resolve_changed_reading(
     if len(facts) > 1:
         return None, {**reading.summary(), "reason": AMBIGUOUS_REASON}
     fact = facts[0]
-    if fact.status is FactStatus.ACCEPTED:
+    # `is_current`, not merely accepted: a retired reading is history, and it
+    # cannot stand in as the truth a changed reading is reconciled against.
+    if fact.is_current:
         return (
             ResolvedChangedReading(reading=reading, fact=fact, truth=fact),
             None,
@@ -711,7 +718,7 @@ def _resolve_changed_reading(
             if fact.replaced_by_fact_id is None
             else get_profile_fact(connection, profile_id, fact.replaced_by_fact_id)
         )
-        if replacement is not None and replacement.status is FactStatus.ACCEPTED:
+        if replacement is not None and replacement.is_current:
             return (
                 ResolvedChangedReading(reading=reading, fact=fact, truth=replacement),
                 None,
@@ -809,13 +816,17 @@ def finalize_cv_fact_reconciliation(
                 f"fact {entry.fact.id} of profile {profile_id} disappeared "
                 "while the reconciliation was running"
             )
-        if current.status is FactStatus.ACCEPTED:
+        if current.is_current:
             rejected = reject_profile_fact(connection, profile_id, current.id)
             outcomes.append(
                 SupersededOutcome(fact=rejected, rejected=True, left_alone=None)
             )
             continue
-        if current.status is FactStatus.REJECTED:
+        if current.retired_at is not None:
+            # Accepted once, then retired by a CV replacement. Already not
+            # active truth, and not this reconciliation's to refuse.
+            left_alone = ALREADY_RETIRED
+        elif current.status is FactStatus.REJECTED:
             left_alone = ALREADY_REJECTED
         elif current.status is FactStatus.CORRECTED:
             left_alone = TERMINAL_CORRECTED

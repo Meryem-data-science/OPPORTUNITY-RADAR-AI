@@ -219,7 +219,7 @@ def test_a_database_below_0026_has_none_of_the_three_tables(tmp_path: Path):
 
         # 0026 and everything recorded after it, which today is the 0027 CV
         # replacement staging. The three tables below are 0026's.
-        assert apply_migrations(connection) == [MIGRATION, "0027"]
+        assert apply_migrations(connection) == [MIGRATION, "0027", "0028"]
         assert set(TABLES) <= tables_of(connection)
     finally:
         connection.close()

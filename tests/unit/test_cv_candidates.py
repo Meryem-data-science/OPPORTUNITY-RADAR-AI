@@ -1206,6 +1206,7 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
         "0027_cv_staging.sql",
+        "0028_cv_activation.sql",
     ]
     # `0008`..`0011` project accepted facts — onto skills, then onto structured
     # experiences and projects, then onto structured education, certifications
@@ -1219,6 +1220,10 @@ def test_this_slice_still_creates_no_table_of_its_own() -> None:
         "0009_structured_profile_experiences_projects.sql",
         "0010_structured_profile_education_certifications_languages.sql",
         "0011_profile_preferences_availability_mobility.sql",
+        # 0028 gives a fact its currentness column and names `profile_facts` to
+        # do it. Like the four above it is fact-aware on purpose, and like them
+        # it stores no CV candidate and no CV version.
+        "0028_cv_activation.sql",
     )
     for migration in migrations:
         statements = _statements(migration)
