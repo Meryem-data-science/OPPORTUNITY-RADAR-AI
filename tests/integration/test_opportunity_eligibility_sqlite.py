@@ -59,6 +59,10 @@ from services.digital_twin.preferences.repository import (
 )
 from services.digital_twin.preferences.service import set_profile_preferences
 from services.digital_twin.repository import ensure_user_profile
+from services.digital_twin.skills.models import (
+    SKILL_NORMALIZER_VERSION,
+    SkillNormalizationRule,
+)
 from services.digital_twin.skills.repository import synchronize_profile_skills
 from services.digital_twin.structured_profile.repository import (
     synchronize_structured_profile_entries,
@@ -281,6 +285,57 @@ def test_the_migration_adds_exactly_two_tables(tmp_path):
         connection.close()
 
 
+def _seed_pre_0014_skill(connection, profile_id: int, value: str) -> None:
+    """One accepted SKILL fact and its skill projection, in raw SQL.
+
+    Written by hand rather than through `accept` and `project_profile` because
+    this fixture is a database deliberately stopped *before* 0014, and the
+    current fact repository and skill projection read `profile_facts.retired_at`
+    — a column migration 0028 adds. Using them here would need a schema later
+    than the one this test exists to check, so the rows are written against the
+    schema that actually exists at this point instead.
+
+    The values are synthetic, and the shapes are the ones 0007 and 0008 define.
+    """
+    fact_id = connection.execute(
+        """INSERT INTO profile_facts (profile_id, fact_type, value, status, decided_at)
+           VALUES (?, 'SKILL', ?, 'ACCEPTED', CURRENT_TIMESTAMP) RETURNING id""",
+        (profile_id, value),
+    ).fetchone()[0]
+    connection.execute(
+        """INSERT INTO profile_fact_provenance (fact_id, source_type, provenance_key)
+           VALUES (?, 'CV', ?)""",
+        (fact_id, f"TEST-ONLY-PRE-0014-{fact_id}"),
+    )
+    # The vocabulary is shared, and Phase 3.5 may already have recorded this
+    # key from an opportunity's requirements, so this reuses it rather than
+    # inserting a second row — exactly what the real projection does.
+    connection.execute(
+        "INSERT INTO skills (canonical_key, canonical_name) VALUES (?, ?) "
+        "ON CONFLICT (canonical_key) DO NOTHING",
+        (value.casefold(), value),
+    )
+    skill_id = connection.execute(
+        "SELECT id FROM skills WHERE canonical_key = ?", (value.casefold(),)
+    ).fetchone()[0]
+    profile_skill_id = connection.execute(
+        "INSERT INTO profile_skills (profile_id, skill_id) VALUES (?, ?) RETURNING id",
+        (profile_id, skill_id),
+    ).fetchone()[0]
+    connection.execute(
+        """INSERT INTO profile_skill_evidence (
+               profile_skill_id, fact_id, normalizer_version, normalization_rule_id
+           ) VALUES (?, ?, ?, ?)""",
+        (
+            profile_skill_id,
+            fact_id,
+            SKILL_NORMALIZER_VERSION,
+            SkillNormalizationRule.LITERAL_V1.value,
+        ),
+    )
+    connection.commit()
+
+
 def test_the_migration_preserves_everything_already_stored(tmp_path):
     """Applied over a populated database, `0014` adds and changes nothing else."""
     connection = connect_database(tmp_path / "populated.db")
@@ -297,13 +352,7 @@ def test_the_migration_preserves_everything_already_stored(tmp_path):
         insert_opportunity(connection, description=SILENT_DESCRIPTION)
         read_phases_3_5(connection)
         found = ensure_user_profile(connection, "test-only@example.invalid")
-        accept(
-            connection,
-            found.profile.id,
-            "Python",
-            fact_type=ProfileFactType.SKILL,
-        )
-        project_profile(connection, found.profile.id)
+        _seed_pre_0014_skill(connection, found.profile.id, "Python")
         before = _row_counts(connection, UPSTREAM_TABLES)
 
         for statement in split_sql_statements(MIGRATION.read_text(encoding="utf-8")):
