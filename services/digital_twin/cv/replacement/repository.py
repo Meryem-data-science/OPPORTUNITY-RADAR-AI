@@ -70,6 +70,7 @@ __all__ = [
     "list_baseline_cv_facts",
     "list_fact_source_types",
     "list_decision_digest_inputs",
+    "read_staged_correction",
     "list_staged_decisions",
     "open_replacement",
     "set_replacement_lifecycle",
@@ -724,6 +725,36 @@ def list_decision_digest_inputs(
         )
         for row in rows
     )
+
+
+def read_staged_correction(
+    connection: sqlite3.Connection, *, profile_id: int, decision_id: int
+) -> tuple[str, str | None]:
+    """The value a person typed for one correction, and its normal form.
+
+    The one accessor in this package that returns staged CV text. `StagedDecision`
+    deliberately reports only *whether* a value was typed, because everything
+    that reads decisions to count, display progress or build a token must not
+    see it. An activation is the exception that justifies the rule: applying a
+    correction means writing that value as a fact, so it has to be read once,
+    by name, here.
+
+    It is never logged, never summarised and never returned to anything but the
+    fact owner that writes it.
+    """
+    row = connection.execute(
+        """SELECT staged_value, staged_normalized_value
+             FROM profile_cv_replacement_decisions
+            WHERE id = ? AND profile_id = ?""",
+        (decision_id, profile_id),
+    ).fetchone()
+    if row is None:
+        raise CvStagingError(
+            f"decision {decision_id} does not belong to profile {profile_id}"
+        )
+    if row[0] is None:
+        raise CvStagingError(f"decision {decision_id} stages no value to apply")
+    return str(row[0]), None if row[1] is None else str(row[1])
 
 
 # ------------------------------------------------------------ baseline facts

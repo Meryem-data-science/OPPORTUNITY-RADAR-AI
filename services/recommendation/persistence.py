@@ -72,6 +72,7 @@ from .persistence_fingerprint import (
 __all__ = [
     "RecommendationPersistenceError",
     "RecommendationStoreResult",
+    "set_recommendation_state_incomplete_in_transaction",
     "store_recommendation_batch",
 ]
 
@@ -397,7 +398,7 @@ def _require_transaction(connection: sqlite3.Connection, what: str) -> None:
         )
 
 
-def _set_recommendation_state_incomplete_in_transaction(
+def set_recommendation_state_incomplete_in_transaction(
     connection: sqlite3.Connection,
     profile_id: int,
     *,
@@ -668,3 +669,13 @@ def store_recommendation_batch(
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+#: The private spelling this module has used since Phase 9B.3, kept so the
+#: synchronization that already imports it is untouched. The public name exists
+#: because a CV activation publishes the same state, from its own transaction,
+#: and reaching for an underscore from another package would be a boundary
+#: crossed quietly rather than on purpose.
+_set_recommendation_state_incomplete_in_transaction = (
+    set_recommendation_state_incomplete_in_transaction
+)

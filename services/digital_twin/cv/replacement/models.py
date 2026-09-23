@@ -79,6 +79,20 @@ class ReviewIncompleteError(CvStagingError):
     """Something in the review is still unanswered, or the plan moved."""
 
 
+class ContradictoryReviewError(ReviewIncompleteError):
+    """The review accepts a reading from the new CV and retires it at once.
+
+    The same `(fact_type, value)` reaches the review twice — as a candidate of
+    the new document and as the baseline fact that already holds it — and both
+    answers are legal on their own. Together they are not: nothing can be both
+    confirmed by the incoming CV and no longer part of the profile.
+
+    A review in this state is incomplete in the only sense that matters: the
+    person has not yet said what they want. So this refuses, names both targets
+    and changes nothing — it never silently prefers one of the two answers.
+    """
+
+
 class StaleReviewDecisionError(ReviewIncompleteError):
     """A decision was taken against a state the database no longer holds.
 
@@ -414,6 +428,12 @@ class PlanEntry:
     #: or gained independent evidence after somebody answered makes the review
     #: fail closed instead of applying an answer to a different question.
     state_digest: str = ""
+    #: Which reading this entry is about — `(fact_type, value)` byte for byte,
+    #: as a digest, never as text. It exists so that two entries about *the same
+    #: reading*, one incoming and one existing, can be recognised as the same
+    #: reading without the plan ever carrying a value. Nothing is keyed on it
+    #: and no answer depends on it, so it stays out of `state_digest`.
+    reading_digest: str = ""
 
     def summary(self) -> dict[str, object]:
         return {

@@ -39,6 +39,7 @@ from collections.abc import Callable
 
 from services.digital_twin.cv.replacement.models import (
     BLOCKED_DIFFERENCES,
+    ContradictoryReviewError,
     CvStagingError,
     DecisionNotPermittedError,
     DecisionRole,
@@ -302,6 +303,49 @@ def _readiness(
     }
 
 
+def _contradictory_readings(
+    plan: ReplacementPlan, decisions: tuple[StagedDecision, ...]
+) -> tuple[tuple[str, int, int], ...]:
+    """Readings the review both accepts and retires. Names them, judges none.
+
+    One reading, `(fact_type, value)` byte for byte, can reach the review twice:
+    once as an incoming candidate of the new document, once as the baseline fact
+    that already holds it. Each answer is legal on its own — ACCEPT is what an
+    incoming reading takes, RETIRE is what an existing fact takes — but together
+    they say that the same claim is both confirmed by the new CV and no longer
+    part of the profile. There is no true answer to that, so nothing here picks
+    one: it reports the pairs and lets the person decide which of their two
+    answers they meant.
+
+    Matching is on `reading_digest`, so no value is read, compared or returned.
+    """
+    answered = {
+        (decision.candidate_id, decision.fact_id): decision.decision
+        for decision in decisions
+    }
+    accepted: dict[str, list[int]] = {}
+    retired: dict[str, list[tuple[int, str]]] = {}
+    for entry in plan.entries:
+        if not entry.reading_digest:
+            # A plan that names no reading cannot be paired on one. Nothing the
+            # planner builds looks like this; refusing to guess is the point.
+            continue
+        decision = answered.get((entry.candidate_id, entry.fact_id))
+        if decision is ReviewDecision.ACCEPT and entry.candidate_id is not None:
+            accepted.setdefault(entry.reading_digest, []).append(entry.candidate_id)
+        elif decision is ReviewDecision.RETIRE and entry.fact_id is not None:
+            retired.setdefault(entry.reading_digest, []).append(
+                (entry.fact_id, entry.fact_type)
+            )
+    clashes = [
+        (fact_type, candidate_id, fact_id)
+        for reading, candidate_ids in accepted.items()
+        for candidate_id in candidate_ids
+        for fact_id, fact_type in retired.get(reading, ())
+    ]
+    return tuple(sorted(clashes))
+
+
 def review_progress(
     connection: sqlite3.Connection, *, profile_id: int, replacement_id: int
 ) -> dict[str, object]:
@@ -331,12 +375,19 @@ def require_complete_current_review(
     Requires the caller's transaction and opens none: the check is only worth
     anything if it holds until whatever it authorises has been written.
 
-    Three ways to fail, all closed:
+    Four ways to fail, all closed:
 
     * an entry nobody answered;
     * an answer about something the plan no longer contains;
     * an answer whose `state_digest` no longer matches — the fact changed
-      status, or gained evidence no CV produced, or the manifest reading moved.
+      status, or gained evidence no CV produced, or the manifest reading moved;
+    * two answers that contradict each other: the same reading accepted from
+      the new document and retired from the profile. Each is legal alone, so
+      only a check over the whole review can see it — which is exactly what
+      this function is, and why it belongs here rather than in the activation.
+      Asking here also means the contradiction is refused when the review is
+      declared ready, on the screen where both answers were given, instead of
+      at the end when the person believes the review is settled.
     """
     if not connection.in_transaction:
         raise CvStagingError(
@@ -352,12 +403,11 @@ def require_complete_current_review(
     plan = compute_replacement_plan(
         connection, profile_id=profile_id, replacement_id=replacement_id
     )
-    progress = _readiness(
-        plan,
-        list_staged_decisions(
-            connection, profile_id=profile_id, replacement_id=replacement_id
-        ),
+    # Read once: every check below has to describe the same set of answers.
+    decisions = list_staged_decisions(
+        connection, profile_id=profile_id, replacement_id=replacement_id
     )
+    progress = _readiness(plan, decisions)
     if progress["unanswered"]:
         raise ReviewIncompleteError(
             f"{progress['unanswered']} of {progress['plan_entries']} entries "
@@ -373,6 +423,13 @@ def require_complete_current_review(
             f"{progress['stale_decisions']} decisions were taken against a "
             f"state the database no longer holds "
             f"(candidate_id, fact_id): {progress['stale_targets']}"
+        )
+    clashes = _contradictory_readings(plan, decisions)
+    if clashes:
+        raise ContradictoryReviewError(
+            f"{len(clashes)} readings are both accepted from the new document "
+            f"and retired from the profile; answer one of the two differently "
+            f"(fact_type, candidate_id, fact_id): {clashes}"
         )
     return plan
 

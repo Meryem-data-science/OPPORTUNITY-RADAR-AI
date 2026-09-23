@@ -193,6 +193,21 @@ def _check_transition(fact: ProfileFact, target: FactStatus) -> None:
         )
 
 
+def _require_borrowed_transaction(connection: sqlite3.Connection, what: str) -> None:
+    """Refuse to do transactional work the caller has not opened a home for.
+
+    A `*_in_transaction` primitive exists so that several writes can land or be
+    undone together. Running one without a transaction would look like it
+    worked and would commit on its own, which is exactly the guarantee the
+    caller asked for and would not get. Saying so by name is better than
+    letting SQLite autocommit it.
+    """
+    if not connection.in_transaction:
+        raise ProfileFactError(
+            f"{what} requires the caller's transaction; this call opens none"
+        )
+
+
 def _require_not_retired(fact: ProfileFact, what: str) -> None:
     """Keep the ordinary current-fact workflow off a retired fact.
 
@@ -382,44 +397,76 @@ def ensure_profile_fact_proposal(
     `after_lookup` is a test seam invoked once the lookup is done and before
     anything is written; production callers leave it unset.
     """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        proposal = ensure_profile_fact_proposal_in_transaction(
+            connection,
+            profile_id=profile_id,
+            fact_type=fact_type,
+            value=value,
+            provenance=provenance,
+            normalized_value=normalized_value,
+            after_lookup=after_lookup,
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return proposal
+
+
+def ensure_profile_fact_proposal_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_type: ProfileFactType | str,
+    value: str,
+    provenance: ProvenanceInput,
+    normalized_value: str | None = None,
+    after_lookup: Callable[[], None] | None = None,
+) -> FactProposal:
+    """`ensure_profile_fact_proposal`, in the transaction the caller opened.
+
+    Same identity rule, same refusals, same idempotence: this *is* the body of
+    the public function, which now only owns the transaction around it. A
+    caller that has to create a fact and decide it in the same breath — an
+    activation applying a review — needs both to land together, and this is
+    what lets that happen without a second, divergent implementation.
+
+    It opens no transaction, commits none and rolls back none.
+    """
+    _require_borrowed_transaction(connection, "proposing a fact")
     if not isinstance(provenance, ProvenanceInput):
         raise ProfileFactError("provenance must be a ProvenanceInput")
     if value is None or str(value).strip() == "":
         raise ProfileFactError("value must not be empty")
     stored_type = _fact_type_value(fact_type)
     provenance_key = provenance.resolved_provenance_key()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        _require_profile(connection, profile_id)
-        known = _select_facts_by_evidence(connection, profile_id, provenance_key)
-        if after_lookup is not None:
-            after_lookup()
-        if len(known) > 1:
-            raise AmbiguousFactEvidenceError(
-                f"{len(known)} facts of profile {profile_id} share one proof"
-            )
-        if known:
-            existing = known[0]
-            if existing.fact_type != stored_type:
-                raise ConflictingFactEvidenceError(
-                    f"that proof already justifies a {existing.fact_type} fact, "
-                    f"not a {stored_type} one"
-                )
-            connection.execute("COMMIT")
-            return FactProposal(fact=existing, created=False)
-        fact = _insert_fact(
-            connection,
-            profile_id=profile_id,
-            fact_type=stored_type,
-            value=value,
-            normalized_value=normalized_value,
-            status=FactStatus.PROPOSED,
+    _require_profile(connection, profile_id)
+    known = _select_facts_by_evidence(connection, profile_id, provenance_key)
+    if after_lookup is not None:
+        after_lookup()
+    if len(known) > 1:
+        raise AmbiguousFactEvidenceError(
+            f"{len(known)} facts of profile {profile_id} share one proof"
         )
-        _insert_provenance(connection, fact.id, provenance)
-        connection.execute("COMMIT")
-    except Exception:
-        connection.execute("ROLLBACK")
-        raise
+    if known:
+        existing = known[0]
+        if existing.fact_type != stored_type:
+            raise ConflictingFactEvidenceError(
+                f"that proof already justifies a {existing.fact_type} fact, "
+                f"not a {stored_type} one"
+            )
+        return FactProposal(fact=existing, created=False)
+    fact = _insert_fact(
+        connection,
+        profile_id=profile_id,
+        fact_type=stored_type,
+        value=value,
+        normalized_value=normalized_value,
+        status=FactStatus.PROPOSED,
+    )
+    _insert_provenance(connection, fact.id, provenance)
     return FactProposal(fact=fact, created=True)
 
 
@@ -500,33 +547,64 @@ def ensure_profile_fact_provenance(
     `after_lookup` is a test seam invoked once the lookup is done and before
     anything is written; production callers leave it unset.
     """
-    if not isinstance(provenance, ProvenanceInput):
-        raise ProfileFactError("provenance must be a ProvenanceInput")
-    provenance_key = provenance.resolved_provenance_key()
     connection.execute("BEGIN IMMEDIATE")
     try:
-        _require_fact(connection, profile_id, fact_id)
-        known = _select_facts_by_evidence(connection, profile_id, provenance_key)
-        if after_lookup is not None:
-            after_lookup()
-        if len(known) > 1:
-            raise AmbiguousFactEvidenceError(
-                f"{len(known)} facts of profile {profile_id} share one proof"
-            )
-        if known and known[0].id != fact_id:
-            raise ConflictingFactEvidenceError(
-                f"that proof already justifies fact {known[0].id} of profile "
-                f"{profile_id}, not fact {fact_id}"
-            )
-        recorded = _select_provenance(connection, fact_id, provenance_key)
-        if recorded is not None:
-            connection.execute("COMMIT")
-            return FactProvenanceAttachment(provenance=recorded, created=False)
-        attached = _insert_provenance(connection, fact_id, provenance)
+        attachment = ensure_profile_fact_provenance_in_transaction(
+            connection,
+            profile_id=profile_id,
+            fact_id=fact_id,
+            provenance=provenance,
+            after_lookup=after_lookup,
+        )
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")
         raise
+    return attachment
+
+
+def ensure_profile_fact_provenance_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_id: int,
+    provenance: ProvenanceInput,
+    after_lookup: Callable[[], None] | None = None,
+) -> FactProvenanceAttachment:
+    """`ensure_profile_fact_provenance`, in the transaction the caller opened.
+
+    The body of the public function, unchanged. The three refusals it makes —
+    a fact of another profile, one proof justifying several facts, one proof
+    moved onto a different fact — are made here, so a caller reaching for the
+    primitive gets them too.
+
+    Attaching evidence still decides nothing: a status moves only through the
+    decision calls of this module, and a fact a CV replacement retired stays
+    retired when a later document proves it again.
+
+    It opens no transaction, commits none and rolls back none.
+    """
+    _require_borrowed_transaction(connection, "attaching evidence")
+    if not isinstance(provenance, ProvenanceInput):
+        raise ProfileFactError("provenance must be a ProvenanceInput")
+    provenance_key = provenance.resolved_provenance_key()
+    _require_fact(connection, profile_id, fact_id)
+    known = _select_facts_by_evidence(connection, profile_id, provenance_key)
+    if after_lookup is not None:
+        after_lookup()
+    if len(known) > 1:
+        raise AmbiguousFactEvidenceError(
+            f"{len(known)} facts of profile {profile_id} share one proof"
+        )
+    if known and known[0].id != fact_id:
+        raise ConflictingFactEvidenceError(
+            f"that proof already justifies fact {known[0].id} of profile "
+            f"{profile_id}, not fact {fact_id}"
+        )
+    recorded = _select_provenance(connection, fact_id, provenance_key)
+    if recorded is not None:
+        return FactProvenanceAttachment(provenance=recorded, created=False)
+    attached = _insert_provenance(connection, fact_id, provenance)
     return FactProvenanceAttachment(provenance=attached, created=True)
 
 
@@ -737,6 +815,67 @@ def decide_profile_facts(
     `after_fact` is a test seam invoked after each fact moves and before the
     commit; production callers leave it unset.
     """
+    # Materialized once, and once only: `fact_ids` may be any sequence, and a
+    # caller passing a one-shot iterable must not have it consumed here and
+    # then handed empty to the primitive. What is validated is what is decided,
+    # and it is the same object both times.
+    ordered = tuple(fact_ids)
+    if target not in (FactStatus.ACCEPTED, FactStatus.REJECTED):
+        raise ProfileFactError("a batch decision is an acceptance or a rejection")
+    if len(set(ordered)) != len(ordered):
+        raise ProfileFactError("a fact cannot be decided twice in one batch")
+    if not ordered:
+        # Historical behaviour, kept: a *valid* empty batch decides nothing, so
+        # it opens nothing. Both refusals above still apply to it — an absurd
+        # target or a repeated id is a caller mistake whether or not the batch
+        # turned out to be empty. The primitive below is stricter still about
+        # the transaction, on purpose; see its docstring.
+        return ()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        decided = decide_profile_facts_in_transaction(
+            connection, profile_id, ordered, target, after_fact=after_fact
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return decided
+
+
+def decide_profile_facts_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    fact_ids: Sequence[int],
+    target: FactStatus,
+    *,
+    after_fact: Callable[[int], None] | None = None,
+) -> tuple[ProfileFact, ...]:
+    """`decide_profile_facts`, in the transaction the caller opened.
+
+    Same target vocabulary — `ACCEPTED` or `REJECTED`, never a retirement,
+    which has its own owner — same refusal of a repeated id, and the same
+    `_decide_in_transaction` per fact, so the cycle rules and the retired-fact
+    guard are the ones that were always there.
+
+    What it adds is the ability to decide a batch *beside* other writes: an
+    activation accepts the readings a person confirmed, refuses the ones they
+    refused and switches the CV document, and either all of that happened or
+    none of it did.
+
+    It opens no transaction, commits none and rolls back none, and it asks for
+    one **before** looking at anything — an empty batch included. A caller
+    composing an activation out of these primitives is doing transactional
+    work whether or not this particular batch turns out to have members, and a
+    call that quietly succeeds outside a transaction would hide the mistake
+    until the batch happened not to be empty.
+
+    The public `decide_profile_facts` keeps its own historical shortcut for an
+    empty batch — after making the same two refusals below, so an absurd target
+    or a repeated id is still a caller mistake there too — and nothing that
+    relied on it changes.
+    """
+    _require_borrowed_transaction(connection, "deciding facts")
     if target not in (FactStatus.ACCEPTED, FactStatus.REJECTED):
         raise ProfileFactError("a batch decision is an acceptance or a rejection")
     ordered = tuple(fact_ids)
@@ -744,19 +883,11 @@ def decide_profile_facts(
         raise ProfileFactError("a fact cannot be decided twice in one batch")
     if not ordered:
         return ()
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        decided: list[ProfileFact] = []
-        for fact_id in ordered:
-            decided.append(
-                _decide_in_transaction(connection, profile_id, fact_id, target)
-            )
-            if after_fact is not None:
-                after_fact(fact_id)
-        connection.execute("COMMIT")
-    except Exception:
-        connection.execute("ROLLBACK")
-        raise
+    decided: list[ProfileFact] = []
+    for fact_id in ordered:
+        decided.append(_decide_in_transaction(connection, profile_id, fact_id, target))
+        if after_fact is not None:
+            after_fact(fact_id)
     return tuple(decided)
 
 
@@ -809,6 +940,46 @@ def correct_profile_fact(
     provenance exist and before the old fact is marked; production callers
     leave it unset.
     """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        correction = correct_profile_fact_in_transaction(
+            connection,
+            profile_id,
+            fact_id,
+            value=value,
+            normalized_value=normalized_value,
+            provenance=provenance,
+            after_replacement=after_replacement,
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        connection.execute("ROLLBACK")
+        raise
+    return correction
+
+
+def correct_profile_fact_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    fact_id: int,
+    *,
+    value: str,
+    normalized_value: str | None = None,
+    provenance: ProvenanceInput | None = None,
+    after_replacement: Callable[[], None] | None = None,
+) -> FactCorrection:
+    """`correct_profile_fact`, in the transaction the caller opened.
+
+    The body of the public function, so the correction semantics are the ones
+    that were always there: the replacement is created `ACCEPTED` with its own
+    `USER_INPUT` evidence, the old fact is then marked `CORRECTED` and pointed
+    at it, no `value` is ever overwritten, and a retired or terminal fact is
+    refused before anything is written.
+
+    It opens no transaction, commits none and rolls back none — which is what
+    lets an activation apply a staged correction beside the rest of a review.
+    """
+    _require_borrowed_transaction(connection, "correcting a fact")
     if value is None or str(value).strip() == "":
         raise ProfileFactError("a correction must carry a value")
     if provenance is None:
@@ -817,46 +988,39 @@ def correct_profile_fact(
         raise ProfileFactError("provenance must be a ProvenanceInput")
     if provenance.source_type is not FactSourceType.USER_INPUT:
         raise ProfileFactError("a correction is USER_INPUT evidence")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        original = _require_fact(connection, profile_id, fact_id)
-        _require_not_retired(original, "corrected")
-        _check_transition(original, FactStatus.CORRECTED)
-        replacement = _insert_fact(
-            connection,
-            profile_id=profile_id,
-            fact_type=original.fact_type,
-            value=value,
-            normalized_value=normalized_value,
-            status=FactStatus.ACCEPTED,
-        )
-        _insert_provenance(connection, replacement.id, provenance)
-        if after_replacement is not None:
-            after_replacement()
-        row = connection.execute(
-            f"""UPDATE profile_facts
-                   SET status = ?,
-                       replaced_by_fact_id = ?,
-                       decided_at = CURRENT_TIMESTAMP,
-                       updated_at = CURRENT_TIMESTAMP
-                 WHERE id = ? AND profile_id = ? AND status = ?
-             RETURNING {_FACT_COLUMNS}""",
-            (
-                FactStatus.CORRECTED.value,
-                replacement.id,
-                fact_id,
-                profile_id,
-                original.status.value,
-            ),
-        ).fetchone()
-        if row is None:
-            raise ProfileFactError("the fact changed while it was being corrected")
-        corrected = _fact_from_row(row)
-        connection.execute("COMMIT")
-    except Exception:
-        connection.execute("ROLLBACK")
-        raise
-    return FactCorrection(corrected=corrected, replacement=replacement)
+    original = _require_fact(connection, profile_id, fact_id)
+    _require_not_retired(original, "corrected")
+    _check_transition(original, FactStatus.CORRECTED)
+    replacement = _insert_fact(
+        connection,
+        profile_id=profile_id,
+        fact_type=original.fact_type,
+        value=value,
+        normalized_value=normalized_value,
+        status=FactStatus.ACCEPTED,
+    )
+    _insert_provenance(connection, replacement.id, provenance)
+    if after_replacement is not None:
+        after_replacement()
+    row = connection.execute(
+        f"""UPDATE profile_facts
+               SET status = ?,
+                   replaced_by_fact_id = ?,
+                   decided_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND profile_id = ? AND status = ?
+         RETURNING {_FACT_COLUMNS}""",
+        (
+            FactStatus.CORRECTED.value,
+            replacement.id,
+            fact_id,
+            profile_id,
+            original.status.value,
+        ),
+    ).fetchone()
+    if row is None:
+        raise ProfileFactError("the fact changed while it was being corrected")
+    return FactCorrection(corrected=_fact_from_row(row), replacement=replacement)
 
 
 def record_verified_user_input_fact(

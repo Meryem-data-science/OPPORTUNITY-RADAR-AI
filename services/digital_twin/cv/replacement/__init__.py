@@ -19,6 +19,7 @@ absent, and adding one here would defeat the point of this slice.
 
 from services.digital_twin.cv.replacement.models import (
     ActiveCvDocumentError,
+    ContradictoryReviewError,
     CvDocument,
     CvDocumentNotFoundError,
     CvExtraction,
@@ -50,6 +51,7 @@ from services.digital_twin.cv.replacement.models import (
 
 __all__ = [
     "ActiveCvDocumentError",
+    "ContradictoryReviewError",
     "CvDocument",
     "CvDocumentNotFoundError",
     "CvExtraction",

@@ -71,6 +71,19 @@ def _state_digest(*parts: object) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _reading_digest(fact_type: str, value: str) -> str:
+    """One digest naming a reading: `(fact_type, value)`, byte for byte.
+
+    The same equality rule this module is built on, carried as a digest so that
+    the review can be asked whether two entries speak about the same reading
+    without any value leaving the row it lives in. The unit separator cannot
+    appear in a `fact_type`, so no pair of readings can collide by moving the
+    boundary between the two parts.
+    """
+    payload = "\x1f".join([PLAN_STATE_VERSION, "reading", fact_type, value])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _fact_for_evidence(
     connection: sqlite3.Connection, *, profile_id: int, provenance_key: str
 ) -> tuple[int, str] | None:
@@ -195,6 +208,7 @@ def compute_replacement_plan(
                     status or "",
                     evidence,
                 ),
+                reading_digest=_reading_digest(entry.fact_type, entry.value),
             )
         )
 
@@ -235,6 +249,7 @@ def compute_replacement_plan(
                         connection, profile_id=profile_id, fact_id=fact.fact_id
                     ),
                 ),
+                reading_digest=_reading_digest(fact.fact_type, fact.value),
             )
         )
 
