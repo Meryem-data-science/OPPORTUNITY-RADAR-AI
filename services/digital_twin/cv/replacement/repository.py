@@ -682,6 +682,7 @@ def list_baseline_cv_facts(
              JOIN profile_fact_provenance AS p ON p.fact_id = f.id
             WHERE f.profile_id = ?
               AND f.status = 'ACCEPTED'
+              AND f.retired_at IS NULL
               AND p.source_type = 'CV'
               AND p.cv_sha256 = ?
             ORDER BY f.id""",

@@ -272,11 +272,31 @@ class ProfileFact:
     updated_at: str
     #: When a human decided. `None` for as long as the fact is `PROPOSED`.
     decided_at: str | None
+    #: When a CV replacement removed this fact from the *current* profile.
+    #: `None` for every fact that has not been retired, which is all of them
+    #: until an activation retires one. Set only on an `ACCEPTED` fact, and
+    #: never cleared or re-dated — migration 0028 enforces both.
+    retired_at: str | None = None
 
     @property
     def is_verified(self) -> bool:
-        """Computed, never stored. `ACCEPTED` is the only verified status."""
+        """Computed, never stored. `ACCEPTED` is the only verified status.
+
+        This answers *was this claim validated by a human*, and a retirement
+        does not change the answer: the person did accept it, once.
+        """
         return self.status is FactStatus.ACCEPTED
+
+    @property
+    def is_current(self) -> bool:
+        """Verified **and** still part of the active profile.
+
+        The other half of the question `is_verified` answers. A fact a CV
+        replacement retired stays verified and stops being current, and it is
+        this reading — not `is_verified` — that every projection of the present
+        profile is built on.
+        """
+        return self.status is FactStatus.ACCEPTED and self.retired_at is None
 
     @property
     def is_terminal(self) -> bool:

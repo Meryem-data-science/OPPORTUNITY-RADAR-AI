@@ -34,8 +34,13 @@ from services.digital_twin.facts.models import (
 
 _FACT_COLUMNS = (
     "id, profile_id, fact_type, value, normalized_value, status, "
-    "replaced_by_fact_id, created_at, updated_at, decided_at"
+    "replaced_by_fact_id, created_at, updated_at, decided_at, retired_at"
 )
+
+#: The reading every projection of the *present* profile is built on. It is
+#: written out once, here, so no caller composes it by hand and forgets half of
+#: it: a fact a CV replacement retired is still verified and no longer current.
+_CURRENT_FACT_PREDICATE = "status = 'ACCEPTED' AND retired_at IS NULL"
 
 _PROVENANCE_COLUMNS = (
     "id, fact_id, source_type, provenance_key, source_locator, cv_sha256, "
@@ -58,6 +63,21 @@ class ProfileFactNotFoundError(ProfileFactError):
 
 class InvalidFactTransitionError(ProfileFactError):
     """Raised when a decision would move a fact somewhere the cycle forbids."""
+
+
+class RetiredFactNotMutableError(ProfileFactError):
+    """Raised when the ordinary current-fact workflow touches a retired fact.
+
+    A retirement is a historical event: the claim was accepted, and a CV
+    replacement later removed it from the current profile. Accepting, refusing
+    or correcting it now would either make it current again or record a
+    decision about something nobody is looking at. Both are refused here,
+    before SQLite refuses them through the 0028 constraint, so a caller gets a
+    named error rather than an integrity failure to interpret.
+
+    Evidence may still be attached to a retired fact — that is how the audit of
+    an old document stays complete — and doing so never makes it current.
+    """
 
 
 class AmbiguousFactEvidenceError(ProfileFactError):
@@ -105,6 +125,7 @@ def _fact_from_row(row: tuple) -> ProfileFact:
         created_at=str(row[7]),
         updated_at=str(row[8]),
         decided_at=None if row[9] is None else str(row[9]),
+        retired_at=None if row[10] is None else str(row[10]),
     )
 
 
@@ -169,6 +190,21 @@ def _check_transition(fact: ProfileFact, target: FactStatus) -> None:
     if target not in ALLOWED_TRANSITIONS[fact.status]:
         raise InvalidFactTransitionError(
             f"a {fact.status.value} fact cannot become {target.value}"
+        )
+
+
+def _require_not_retired(fact: ProfileFact, what: str) -> None:
+    """Keep the ordinary current-fact workflow off a retired fact.
+
+    Migration 0028 already refuses the write, because a retired row stops
+    satisfying its CHECK the moment its status moves. This is the same refusal
+    said earlier and by name, so callers read `RetiredFactNotMutableError`
+    rather than an integrity error they would have to interpret.
+    """
+    if fact.retired_at is not None:
+        raise RetiredFactNotMutableError(
+            f"fact {fact.id} was retired from the current profile and cannot be "
+            f"{what}"
         )
 
 
@@ -589,17 +625,30 @@ def list_verified_profile_facts(
     *,
     fact_type: ProfileFactType | str | None = None,
 ) -> tuple[ProfileFact, ...]:
-    """Only the `ACCEPTED` facts of this profile, oldest id first.
+    """Only the `ACCEPTED`, still-current facts of this profile, oldest id first.
 
     This is the one reading later phases are meant to build on. A `PROPOSED`
     fact was decided by nobody, a `REJECTED` one was refused, and a `CORRECTED`
     one has been superseded: none of the three is knowledge about the person,
-    so none of them appears here. The filter is applied in SQL, not by the
-    caller, so there is no way to forget it.
+    so none of them appears here. Neither does a fact a CV replacement retired
+    — it is still true that the person accepted it, and it is no longer part of
+    the active profile, which is what a phase building on this reading needs.
+    `list_profile_facts` remains the audit reading and still shows it.
+
+    The filter is applied in SQL, not by the caller, so there is no way to
+    forget half of it.
     """
-    return list_profile_facts(
-        connection, profile_id, fact_type=fact_type, statuses=(FactStatus.ACCEPTED,)
-    )
+    clauses = [f"profile_id = ? AND {_CURRENT_FACT_PREDICATE}"]
+    parameters: list[object] = [profile_id]
+    if fact_type is not None:
+        clauses.append("fact_type = ?")
+        parameters.append(_fact_type_value(fact_type))
+    rows = connection.execute(
+        f"SELECT {_FACT_COLUMNS} FROM profile_facts "
+        f"WHERE {' AND '.join(clauses)} ORDER BY id",
+        tuple(parameters),
+    ).fetchall()
+    return tuple(_fact_from_row(row) for row in rows)
 
 
 def list_profile_fact_provenance(
@@ -628,6 +677,7 @@ def _decide_in_transaction(
     none of it.
     """
     fact = _require_fact(connection, profile_id, fact_id)
+    _require_not_retired(fact, "decided")
     _check_transition(fact, target)
     if fact.status is target:
         # Deciding again what was already decided changes nothing, and
@@ -770,6 +820,7 @@ def correct_profile_fact(
     connection.execute("BEGIN IMMEDIATE")
     try:
         original = _require_fact(connection, profile_id, fact_id)
+        _require_not_retired(original, "corrected")
         _check_transition(original, FactStatus.CORRECTED)
         replacement = _insert_fact(
             connection,
@@ -871,3 +922,146 @@ def record_verified_user_input_fact(
         connection.execute("ROLLBACK")
         raise
     return fact
+
+
+#: Fact types no CV ever produces, so no CV replacement may retire one. The
+#: bridge that turns candidates into facts maps nothing to them — they are the
+#: preferences, availability, mobility and career objectives a person states
+#: themselves — and a replacement reaching one would be a bug, not a decision.
+NON_CV_FACT_TYPES: frozenset[str] = frozenset(
+    {
+        ProfileFactType.PREFERENCE.value,
+        ProfileFactType.AVAILABILITY.value,
+        ProfileFactType.MOBILITY.value,
+        ProfileFactType.CAREER_OBJECTIVE.value,
+    }
+)
+
+#: Evidence a CV did not produce. One row of any of these protects a fact from
+#: being retired by a CV replacement: the person stated it, or another source
+#: supports it, and a document going quiet about it says nothing.
+NON_CV_SOURCE_TYPES: tuple[str, ...] = (
+    FactSourceType.USER_INPUT.value,
+    FactSourceType.GITHUB.value,
+    FactSourceType.OTHER_ACCEPTED_EVIDENCE.value,
+)
+
+
+class FactNotRetirableError(ProfileFactError):
+    """Raised when a fact is not this CV replacement's to retire.
+
+    Each reason is derived from the database at the moment of the call, never
+    from a label a screen stored earlier, because a label is what a mistake
+    looks like and the database is what is true.
+    """
+
+
+def retire_profile_fact_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    profile_id: int,
+    fact_id: int,
+    baseline_content_sha256: str,
+) -> ProfileFact:
+    """Remove one fact from the current profile, in the caller's transaction.
+
+    It requires an open transaction and opens none: a retirement belongs with
+    the document switch and the rest of an activation, and landing separately
+    would leave a profile whose facts and whose active CV disagree.
+
+    What it writes is `retired_at` and `updated_at`, and nothing else. The
+    `status` stays `ACCEPTED` — the person did accept this claim, and a newer CV
+    going quiet about it is not evidence that it became false — the `value` is
+    untouched, `replaced_by_fact_id` is untouched, and no provenance row is
+    added or removed. The fact stops being *current* and stays *verified*, which
+    is exactly the distinction migration 0028 introduced.
+
+    Five things are proven here, all fact-local and all read from the database:
+
+    1. the fact belongs to this profile and is `ACCEPTED`;
+    2. it is not already retired — retiring twice is a no-op, not a re-dating;
+    3. no `USER_INPUT`, `GITHUB` or `OTHER_ACCEPTED_EVIDENCE` row supports it.
+       Historical CV proofs do **not** protect it: a fact carried from one CV to
+       the next accumulates CV evidence, and the number of documents that once
+       said it cannot be what decides whether the person may remove it;
+    4. the baseline document actually supports it, so a replacement cannot
+       retire something its own baseline never said;
+    5. its type is one a CV can produce.
+
+    What this owner deliberately does **not** check is the replacement plan and
+    the stored review digest. Those are properties of a review, not of a fact,
+    and checking them here would make this package import CV replacement
+    planning. The activation orchestrator owns them.
+    """
+    if not connection.in_transaction:
+        raise ProfileFactError(
+            "retiring a fact requires the caller's transaction; this call opens none"
+        )
+    if (
+        not isinstance(baseline_content_sha256, str)
+        or len(baseline_content_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in baseline_content_sha256)
+    ):
+        raise ProfileFactError("a baseline document digest is 64 hexadecimal characters")
+
+    fact = _require_fact(connection, profile_id, fact_id)
+    if fact.retired_at is not None:
+        # Already historical. Re-running an activation must not move the date
+        # on which the person's profile actually changed.
+        return fact
+    if fact.status is not FactStatus.ACCEPTED:
+        raise FactNotRetirableError(
+            f"fact {fact_id} is {fact.status.value}; only an accepted fact is current"
+        )
+    if fact.fact_type in NON_CV_FACT_TYPES:
+        raise FactNotRetirableError(
+            f"a {fact.fact_type} fact is stated by the person, not read from a CV"
+        )
+
+    placeholders = ", ".join("?" for _ in NON_CV_SOURCE_TYPES)
+    supported_elsewhere = connection.execute(
+        f"""SELECT 1 FROM profile_fact_provenance
+             WHERE fact_id = ? AND source_type IN ({placeholders}) LIMIT 1""",
+        (fact_id, *NON_CV_SOURCE_TYPES),
+    ).fetchone()
+    if supported_elsewhere is not None:
+        raise FactNotRetirableError(
+            f"fact {fact_id} rests on evidence no CV produced"
+        )
+
+    is_a_correction_replacement = connection.execute(
+        """SELECT 1 FROM profile_facts
+            WHERE profile_id = ? AND replaced_by_fact_id = ? LIMIT 1""",
+        (profile_id, fact_id),
+    ).fetchone()
+    if is_a_correction_replacement is not None:
+        raise FactNotRetirableError(
+            f"fact {fact_id} is what a correction replaced an earlier reading with"
+        )
+
+    baseline_supports_it = connection.execute(
+        """SELECT 1 FROM profile_fact_provenance
+            WHERE fact_id = ? AND source_type = 'CV' AND cv_sha256 = ? LIMIT 1""",
+        (fact_id, baseline_content_sha256),
+    ).fetchone()
+    if baseline_supports_it is None:
+        raise FactNotRetirableError(
+            f"fact {fact_id} carries no evidence from the baseline document"
+        )
+
+    row = connection.execute(
+        f"""UPDATE profile_facts
+               SET retired_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND profile_id = ?
+               AND status = 'ACCEPTED' AND retired_at IS NULL
+         RETURNING {_FACT_COLUMNS}""",
+        (fact_id, profile_id),
+    ).fetchone()
+    if row is None:
+        # The last guard, and the only one that can catch a change committed
+        # between the reads above and this write.
+        raise FactNotRetirableError(
+            f"fact {fact_id} stopped being current while it was being retired"
+        )
+    return _fact_from_row(row)

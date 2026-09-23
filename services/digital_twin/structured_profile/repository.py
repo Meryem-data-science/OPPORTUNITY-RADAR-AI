@@ -78,26 +78,31 @@ from services.digital_twin.structured_profile.structurer import (
 _VERIFIED_EXPERIENCE_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'EXPERIENCE' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 _VERIFIED_PROJECT_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'PROJECT' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 _VERIFIED_EDUCATION_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'EDUCATION' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 _VERIFIED_CERTIFICATION_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'CERTIFICATION' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 _VERIFIED_LANGUAGE_FACTS = (
     "SELECT id, value FROM profile_facts "
     "WHERE profile_id = ? AND fact_type = 'LANGUAGE' AND status = 'ACCEPTED' "
+    "AND retired_at IS NULL "
     "ORDER BY id"
 )
 

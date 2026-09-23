@@ -153,6 +153,7 @@ def test_0007_upgrades_a_database_that_stopped_at_0006(tmp_path):
             "0025",
             "0026",
             "0027",
+            "0028",
         ]
 
         assert {"profile_facts", "profile_fact_provenance"} <= _tables(connection)
@@ -173,7 +174,7 @@ def test_0007_is_recorded_once_and_seeds_nothing(migrated):
         "SELECT version FROM schema_migrations ORDER BY version"
     ).fetchall()
 
-    assert recorded[-1] == ("0027",)
+    assert recorded[-1] == ("0028",)
     assert _counts(migrated) == (0, 0)
 
 
@@ -380,6 +381,10 @@ def test_the_fact_columns_are_exactly_the_cycle_and_its_history(migrated):
         "created_at",
         "updated_at",
         "decided_at",
+        # 0028 added the currentness dimension. `status` still answers whether a
+        # human validated the claim; `retired_at` answers whether that validated
+        # claim is still part of the active profile.
+        "retired_at",
     ]
     assert _columns(migrated, "profile_fact_provenance") == [
         "id",

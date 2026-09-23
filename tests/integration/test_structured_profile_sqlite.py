@@ -210,12 +210,37 @@ def _apply_up_to_0008(connection, tmp_path) -> list[str]:
     return apply_migrations(connection, directory)
 
 
+def _seed_accepted_fact_pre_0028(connection, profile_id: int, fact_type: str, value: str) -> int:
+    """One accepted fact, written without the owners, at an old schema level.
+
+    The fact owners read `retired_at`, which migration 0028 adds, so they cannot
+    be used to populate a database that stops before it. What this test is about
+    is that rows written *before* an upgrade survive it, and raw SQL is the only
+    honest way to write them at the old schema.
+    """
+    fact_id = connection.execute(
+        """INSERT INTO profile_facts (profile_id, fact_type, value, status, decided_at)
+           VALUES (?, ?, ?, 'ACCEPTED', CURRENT_TIMESTAMP) RETURNING id""",
+        (profile_id, fact_type, value),
+    ).fetchone()[0]
+    connection.execute(
+        """INSERT INTO profile_fact_provenance (fact_id, source_type, provenance_key)
+           VALUES (?, 'CV', ?)""",
+        (fact_id, f"test-only:{fact_type}:{value}"),
+    )
+    connection.commit()
+    return fact_id
+
+
+
 def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
     connection = connect_database(tmp_path / "upgrade.db")
     try:
         assert _apply_up_to_0008(connection, tmp_path) == list(BEFORE_THIS_SLICE)
         existing = ensure_user_profile(connection, TEST_ONLY_EMAIL)
-        fact = accepted(connection, existing.profile_id, STRUCTURED_EXPERIENCE)
+        fact_id = _seed_accepted_fact_pre_0028(
+            connection, existing.profile_id, "EXPERIENCE", STRUCTURED_EXPERIENCE
+        )
 
         assert apply_migrations(connection) == [
             "0009", "0010", "0011", "0012", "0013", "0014", "0015", "0016",
@@ -230,11 +255,12 @@ def test_0009_upgrades_a_database_that_stopped_at_0008(tmp_path):
             "0025",
             "0026",
             "0027",
+            "0028",
         ]
 
         assert {"profile_experiences", "profile_projects"} <= _tables(connection)
         # The facts that existed before the upgrade are untouched by it.
-        assert [row[0] for row in _fact_rows(connection)] == [fact.id]
+        assert [row[0] for row in _fact_rows(connection)] == [fact_id]
         assert _counts(connection) == (0, 0)
     finally:
         connection.close()

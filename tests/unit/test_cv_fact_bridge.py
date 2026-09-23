@@ -328,6 +328,7 @@ def test_this_slice_still_adds_no_migration_of_its_own() -> None:
         "0025_opportunity_fine_classification.sql",
         "0026_recommendation_persistence.sql",
         "0027_cv_staging.sql",
+        "0028_cv_activation.sql",
     ]
 
 
