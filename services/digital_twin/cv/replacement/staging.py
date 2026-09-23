@@ -48,6 +48,7 @@ from services.digital_twin.cv.replacement.models import (
     PROTECTED_DIFFERENCES,
     PlanEntry,
     Replacement,
+    ReplacementAlreadyActivatedError,
     ReplacementClosedError,
     ReplacementLifecycle,
     ReplacementNotFoundError,
@@ -63,24 +64,30 @@ from services.digital_twin.cv.replacement.planning import (
     plan_entry_for,
 )
 from services.digital_twin.cv.replacement.repository import (
+    REPLACEMENT_COLUMNS,
     get_replacement,
     list_staged_decisions,
+    replacement_from_row,
 )
+from services.digital_twin.cv.replacement.review_digest import compute_review_digest
 
 __all__ = [
     "mark_ready_to_activate",
     "mark_ready_to_activate_in_transaction",
     "record_review_decision",
+    "require_complete_current_review",
     "review_progress",
 ]
-
-_REPLACEMENT_COLUMNS = "id, profile_id, extraction_id, baseline_document_id, lifecycle"
 
 
 def _require_open(replacement: Replacement | None, replacement_id: int, profile_id: int):
     if replacement is None:
         raise ReplacementNotFoundError(
             f"replacement {replacement_id} does not belong to profile {profile_id}"
+        )
+    if replacement.is_activated:
+        raise ReplacementAlreadyActivatedError(
+            f"replacement {replacement_id} was activated; its review is closed"
         )
     if replacement.lifecycle not in OPEN_REPLACEMENT_LIFECYCLES:
         raise ReplacementClosedError(
@@ -227,6 +234,17 @@ def record_review_decision(
                     profile_id,
                 ),
             )
+        # The review changed, so the token that described it no longer does.
+        # Clearing it here, in the transaction that writes the answer, is what
+        # makes an activation carrying the old token fail instead of applying
+        # decisions the person never confirmed. It runs even when the attempt is
+        # already REVIEWING: a token can outlive the lifecycle move.
+        connection.execute(
+            """UPDATE profile_cv_replacements
+                  SET ready_review_digest = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND profile_id = ? AND activated_at IS NULL""",
+            (replacement_id, profile_id),
+        )
         if replacement.lifecycle is not ReplacementLifecycle.REVIEWING:
             # PREPARED becomes REVIEWING, and READY_TO_ACTIVATE goes back to it:
             # a completed review must not keep claiming to cover an answer it
@@ -235,7 +253,8 @@ def record_review_decision(
                 """UPDATE profile_cv_replacements
                       SET lifecycle = 'REVIEWING', updated_at = CURRENT_TIMESTAMP
                     WHERE id = ? AND profile_id = ?
-                      AND lifecycle IN ('PREPARED', 'READY_TO_ACTIVATE')""",
+                      AND lifecycle IN ('PREPARED', 'READY_TO_ACTIVATE')
+                      AND activated_at IS NULL""",
                 (replacement_id, profile_id),
             )
         stored = [
@@ -299,20 +318,18 @@ def review_progress(
     return _readiness(plan, decisions)
 
 
-def mark_ready_to_activate_in_transaction(
+def require_complete_current_review(
     connection: sqlite3.Connection, *, profile_id: int, replacement_id: int
-) -> Replacement:
-    """Verify the review and publish READY_TO_ACTIVATE, in one transaction.
+) -> ReplacementPlan:
+    """Prove the review is complete and still describes the database. Reads only.
 
-    This is the **only** place in the package that writes that lifecycle, and
-    the verification is inside it rather than in front of it. There is no entry
-    point that writes it after checking `in_transaction` alone, and no caller
-    can reach the write by promising to have checked first: the check is the
-    first thing this function does, and it is the same check
-    `review_progress` reports, computed by the same `_readiness`.
+    Extracted so that exactly one piece of code answers "may this review be
+    acted on", and both the people who ask — the function that publishes
+    READY_TO_ACTIVATE, and the activation that will apply it — get the same
+    answer from the same `_readiness`. No second, divergent set of rules.
 
-    It opens no transaction and commits none. The caller owns both, which is
-    what makes the verification and the claim land together.
+    Requires the caller's transaction and opens none: the check is only worth
+    anything if it holds until whatever it authorises has been written.
 
     Three ways to fail, all closed:
 
@@ -323,7 +340,7 @@ def mark_ready_to_activate_in_transaction(
     """
     if not connection.in_transaction:
         raise CvStagingError(
-            "marking a replacement ready requires the caller's transaction"
+            "verifying a review requires the caller's transaction"
         )
     _require_open(
         get_replacement(
@@ -357,25 +374,49 @@ def mark_ready_to_activate_in_transaction(
             f"state the database no longer holds "
             f"(candidate_id, fact_id): {progress['stale_targets']}"
         )
+    return plan
+
+
+def mark_ready_to_activate_in_transaction(
+    connection: sqlite3.Connection, *, profile_id: int, replacement_id: int
+) -> Replacement:
+    """Verify the review, store its token and publish READY_TO_ACTIVATE.
+
+    This is the **only** place in the package that writes that lifecycle, and
+    the verification is inside it rather than in front of it: an open
+    transaction is not permission. It opens none and commits none, so the
+    caller's transaction is what makes the check and the claim land together.
+
+    The token is written by the same statement. A review declared ready is
+    therefore never ready without one, which is what lets an activation demand
+    it — and `record_review_decision` clears it again the moment anything
+    changes, so a token always describes the review it was computed from.
+    """
+    plan = require_complete_current_review(
+        connection, profile_id=profile_id, replacement_id=replacement_id
+    )
+    digest = compute_review_digest(
+        connection,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        extraction_id=plan.extraction_id,
+    )
     row = connection.execute(
         f"""UPDATE profile_cv_replacements
-               SET lifecycle = 'READY_TO_ACTIVATE', updated_at = CURRENT_TIMESTAMP
+               SET lifecycle = 'READY_TO_ACTIVATE',
+                   ready_review_digest = ?,
+                   updated_at = CURRENT_TIMESTAMP
              WHERE id = ? AND profile_id = ?
                AND lifecycle IN ('PREPARED', 'REVIEWING', 'READY_TO_ACTIVATE')
-         RETURNING {_REPLACEMENT_COLUMNS}""",
-        (replacement_id, profile_id),
+               AND activated_at IS NULL
+         RETURNING {REPLACEMENT_COLUMNS}""",
+        (digest, replacement_id, profile_id),
     ).fetchone()
     if row is None:
         raise ReplacementNotFoundError(
             f"replacement {replacement_id} of profile {profile_id} is not open"
         )
-    return Replacement(
-        id=row[0],
-        profile_id=row[1],
-        extraction_id=row[2],
-        baseline_document_id=row[3],
-        lifecycle=ReplacementLifecycle(row[4]),
-    )
+    return replacement_from_row(row)
 
 
 def mark_ready_to_activate(

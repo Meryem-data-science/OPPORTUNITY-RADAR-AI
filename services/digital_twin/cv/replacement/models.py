@@ -42,7 +42,20 @@ class ReplacementNotFoundError(CvStagingError):
 
 
 class ReplacementClosedError(CvStagingError):
-    """The attempt is cancelled; it answers no further decision."""
+    """The attempt is closed; it answers no further decision.
+
+    Cancelled, or activated. Both are terminal, for different reasons: a
+    cancelled attempt was abandoned, an activated one was applied.
+    """
+
+
+class ReplacementAlreadyActivatedError(ReplacementClosedError):
+    """The attempt was activated, and an activation is a historical event.
+
+    Its review is closed, its decisions are the ones that were applied, and it
+    can be neither re-opened, re-answered nor cancelled. Migration 0028 enforces
+    the same thing with triggers; this is that refusal said earlier and by name.
+    """
 
 
 class OpenReplacementExistsError(CvStagingError):
@@ -111,6 +124,27 @@ class ReplacementLifecycle(StrEnum):
     #: A complete review exists. In B1a it activates nothing at all.
     READY_TO_ACTIVATE = "READY_TO_ACTIVATE"
     CANCELLED = "CANCELLED"
+
+
+class EffectiveReplacementState(StrEnum):
+    """Where an attempt actually stands, storage and activation read together.
+
+    `profile_cv_replacements.lifecycle` still holds exactly the four values
+    migration 0027 defined; 0028 added `activated_at` beside it rather than a
+    fifth lifecycle value, because adding one to a SQLite `CHECK` would have
+    meant rebuilding the table. So an activated attempt is stored as
+    `READY_TO_ACTIVATE` with `activated_at` set, and **this** is what business
+    code reads: `lifecycle` is a storage column, `effective_state` is the answer
+    to "where is this attempt".
+    """
+
+    PREPARED = "PREPARED"
+    REVIEWING = "REVIEWING"
+    #: A complete, still-current review exists. Nothing has been applied.
+    READY_TO_ACTIVATE = "READY_TO_ACTIVATE"
+    CANCELLED = "CANCELLED"
+    #: Terminal. The review was applied and cannot be reopened.
+    ACTIVATED = "ACTIVATED"
 
 
 OPEN_REPLACEMENT_LIFECYCLES: frozenset[ReplacementLifecycle] = frozenset(
@@ -315,7 +349,36 @@ class Replacement:
     profile_id: int
     extraction_id: int
     baseline_document_id: int | None
+    #: The storage column, exactly as 0027 defines it. Business code reads
+    #: `effective_state`; this stays because an audit needs to see what is
+    #: actually written.
     lifecycle: ReplacementLifecycle
+    #: The aggregate token of the review this attempt was declared ready with.
+    #: `None` until a complete, current review is declared ready, and back to
+    #: `None` the moment any decision changes.
+    ready_review_digest: str | None = None
+    #: Set together, by an activation, and never afterwards.
+    activation_revision: int | None = None
+    activated_at: str | None = None
+
+    @property
+    def is_activated(self) -> bool:
+        return self.activated_at is not None
+
+    @property
+    def effective_state(self) -> EffectiveReplacementState:
+        """Where this attempt stands. `ACTIVATED` outranks the stored lifecycle."""
+        if self.activated_at is not None:
+            return EffectiveReplacementState.ACTIVATED
+        return EffectiveReplacementState(self.lifecycle.value)
+
+    @property
+    def is_open(self) -> bool:
+        """True while the attempt can still be reviewed."""
+        return (
+            not self.is_activated
+            and self.lifecycle in OPEN_REPLACEMENT_LIFECYCLES
+        )
 
     def summary(self) -> dict[str, object]:
         return {
@@ -323,6 +386,10 @@ class Replacement:
             "extraction_id": self.extraction_id,
             "baseline_document_id": self.baseline_document_id,
             "lifecycle": self.lifecycle.value,
+            "effective_state": self.effective_state.value,
+            "ready_review_digest": self.ready_review_digest,
+            "activation_revision": self.activation_revision,
+            "activated_at": self.activated_at,
         }
 
 

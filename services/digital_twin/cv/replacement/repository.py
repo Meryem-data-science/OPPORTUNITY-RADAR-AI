@@ -44,6 +44,7 @@ from services.digital_twin.cv.replacement.models import (
     OPEN_REPLACEMENT_LIFECYCLES,
     OpenReplacementExistsError,
     Replacement,
+    ReplacementAlreadyActivatedError,
     ReplacementLifecycle,
     ReplacementNotFoundError,
     ReviewDecision,
@@ -51,7 +52,10 @@ from services.digital_twin.cv.replacement.models import (
 )
 
 __all__ = [
+    "DecisionDigestInput",
     "ExtractionOutcome",
+    "REPLACEMENT_COLUMNS",
+    "replacement_from_row",
     "BaselineFact",
     "cancel_replacement",
     "declare_active_cv_document",
@@ -61,9 +65,11 @@ __all__ = [
     "get_active_cv_document",
     "get_cv_document",
     "get_extraction",
+    "get_open_replacement",
     "get_replacement",
     "list_baseline_cv_facts",
     "list_fact_source_types",
+    "list_decision_digest_inputs",
     "list_staged_decisions",
     "open_replacement",
     "set_replacement_lifecycle",
@@ -76,9 +82,14 @@ _EXTRACTION_COLUMNS = (
     "id, document_id, profile_id, parser_version, extractor_version, attempt_no, "
     "candidate_count, manifest_chain_digest, manifest_state"
 )
-_REPLACEMENT_COLUMNS = (
-    "id, profile_id, extraction_id, baseline_document_id, lifecycle"
+#: Not private, and not duplicated elsewhere: `staging` writes the one
+#: `READY_TO_ACTIVATE` statement there is and needs the same shape back, and two
+#: copies of a column list are one copy too many.
+REPLACEMENT_COLUMNS = (
+    "id, profile_id, extraction_id, baseline_document_id, lifecycle, "
+    "ready_review_digest, activation_revision, activated_at"
 )
+_REPLACEMENT_COLUMNS = REPLACEMENT_COLUMNS
 _DECISION_COLUMNS = (
     "id, replacement_id, profile_id, role, candidate_id, fact_id, difference, "
     "decision, staged_value IS NOT NULL, fact_status_at_decision, "
@@ -112,14 +123,21 @@ def _extraction_from_row(row: tuple) -> CvExtraction:
     )
 
 
-def _replacement_from_row(row: tuple) -> Replacement:
+def replacement_from_row(row: tuple) -> Replacement:
+    """Decode a `REPLACEMENT_COLUMNS` row, activation metadata included."""
     return Replacement(
         id=row[0],
         profile_id=row[1],
         extraction_id=row[2],
         baseline_document_id=row[3],
         lifecycle=ReplacementLifecycle(row[4]),
+        ready_review_digest=row[5],
+        activation_revision=None if row[6] is None else int(row[6]),
+        activated_at=row[7],
     )
+
+
+_replacement_from_row = replacement_from_row
 
 
 def _decision_from_row(row: tuple) -> StagedDecision:
@@ -479,7 +497,8 @@ def get_open_replacement(
     row = connection.execute(
         f"""SELECT {_REPLACEMENT_COLUMNS} FROM profile_cv_replacements
              WHERE profile_id = ?
-               AND lifecycle IN ('PREPARED', 'REVIEWING', 'READY_TO_ACTIVATE')""",
+               AND lifecycle IN ('PREPARED', 'REVIEWING', 'READY_TO_ACTIVATE')
+               AND activated_at IS NULL""",
         (profile_id,),
     ).fetchone()
     return None if row is None else _replacement_from_row(row)
@@ -514,7 +533,8 @@ def open_replacement(
         open_row = connection.execute(
             f"""SELECT {_REPLACEMENT_COLUMNS} FROM profile_cv_replacements
                  WHERE profile_id = ?
-                   AND lifecycle IN ('PREPARED', 'REVIEWING', 'READY_TO_ACTIVATE')""",
+                   AND lifecycle IN ('PREPARED', 'REVIEWING', 'READY_TO_ACTIVATE')
+                   AND activated_at IS NULL""",
             (profile_id,),
         ).fetchone()
         if open_row is not None:
@@ -587,6 +607,12 @@ def set_replacement_lifecycle(
                 f"replacement {replacement_id} does not belong to profile {profile_id}"
             )
         existing = _replacement_from_row(current)
+        if existing.is_activated:
+            connection.execute("ROLLBACK")
+            raise ReplacementAlreadyActivatedError(
+                f"replacement {replacement_id} was activated and cannot be "
+                f"{target.value.lower()}"
+            )
         if existing.lifecycle not in OPEN_REPLACEMENT_LIFECYCLES:
             connection.execute("ROLLBACK")
             raise CvStagingError("a closed replacement does not move again")
@@ -595,7 +621,7 @@ def set_replacement_lifecycle(
                    SET lifecycle = ?,
                        updated_at = CURRENT_TIMESTAMP,
                        closed_at = {"CURRENT_TIMESTAMP" if closing else "NULL"}
-                 WHERE id = ? AND profile_id = ?
+                 WHERE id = ? AND profile_id = ? AND activated_at IS NULL
              RETURNING {_REPLACEMENT_COLUMNS}""",
             (target.value, replacement_id, profile_id),
         ).fetchone()
@@ -635,6 +661,69 @@ def list_staged_decisions(
         (replacement_id, profile_id),
     ).fetchall()
     return tuple(_decision_from_row(row) for row in rows)
+
+
+@dataclass(frozen=True)
+class DecisionDigestInput:
+    """One decision, reduced to what an aggregate review token may cover.
+
+    The staged values are already SHA-256 digests here. That is the whole point
+    of this shape: the plaintext a person typed is read inside
+    `list_decision_digest_inputs` and never leaves it, so nothing downstream —
+    a digest, a log line, an error message — can carry it even by accident.
+
+    `None` means *no staged value*, and it is kept distinct from the digest of
+    an empty string, which is a value somebody could have typed.
+    """
+
+    role: str
+    candidate_id: int | None
+    fact_id: int | None
+    difference: str
+    decision: str
+    review_state_digest: str
+    staged_value_digest: str | None
+    staged_normalized_value_digest: str | None
+
+
+def _value_digest(value: object) -> str | None:
+    if value is None:
+        return None
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def list_decision_digest_inputs(
+    connection: sqlite3.Connection, *, profile_id: int, replacement_id: int
+) -> tuple[DecisionDigestInput, ...]:
+    """Every stored decision of this review, with its staged values hashed.
+
+    Ordered by `(role, candidate_id, fact_id)` with the absent id sorting first,
+    so the sequence is a function of the review and not of insertion order or of
+    SQLite's row ids.
+    """
+    rows = connection.execute(
+        """SELECT role, candidate_id, fact_id, difference, decision,
+                  review_state_digest, staged_value, staged_normalized_value
+             FROM profile_cv_replacement_decisions
+            WHERE replacement_id = ? AND profile_id = ?
+            ORDER BY role,
+                     CASE WHEN candidate_id IS NULL THEN 0 ELSE 1 END, candidate_id,
+                     CASE WHEN fact_id IS NULL THEN 0 ELSE 1 END, fact_id""",
+        (replacement_id, profile_id),
+    ).fetchall()
+    return tuple(
+        DecisionDigestInput(
+            role=row[0],
+            candidate_id=None if row[1] is None else int(row[1]),
+            fact_id=None if row[2] is None else int(row[2]),
+            difference=row[3],
+            decision=row[4],
+            review_state_digest=row[5],
+            staged_value_digest=_value_digest(row[6]),
+            staged_normalized_value_digest=_value_digest(row[7]),
+        )
+        for row in rows
+    )
 
 
 # ------------------------------------------------------------ baseline facts
