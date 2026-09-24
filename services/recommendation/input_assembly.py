@@ -254,6 +254,18 @@ class RecommendationReadinessIssueCode(StrEnum):
     PROFILE_CV_ACTIVATION_PENDING_SYNC = "PROFILE_CV_ACTIVATION_PENDING_SYNC"
 
 
+#: The wording that accompanies the code above, kept beside it rather than in
+#: the activation: the CV package writes this issue, and the recommendation
+#: reader derives the same one when a stored READY turns out to have been
+#: overtaken. One message, so the two can never drift apart, and it is declared
+#: here because this is the module that owns the code.
+PROFILE_CV_ACTIVATION_PENDING_SYNC_MESSAGE = (
+    "a CV replacement was activated; skills, structured profile, eligibility, "
+    "Matching, Recommendation, Priority and Portfolio must be synchronized "
+    "again, in that order, before a recommendation describes this profile"
+)
+
+
 @dataclass(frozen=True)
 class RecommendationReadinessIssue:
     code: RecommendationReadinessIssueCode

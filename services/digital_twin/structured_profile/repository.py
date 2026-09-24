@@ -70,6 +70,10 @@ from services.digital_twin.structured_profile.structurer import (
     structure_language,
     structure_project,
 )
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 #: The one reading this projection is built on, written out once per type. The
 #: fact type and `ACCEPTED` are literals inside each statement rather than
@@ -443,6 +447,12 @@ def synchronize_structured_profile_entries(
             rows[projection.counted] = _count(
                 connection, projection.table, profile_id
             )
+        # Rebuilt from the facts this transaction read, so the claim is true
+        # exactly here, and it is undone with everything else if the `COMMIT`
+        # below never happens.
+        advance_sync_watermark_in_transaction(
+            connection, profile_id=profile_id, phase=SyncPhase.STRUCTURED_PROFILE
+        )
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from services.profile_revision.watermark import SyncPhase, phase_is_current
+
 
 class MatchingReadError(RuntimeError):
     """Raised when persisted matching data cannot be read safely."""
@@ -183,6 +185,10 @@ def list_matching_runs(
         (profile_id,),
     ).fetchone()
     current_run_id = None if state is None else state[0]
+    if not phase_is_current(connection, profile_id, SyncPhase.MATCHING):
+        # The history is still listed in full; none of it is `is_current`.
+        # A run computed for an earlier profile revision is history now.
+        current_run_id = None
     rows = connection.execute(
         """SELECT id,created_at,assessment_count,persistence_version,selection_version,
         matching_engine_version,matching_rules_version,semantic_percentile_version,
@@ -201,6 +207,18 @@ def read_current_matching(
     history_count = connection.execute(
         "SELECT COUNT(*) FROM matching_runs WHERE profile_id=?", (profile_id,)
     ).fetchone()[0]
+    if not phase_is_current(connection, profile_id, SyncPhase.MATCHING):
+        # A CV activation created a new profile revision and this phase, or
+        # something it is derived from, has not been recomputed for it. The
+        # stored state row is left exactly as it is — this is a derived answer,
+        # not a deletion — and the history stays readable through
+        # `read_matching_run` and `list_matching_runs`. What the caller is told
+        # is the one thing that matters here: there is no result to present as
+        # current. `NOT_SYNCED` is the existing vocabulary for that, so no new
+        # status reaches the API or the pages.
+        return MatchingProfileReadModel(
+            profile_id, "NOT_SYNCED", None, None, None, None, history_count
+        )
     state = connection.execute(
         """SELECT state,current_run_id,persistence_version,selection_version
         FROM matching_profile_state WHERE profile_id=?""",

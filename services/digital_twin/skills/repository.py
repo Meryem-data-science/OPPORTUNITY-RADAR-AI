@@ -38,6 +38,10 @@ from services.digital_twin.skills.models import (
     Skill,
 )
 from services.digital_twin.skills.normalizer import normalize_skill
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 #: The one reading this projection is built on. `SKILL` and `ACCEPTED` are
 #: written into the statement rather than passed in, so no caller can widen it.
@@ -319,6 +323,12 @@ def synchronize_profile_skills(
         remaining = connection.execute(
             "SELECT COUNT(*) FROM profile_skills WHERE profile_id = ?", (profile_id,)
         ).fetchone()[0]
+        # The projection has just been rebuilt from the facts as this
+        # transaction sees them, so this is the moment the claim becomes true —
+        # and it lands under the same `COMMIT`, or not at all.
+        advance_sync_watermark_in_transaction(
+            connection, profile_id=profile_id, phase=SyncPhase.SKILLS
+        )
         connection.execute("COMMIT")
     except Exception:
         connection.execute("ROLLBACK")

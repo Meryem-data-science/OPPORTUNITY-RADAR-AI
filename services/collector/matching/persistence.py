@@ -1,4 +1,16 @@
-"""Atomic, append-only persistence for already-computed matching batches."""
+"""Atomic, append-only persistence for already-computed matching batches.
+
+Everything here receives a batch that was scored somewhere else. That is what
+the module is for, and it is also its limit: it never sees the profile the batch
+was computed from, so it is in no position to certify that the run describes the
+profile as it stands now. None of these functions writes a synchronization
+watermark. `sync_matching` computes and persists under one `BEGIN IMMEDIATE`,
+and is therefore the only caller entitled to make that claim.
+
+Each write comes in two forms: a `*_in_transaction` primitive that borrows the
+caller's transaction, and the historical public function that owns one. The
+persistence contract of the public form is unchanged.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +42,19 @@ from .persistence_fingerprint import (
 
 class MatchingPersistenceError(RuntimeError):
     """Raised when matching data cannot be safely persisted."""
+
+
+def _require_transaction(connection: sqlite3.Connection, what: str) -> None:
+    """A primitive runs inside its caller's transaction, or not at all.
+
+    Refusing here rather than writing outside one is what makes the extraction
+    safe: a caller that forgot the `BEGIN IMMEDIATE` gets an error instead of a
+    half-published snapshot nobody is holding a lock for.
+    """
+    if not connection.in_transaction:
+        raise MatchingPersistenceError(
+            f"{what} requires the transaction its caller opened"
+        )
 
 
 @dataclass(frozen=True)
@@ -260,6 +285,107 @@ def _verify_existing(
         raise MatchingPersistenceError("existing run assessments are corrupt")
 
 
+def store_matching_batch_in_transaction(
+    connection: sqlite3.Connection,
+    profile_id: int,
+    batch: MatchingBatchResult,
+    *,
+    selection_version: str,
+    after_assessment_insert=None,
+) -> MatchingStoreResult:
+    """`store_matching_batch`, in the transaction the caller already opened.
+
+    It opens none, commits none and rolls none back. That is what lets
+    `sync_matching` hold one `BEGIN IMMEDIATE` across the selection, the
+    profile read, the scoring and this write — so the batch cannot have been
+    computed from a profile that changed before it landed.
+
+    It writes no watermark. Storing a batch is not evidence that the batch
+    describes the profile as it is now; only the caller that just computed it
+    under this transaction knows that, and only that caller may say so.
+    """
+    _require_transaction(connection, "storing a matching batch")
+    prepared, batch_payload, run_fp = _prepare(profile_id, batch, selection_version)
+    if (
+        connection.execute(
+            "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
+        ).fetchone()
+        is None
+    ):
+        raise MatchingPersistenceError(f"profile {profile_id} does not exist")
+    missing = [
+        item.opportunity_id
+        for item, _ in prepared
+        if connection.execute(
+            "SELECT 1 FROM opportunities WHERE id=?", (item.opportunity_id,)
+        ).fetchone()
+        is None
+    ]
+    if missing:
+        raise MatchingPersistenceError(f"opportunities do not exist: {missing}")
+    found = connection.execute(
+        "SELECT id,profile_id,persistence_version,selection_version,matching_engine_version,matching_rules_version,semantic_percentile_version,corpus_fingerprint,tfidf_model_fingerprint,batch_fingerprint,assessment_count,batch_payload_json FROM matching_runs WHERE run_fingerprint=?",
+        (run_fp,),
+    ).fetchone()
+    created = found is None
+    if found is not None:
+        _verify_existing(
+            connection,
+            found,
+            profile_id,
+            batch,
+            selection_version,
+            prepared,
+            batch_payload,
+        )
+        run_id = int(found[0])
+    else:
+        row = connection.execute(
+            """INSERT INTO matching_runs (profile_id,persistence_version,selection_version,matching_engine_version,matching_rules_version,semantic_percentile_version,corpus_fingerprint,tfidf_model_fingerprint,batch_fingerprint,run_fingerprint,assessment_count,batch_payload_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""",
+            (
+                profile_id,
+                MATCHING_PERSISTENCE_VERSION,
+                selection_version,
+                batch.matching_engine_version,
+                batch.matching_rules_version,
+                batch.semantic_percentile_version,
+                batch.corpus_fingerprint,
+                batch.tfidf_model_fingerprint,
+                batch.batch_fingerprint,
+                run_fp,
+                batch.assessment_count,
+                batch_payload,
+            ),
+        ).fetchone()
+        run_id = int(row[0])
+        for position, (item, payload) in enumerate(prepared):
+            connection.execute(
+                "INSERT INTO matching_assessments (run_id,opportunity_id,lane,match_quality,evidence_coverage,assessment_fingerprint,assessment_payload_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    item.opportunity_id,
+                    item.lane.value,
+                    item.match_quality,
+                    item.evidence_coverage,
+                    item.assessment_fingerprint,
+                    payload,
+                ),
+            )
+            if after_assessment_insert is not None:
+                after_assessment_insert(position)
+        if (
+            connection.execute(
+                "SELECT COUNT(*) FROM matching_assessments WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+            != batch.assessment_count
+        ):
+            raise MatchingPersistenceError("stored assessment count mismatch")
+    _upsert_state(connection, profile_id, "READY", run_id, selection_version)
+    return MatchingStoreResult(run_id, run_fp, created)
+
+
 def store_matching_batch(
     connection: sqlite3.Connection,
     profile_id: int,
@@ -268,116 +394,77 @@ def store_matching_batch(
     selection_version: str,
     after_assessment_insert=None,
 ) -> MatchingStoreResult:
-    """Store one precomputed batch atomically; reuse and audit identical runs."""
-    prepared, batch_payload, run_fp = _prepare(profile_id, batch, selection_version)
+    """Store one precomputed batch atomically; reuse and audit identical runs.
+
+    The historical entry point, and its persistence contract is unchanged: one
+    `BEGIN IMMEDIATE`, one `COMMIT`, the same reuse and the same audit.
+
+    What it deliberately does **not** do is advance the Matching watermark. The
+    batch reached it already computed, from a profile this transaction never
+    saw, so it cannot certify that the run describes the active revision — and a
+    batch computed before a CV activation must never be able to claim the
+    revision that activation created. Only `sync_matching`, which computes and
+    persists under one transaction, is in a position to make that claim.
+    """
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if (
-            connection.execute(
-                "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
-            ).fetchone()
-            is None
-        ):
-            raise MatchingPersistenceError(f"profile {profile_id} does not exist")
-        missing = [
-            item.opportunity_id
-            for item, _ in prepared
-            if connection.execute(
-                "SELECT 1 FROM opportunities WHERE id=?", (item.opportunity_id,)
-            ).fetchone()
-            is None
-        ]
-        if missing:
-            raise MatchingPersistenceError(f"opportunities do not exist: {missing}")
-        found = connection.execute(
-            "SELECT id,profile_id,persistence_version,selection_version,matching_engine_version,matching_rules_version,semantic_percentile_version,corpus_fingerprint,tfidf_model_fingerprint,batch_fingerprint,assessment_count,batch_payload_json FROM matching_runs WHERE run_fingerprint=?",
-            (run_fp,),
-        ).fetchone()
-        created = found is None
-        if found is not None:
-            _verify_existing(
-                connection,
-                found,
-                profile_id,
-                batch,
-                selection_version,
-                prepared,
-                batch_payload,
-            )
-            run_id = int(found[0])
-        else:
-            row = connection.execute(
-                """INSERT INTO matching_runs (profile_id,persistence_version,selection_version,matching_engine_version,matching_rules_version,semantic_percentile_version,corpus_fingerprint,tfidf_model_fingerprint,batch_fingerprint,run_fingerprint,assessment_count,batch_payload_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id""",
-                (
-                    profile_id,
-                    MATCHING_PERSISTENCE_VERSION,
-                    selection_version,
-                    batch.matching_engine_version,
-                    batch.matching_rules_version,
-                    batch.semantic_percentile_version,
-                    batch.corpus_fingerprint,
-                    batch.tfidf_model_fingerprint,
-                    batch.batch_fingerprint,
-                    run_fp,
-                    batch.assessment_count,
-                    batch_payload,
-                ),
-            ).fetchone()
-            run_id = int(row[0])
-            for position, (item, payload) in enumerate(prepared):
-                connection.execute(
-                    "INSERT INTO matching_assessments (run_id,opportunity_id,lane,match_quality,evidence_coverage,assessment_fingerprint,assessment_payload_json) VALUES (?,?,?,?,?,?,?)",
-                    (
-                        run_id,
-                        item.opportunity_id,
-                        item.lane.value,
-                        item.match_quality,
-                        item.evidence_coverage,
-                        item.assessment_fingerprint,
-                        payload,
-                    ),
-                )
-                if after_assessment_insert is not None:
-                    after_assessment_insert(position)
-            if (
-                connection.execute(
-                    "SELECT COUNT(*) FROM matching_assessments WHERE run_id=?",
-                    (run_id,),
-                ).fetchone()[0]
-                != batch.assessment_count
-            ):
-                raise MatchingPersistenceError("stored assessment count mismatch")
-        _upsert_state(connection, profile_id, "READY", run_id, selection_version)
+        result = store_matching_batch_in_transaction(
+            connection,
+            profile_id,
+            batch,
+            selection_version=selection_version,
+            after_assessment_insert=after_assessment_insert,
+        )
         connection.execute("COMMIT")
-        return MatchingStoreResult(run_id, run_fp, created)
+        return result
     except BaseException:
-        connection.execute("ROLLBACK")
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         raise
 
 
-def set_matching_state_empty(
+def set_matching_state_empty_in_transaction(
     connection: sqlite3.Connection, profile_id: int, *, selection_version: str
 ) -> None:
+    """`set_matching_state_empty`, in the transaction the caller already opened.
+
+    Writes no watermark, for the same reason the batch primitive does not: the
+    emptiness was decided by a selection this call never saw.
+    """
+    _require_transaction(connection, "publishing an empty matching state")
     if (
         not isinstance(profile_id, int)
         or profile_id <= 0
         or not _valid_text(selection_version)
     ):
         raise MatchingPersistenceError("invalid EMPTY state arguments")
+    if (
+        connection.execute(
+            "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
+        ).fetchone()
+        is None
+    ):
+        raise MatchingPersistenceError(f"profile {profile_id} does not exist")
+    _upsert_state(connection, profile_id, "EMPTY", None, selection_version)
+
+
+def set_matching_state_empty(
+    connection: sqlite3.Connection, profile_id: int, *, selection_version: str
+) -> None:
+    """Publish the EMPTY state on its own. Persistence contract unchanged.
+
+    Like `store_matching_batch`, it advances no watermark: the selection that
+    found nothing to match happened outside this transaction.
+    """
     connection.execute("BEGIN IMMEDIATE")
     try:
-        if (
-            connection.execute(
-                "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
-            ).fetchone()
-            is None
-        ):
-            raise MatchingPersistenceError(f"profile {profile_id} does not exist")
-        _upsert_state(connection, profile_id, "EMPTY", None, selection_version)
+        set_matching_state_empty_in_transaction(
+            connection, profile_id, selection_version=selection_version
+        )
         connection.execute("COMMIT")
     except BaseException:
-        connection.execute("ROLLBACK")
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
         raise
 
 

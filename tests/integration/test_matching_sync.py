@@ -186,7 +186,9 @@ def test_persistence_failure_preserves_last_good_state(database, monkeypatch):
     def fail_persistence(*args, **kwargs):
         raise RuntimeError("injected persistence failure")
 
-    monkeypatch.setattr(matching_sync, "store_matching_batch", fail_persistence)
+    monkeypatch.setattr(
+        matching_sync, "store_matching_batch_in_transaction", fail_persistence
+    )
     with pytest.raises(RuntimeError, match="persistence failure"):
         sync_matching(connection, profile_id)
 

@@ -47,6 +47,13 @@ from services.eligibility.repository import (
     store_eligibility,
     stored_eligibility_signature,
 )
+from services.profile_revision.watermark import (
+    SyncPhase,
+    active_profile_revision,
+    advance_sync_watermark_if_unchanged,
+    read_sync_watermark,
+    required_phases,
+)
 
 __all__ = [
     "MISSING_REQUIREMENTS_ERROR",
@@ -234,6 +241,25 @@ def synchronize_eligibility(
             f"profile {profile_id} does not belong to user {user_id}"
         )
 
+    # Captured before anything else, and before the person's side is loaded:
+    # this is the revision the whole run will be computed against. The question
+    # it answers is about *this profile*, so it is asked before the corpus-wide
+    # prerequisite below — a run against skills that still describe the previous
+    # CV has nothing to gain from reading the postings first.
+    revision = active_profile_revision(connection, profile_id)
+    if revision:
+        behind = [
+            phase.value
+            for phase in required_phases(SyncPhase.ELIGIBILITY)
+            if read_sync_watermark(connection, profile_id, phase) != revision
+        ]
+        if behind:
+            raise EligibilityServiceError(
+                f"eligibility cannot be synchronized for revision {revision} of "
+                f"profile {profile_id}: {', '.join(behind)} "
+                f"{'is' if len(behind) == 1 else 'are'} not synchronized yet"
+            )
+
     timestamp = evaluated_at or datetime.now(UTC).isoformat(timespec="microseconds")
     scope = in_scope_opportunity_ids(connection, limit=limit)
     if any(not read for _, read in scope):
@@ -270,6 +296,19 @@ def synchronize_eligibility(
             created += 1
         else:
             replaced += 1
+
+    # Every posting was its own transaction, so there is no single write for
+    # the claim to sit beside. It is made here instead, once the whole loop has
+    # succeeded, under one `BEGIN IMMEDIATE` that reads the revision again: an
+    # activation that landed mid-run leaves the watermark where it was, because
+    # the corpus then describes two different people. A posting that raised
+    # never reaches this line.
+    advance_sync_watermark_if_unchanged(
+        connection,
+        profile_id=profile_id,
+        phase=SyncPhase.ELIGIBILITY,
+        expected_revision=revision,
+    )
 
     return EligibilitySyncSummary(
         processed=len(scope),

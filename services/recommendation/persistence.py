@@ -68,6 +68,10 @@ from .persistence_fingerprint import (
     RECOMMENDATION_PERSISTENCE_VERSION,
     recommendation_run_fingerprint,
 )
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 __all__ = [
     "RecommendationPersistenceError",
@@ -617,6 +621,14 @@ def _store_prepared_recommendation_batch_in_transaction(
         ):
             raise RecommendationPersistenceError("stored assessment count mismatch")
     _upsert_ready_state(connection, profile_id, run_id, input_assembly_version)
+    # READY is the claim that this run is the recommendation to serve. It is
+    # made in the caller's transaction, beside the state row it qualifies, and
+    # it is refused while Matching or Eligibility is behind the active
+    # revision — so the INCOMPLETE an activation published cannot be cleared by
+    # a run assembled from projections that still describe the previous CV.
+    advance_sync_watermark_in_transaction(
+        connection, profile_id=profile_id, phase=SyncPhase.RECOMMENDATION
+    )
     return RecommendationStoreResult(run_id, run_fingerprint, created)
 
 

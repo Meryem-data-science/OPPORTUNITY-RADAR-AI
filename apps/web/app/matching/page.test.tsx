@@ -40,7 +40,10 @@ describe("MatchingPage", () => {
     expect(renderToStaticMarkup(await MatchingPage())).toContain("Matching temporairement indisponible");
     load.mockResolvedValueOnce({ ...ready, status: "NOT_SYNCED", current_run: null });
     const notSynced = renderToStaticMarkup(await MatchingPage());
-    expect(notSynced).toContain("Matching non encore calculé");
+    expect(notSynced).toContain("Matching à synchroniser");
+    // The wording must not claim nothing was ever recorded: NOT_SYNCED is also
+    // what a result superseded by a CV activation reads as.
+    expect(notSynced).not.toContain("encore été enregistré");
     expect(notSynced).not.toMatch(/<button|Recalculer|Synchroniser/);
     load.mockResolvedValueOnce({ ...ready, status: "EMPTY", current_run: null });
     expect(renderToStaticMarkup(await MatchingPage())).toContain("Aucune opportunité dans le périmètre");

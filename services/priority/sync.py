@@ -16,6 +16,10 @@ from .input_assembly import (
 )
 from .models import PriorityCategory
 from .persistence import PriorityPersistenceError, store_priority_batch
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 
 class PrioritySyncError(RuntimeError):
@@ -133,6 +137,14 @@ def sync_priority(
             matching_run_fingerprint=matching[1],
             evaluation_date=evaluation_date,
             assessments=assessments,
+        )
+        # Scored from the matching snapshot this transaction just proved
+        # current, so the claim is true here and nowhere earlier. It is refused
+        # if Matching itself has not caught up with the active revision, which
+        # is what stops a stale ranking from being published as the current one
+        # after a CV activation.
+        advance_sync_watermark_in_transaction(
+            connection, profile_id=profile_id, phase=SyncPhase.PRIORITY
         )
         connection.execute("COMMIT")
         return PrioritySyncResult(

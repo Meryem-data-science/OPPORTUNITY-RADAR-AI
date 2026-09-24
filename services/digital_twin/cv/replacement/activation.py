@@ -8,11 +8,12 @@ statement that the persisted Recommendation no longer describes this profile. A
 database where half of that happened would be a Digital Twin whose facts and
 whose active CV disagree, with nothing to say which of the two is right.
 
-What this step does **not** do: gate the other downstream results. Matching,
-Priority and Portfolio still hold what they held, and nothing here stops a
-synchronization that starts after this commit from recomputing one of them from
-a half-migrated profile. Advancing the watermark, the per-phase revision
-protocol and the read-model gating that close both of those gaps are B1b-C.
+What this step does **not** do: advance anything. It writes no watermark, so
+every phase is left visibly behind the revision it has just created. That is
+the whole mechanism — `services/profile_revision/watermark.py` turns "behind"
+into "not presentable as current" for the readers, and each phase's own owner
+advances its watermark only when it has actually recomputed and published. The
+activation's one job here is to create the new revision and say so.
 
 So there is one `BEGIN IMMEDIATE`, opened **before the first business read**,
 and one `COMMIT`. `IMMEDIATE` rather than deferred is the point rather than a
@@ -92,6 +93,7 @@ from services.digital_twin.facts.repository import (
     retire_profile_fact_in_transaction,
 )
 from services.recommendation.input_assembly import (
+    PROFILE_CV_ACTIVATION_PENDING_SYNC_MESSAGE,
     RECOMMENDATION_INPUT_ASSEMBLY_VERSION,
     RecommendationReadinessIssue,
     RecommendationReadinessIssueCode,
@@ -114,13 +116,13 @@ __all__ = [
 #: recommendation describes a profile that no longer exists, and nothing
 #: downstream has caught up yet. Written by the activation itself, in its own
 #: transaction, so there is no instant in which the Recommendation is still
-#: served as current for a CV it was not computed from. It says nothing about
-#: the other phases, which B1b-C is what gates.
-PENDING_SYNC_MESSAGE = (
-    "a CV replacement was activated; skills, structured profile, eligibility, "
-    "Matching, Recommendation, Priority and Portfolio must be synchronized "
-    "again, in that order, before a recommendation describes this profile"
-)
+#: served as current for a CV it was not computed from.
+#:
+#: The wording lives beside the readiness code it accompanies, in
+#: `services/recommendation/input_assembly.py`, because the recommendation
+#: reader derives the same issue when it finds a stored READY that a later
+#: activation overtook. Two places saying it in two ways would be two answers.
+PENDING_SYNC_MESSAGE = PROFILE_CV_ACTIVATION_PENDING_SYNC_MESSAGE
 
 
 class ReviewChangedError(CvStagingError):
