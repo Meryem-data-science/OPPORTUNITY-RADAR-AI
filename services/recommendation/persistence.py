@@ -68,10 +68,15 @@ from .persistence_fingerprint import (
     RECOMMENDATION_PERSISTENCE_VERSION,
     recommendation_run_fingerprint,
 )
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 __all__ = [
     "RecommendationPersistenceError",
     "RecommendationStoreResult",
+    "set_recommendation_state_incomplete_in_transaction",
     "store_recommendation_batch",
 ]
 
@@ -397,7 +402,7 @@ def _require_transaction(connection: sqlite3.Connection, what: str) -> None:
         )
 
 
-def _set_recommendation_state_incomplete_in_transaction(
+def set_recommendation_state_incomplete_in_transaction(
     connection: sqlite3.Connection,
     profile_id: int,
     *,
@@ -616,6 +621,14 @@ def _store_prepared_recommendation_batch_in_transaction(
         ):
             raise RecommendationPersistenceError("stored assessment count mismatch")
     _upsert_ready_state(connection, profile_id, run_id, input_assembly_version)
+    # READY is the claim that this run is the recommendation to serve. It is
+    # made in the caller's transaction, beside the state row it qualifies, and
+    # it is refused while Matching or Eligibility is behind the active
+    # revision — so the INCOMPLETE an activation published cannot be cleared by
+    # a run assembled from projections that still describe the previous CV.
+    advance_sync_watermark_in_transaction(
+        connection, profile_id=profile_id, phase=SyncPhase.RECOMMENDATION
+    )
     return RecommendationStoreResult(run_id, run_fingerprint, created)
 
 
@@ -668,3 +681,13 @@ def store_recommendation_batch(
     except BaseException:
         connection.execute("ROLLBACK")
         raise
+
+
+#: The private spelling this module has used since Phase 9B.3, kept so the
+#: synchronization that already imports it is untouched. The public name exists
+#: because a CV activation publishes the same state, from its own transaction,
+#: and reaching for an underscore from another package would be a boundary
+#: crossed quietly rather than on purpose.
+_set_recommendation_state_incomplete_in_transaction = (
+    set_recommendation_state_incomplete_in_transaction
+)

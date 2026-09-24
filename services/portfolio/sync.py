@@ -17,6 +17,10 @@ from .input_assembly import (
 )
 from .models import PortfolioBucket, PortfolioDisposition
 from .persistence import PortfolioPersistenceError, store_portfolio_batch
+from services.profile_revision.watermark import (
+    SyncPhase,
+    advance_sync_watermark_in_transaction,
+)
 
 
 class PortfolioSyncError(RuntimeError):
@@ -124,6 +128,13 @@ def sync_portfolio(
         buckets = {bucket.value: counts[bucket] for bucket in PortfolioBucket}
         included = sum(
             a.disposition is PortfolioDisposition.INCLUDED for a in assessments
+        )
+        # Classified from the priority run this transaction just proved
+        # current. Refused while Priority or Matching is behind the active
+        # revision, so a portfolio can never be published as current on top of
+        # a ranking that still describes the previous CV.
+        advance_sync_watermark_in_transaction(
+            connection, profile_id=profile_id, phase=SyncPhase.PORTFOLIO
         )
         connection.execute("COMMIT")
         return PortfolioSyncResult(

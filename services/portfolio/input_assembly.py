@@ -15,7 +15,7 @@ from services.collector.matching import (
     read_matching_run,
 )
 from services.priority import PriorityProfileAuditStatus, audit_current_priority
-from services.priority.read_model import read_current_priority
+from services.priority.read_model import PriorityReadError, read_current_priority
 
 from .models import PortfolioInput
 
@@ -130,21 +130,69 @@ def _required_skill(payload: Mapping[str, Any]) -> tuple[float | None, int, int]
     return stable_score, matched, total
 
 
+def _readable_current_priority(connection: sqlite3.Connection, profile_id: int):
+    """The derived Priority state, or `None` when it cannot be described at all.
+
+    `read_current_priority` refuses a stored Priority that is incoherent — runs
+    with no state row, a state disagreeing with the run it names. That is
+    corruption rather than staleness, and it is the audit's job to say so, so it
+    is turned into "no current run" here and named by `_priority_unavailable`.
+    """
+    try:
+        return read_current_priority(connection, profile_id)
+    except PriorityReadError:
+        return None
+
+
+def _priority_unavailable(
+    connection: sqlite3.Connection, profile_id: int
+) -> PortfolioAssemblyIssue:
+    """Say *why* there is no Priority to build on, using Priority's own audit.
+
+    Three ways to have no current run, and the audit tells them apart: nothing
+    has ever been synchronized, the stored snapshot is corrupt, or — the one
+    B1b-C adds — the snapshot is intact and belongs to an earlier profile
+    revision. The audit passes in that last case, which is exactly why it cannot
+    be the thing that decides, and why the answer there is NOT_SYNCED.
+    """
+    audit = audit_current_priority(connection, profile_id)
+    if (
+        audit.status is not PriorityProfileAuditStatus.NOT_SYNCED
+        and audit.status is not PriorityProfileAuditStatus.READY
+    ):
+        return _issue(
+            PortfolioAssemblyIssueCode.PRIORITY_AUDIT_CORRUPT,
+            "current Priority snapshot failed audit",
+        )
+    return _issue(
+        PortfolioAssemblyIssueCode.PRIORITY_NOT_SYNCED, "Priority is not synced"
+    )
+
+
 def assemble_portfolio_inputs(
     connection: sqlite3.Connection, profile_id: int
 ) -> PortfolioAssemblyResult:
     """Assemble the whole current Priority cohort, without writes or scoring."""
-    priority_audit = audit_current_priority(connection, profile_id)
-    if priority_audit.status is PriorityProfileAuditStatus.NOT_SYNCED:
+    # The derived state decides whether there is anything to build on, and the
+    # audit is asked only about a run that would actually be used. The question
+    # asked of it is the only one that matters here — is there a current run to
+    # build on — so it is `current_run` that is read, not the status beside it.
+    # `read_current_priority` already answers `None` for every reason there can
+    # be: nothing synchronized, and, since B1b-C, a snapshot belonging to an
+    # earlier profile revision. The audit
+    # reads the stored `current_run_id`, which after a CV activation still names
+    # the previous run and still passes — the run is intact, it simply describes
+    # somebody who no longer exists. Asking it first would say READY about a run
+    # the reader already refuses to present, which is how an absent current run
+    # used to reach an `assert`. A stale dependency is a business answer, not an
+    # invariant violation, so it is reported as one.
+    current = _readable_current_priority(connection, profile_id)
+    if current is None or current.current_run is None:
         return _incomplete(
-            profile_id,
-            [
-                _issue(
-                    PortfolioAssemblyIssueCode.PRIORITY_NOT_SYNCED,
-                    "Priority is not synced",
-                )
-            ],
+            profile_id, [_priority_unavailable(connection, profile_id)]
         )
+
+    priority_audit = audit_current_priority(connection, profile_id)
     if priority_audit.status is not PriorityProfileAuditStatus.READY:
         return _incomplete(
             profile_id,
@@ -156,8 +204,7 @@ def assemble_portfolio_inputs(
             ],
         )
 
-    priority = read_current_priority(connection, profile_id).current_run
-    assert priority is not None  # guaranteed by the successful current-run audit
+    priority = current.current_run
     try:
         matching = read_matching_run(connection, priority.matching_run_id)
     except MatchingReadError:

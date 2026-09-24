@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+
+from services.profile_revision.watermark import SyncPhase, phase_is_current
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -247,6 +249,9 @@ def list_priority_runs(
         (profile_id,),
     ).fetchone()
     current_run_id = None if state is None else state[0]
+    if not phase_is_current(connection, profile_id, SyncPhase.PRIORITY):
+        # The whole history is still listed; none of it is `is_current`.
+        current_run_id = None
     rows = connection.execute(
         """SELECT id,evaluation_date,matching_run_id,assessment_count,persistence_version,
         input_assembly_version,priority_engine_version,priority_rules_version,
@@ -273,6 +278,23 @@ def read_current_priority(
     history_count = connection.execute(
         "SELECT COUNT(*) FROM priority_runs WHERE profile_id=?", (profile_id,)
     ).fetchone()[0]
+    if not phase_is_current(connection, profile_id, SyncPhase.PRIORITY):
+        # A CV activation moved the profile to a new revision and Priority, or
+        # the Matching it is scored from, has not been recomputed for it. The
+        # stored state row and every run are left untouched — this answer is
+        # derived, nothing is deleted — and the history stays readable through
+        # `read_priority_run` and `list_priority_runs`. `NOT_SYNCED` is the
+        # existing vocabulary for "no result to present as current", so no new
+        # status reaches the API or the page.
+        return PriorityProfileReadModel(
+            profile_id,
+            PriorityProfileReadStatus.NOT_SYNCED,
+            None,
+            None,
+            None,
+            None,
+            history_count,
+        )
     state = connection.execute(
         """SELECT current_run_id,persistence_version,input_assembly_version
         FROM priority_profile_state WHERE profile_id=?""",

@@ -41,6 +41,7 @@ from services.digital_twin.cv.replacement.models import (
     CvDocumentNotFoundError,
     CvStagingError,
     DecisionNotPermittedError,
+    EffectiveReplacementState,
     DecisionRole,
     DifferenceKind,
     DocumentOrigin,
@@ -48,6 +49,7 @@ from services.digital_twin.cv.replacement.models import (
     ManifestIntegrityError,
     ManifestState,
     OpenReplacementExistsError,
+    ReplacementAlreadyActivatedError,
     ReplacementClosedError,
     ReplacementLifecycle,
     ReviewDecision,
@@ -62,15 +64,20 @@ from services.digital_twin.cv.replacement.repository import (
     ensure_cv_document,
     ensure_extraction_with_manifest,
     get_active_cv_document,
+    get_open_replacement,
+    get_replacement,
     list_baseline_cv_facts,
+    list_decision_digest_inputs,
     list_staged_decisions,
     open_replacement,
     set_replacement_lifecycle,
 )
+from services.digital_twin.cv.replacement.review_digest import compute_review_digest
 from services.digital_twin.cv.replacement.staging import (
     mark_ready_to_activate,
     mark_ready_to_activate_in_transaction,
     record_review_decision,
+    require_complete_current_review,
     review_progress,
 )
 from services.digital_twin.facts.models import FactSourceType, ProvenanceInput
@@ -1833,3 +1840,374 @@ def test_a_direct_manifest_write_preserves_an_existing_campaign(
         ).fetchone()[0]
         == ManifestState.COMPLETE.value
     )
+
+
+# ---------------------------------------- B1b-B1: review token and activation
+#
+# Activation itself is B1b-B2 and does not exist yet, so the tests below write
+# the 0028 activation columns directly. That is the point: what they check is
+# that every review and cancellation path refuses an activated attempt whoever
+# activated it, not that a particular function did.
+
+
+TEST_ONLY_REVIEW_TOKEN = "ff" * 32
+
+
+def _stored_token(connection, replacement_id: int) -> str | None:
+    return connection.execute(
+        "SELECT ready_review_digest FROM profile_cv_replacements WHERE id = ?",
+        (replacement_id,),
+    ).fetchone()[0]
+
+
+def _force_activated(connection, replacement_id: int, *, revision: int = 1) -> None:
+    """Set the 0028 activation columns by hand, as B1b-B2 will."""
+    token = _stored_token(connection, replacement_id) or TEST_ONLY_REVIEW_TOKEN
+    connection.execute(
+        """UPDATE profile_cv_replacements
+              SET ready_review_digest = ?,
+                  activation_revision = ?,
+                  activated_at = CURRENT_TIMESTAMP
+            WHERE id = ?""",
+        (token, revision, replacement_id),
+    )
+    connection.commit()
+
+
+def test_declaring_a_review_ready_stores_its_token(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    assert _stored_token(migrated, replacement_id) is None
+
+    answer_everything(migrated, profile_id, replacement_id)
+    ready = mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+
+    stored = _stored_token(migrated, replacement_id)
+    assert stored is not None and len(stored) == 64
+    assert ready.ready_review_digest == stored
+    assert ready.effective_state is EffectiveReplacementState.READY_TO_ACTIVATE
+    assert ready.is_activated is False
+
+
+def test_the_stored_token_is_the_one_the_review_computes(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    assert _stored_token(migrated, replacement_id) == compute_review_digest(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        extraction_id=prepared["extraction"].id,
+    )
+
+
+def test_changing_a_decision_clears_the_token(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    assert _stored_token(migrated, replacement_id) is not None
+
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    incoming = next(e for e in plan.entries if e.difference is DifferenceKind.NEW)
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=incoming.candidate_id,
+        decision=ReviewDecision.REJECT,
+    )
+
+    assert _stored_token(migrated, replacement_id) is None
+    assert (
+        migrated.execute(
+            "SELECT lifecycle FROM profile_cv_replacements WHERE id = ?",
+            (replacement_id,),
+        ).fetchone()[0]
+        == ReplacementLifecycle.REVIEWING.value
+    )
+
+
+def test_a_new_token_is_issued_after_the_review_changes(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    first = _stored_token(migrated, replacement_id)
+
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    incoming = next(e for e in plan.entries if e.difference is DifferenceKind.NEW)
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=incoming.candidate_id,
+        decision=ReviewDecision.REJECT,
+    )
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    second = _stored_token(migrated, replacement_id)
+
+    assert second is not None
+    assert second != first
+
+
+def test_a_decision_taken_while_reviewing_also_clears_a_stale_token(
+    migrated, profile_id, prepared
+):
+    """The clearing is not a side effect of the lifecycle move: it happens even
+    when the attempt is already REVIEWING."""
+    replacement_id = prepared["replacement"].id
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    first_entry = plan.entries[0]
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=first_entry.candidate_id,
+        fact_id=first_entry.fact_id,
+        decision=ReviewDecision.ACCEPT
+        if first_entry.role is DecisionRole.INCOMING
+        else ReviewDecision.KEEP,
+    )
+    # REVIEWING, and a token planted by hand as a previous ready state would.
+    migrated.execute(
+        "UPDATE profile_cv_replacements SET ready_review_digest = ? WHERE id = ?",
+        (TEST_ONLY_REVIEW_TOKEN, replacement_id),
+    )
+    migrated.commit()
+
+    second_entry = plan.entries[1]
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=second_entry.candidate_id,
+        fact_id=second_entry.fact_id,
+        decision=ReviewDecision.ACCEPT
+        if second_entry.role is DecisionRole.INCOMING
+        else ReviewDecision.KEEP,
+    )
+    assert _stored_token(migrated, replacement_id) is None
+
+
+def test_an_incomplete_review_is_still_refused_and_stores_no_token(
+    migrated, profile_id, prepared
+):
+    replacement_id = prepared["replacement"].id
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    entry = plan.entries[0]
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=entry.candidate_id,
+        fact_id=entry.fact_id,
+        decision=ReviewDecision.ACCEPT
+        if entry.role is DecisionRole.INCOMING
+        else ReviewDecision.KEEP,
+    )
+    with pytest.raises(ReviewIncompleteError):
+        mark_ready_to_activate(
+            migrated, profile_id=profile_id, replacement_id=replacement_id
+        )
+    assert _stored_token(migrated, replacement_id) is None
+
+
+def test_the_shared_validator_requires_the_callers_transaction(
+    migrated, profile_id, prepared
+):
+    with pytest.raises(CvStagingError):
+        require_complete_current_review(
+            migrated, profile_id=profile_id, replacement_id=prepared["replacement"].id
+        )
+
+
+def test_the_shared_validator_returns_the_plan_it_verified(
+    migrated, profile_id, prepared
+):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    migrated.execute("BEGIN IMMEDIATE")
+    try:
+        plan = require_complete_current_review(
+            migrated, profile_id=profile_id, replacement_id=replacement_id
+        )
+    finally:
+        migrated.execute("ROLLBACK")
+    assert plan.replacement_id == replacement_id
+    assert plan.extraction_id == prepared["extraction"].id
+
+
+# --------------------------------------- an activated attempt is out of reach
+
+
+def test_an_activated_attempt_reads_as_activated(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    _force_activated(migrated, replacement_id)
+
+    stored = get_replacement(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    assert stored.is_activated is True
+    assert stored.effective_state is EffectiveReplacementState.ACTIVATED
+    assert stored.is_open is False
+    # The storage column is untouched, and the summary says both.
+    assert stored.lifecycle is ReplacementLifecycle.READY_TO_ACTIVATE
+    assert stored.summary()["effective_state"] == "ACTIVATED"
+    assert stored.activation_revision == 1
+
+
+def test_an_activated_attempt_answers_no_further_decision(
+    migrated, profile_id, prepared
+):
+    replacement_id = prepared["replacement"].id
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    entry = next(e for e in plan.entries if e.difference is DifferenceKind.NEW)
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    _force_activated(migrated, replacement_id)
+
+    with pytest.raises(ReplacementAlreadyActivatedError):
+        record_review_decision(
+            migrated,
+            profile_id=profile_id,
+            replacement_id=replacement_id,
+            candidate_id=entry.candidate_id,
+            decision=ReviewDecision.REJECT,
+        )
+
+
+def test_an_activated_attempt_cannot_be_cancelled(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    _force_activated(migrated, replacement_id)
+
+    with pytest.raises(ReplacementAlreadyActivatedError):
+        cancel_replacement(
+            migrated, profile_id=profile_id, replacement_id=replacement_id
+        )
+    stored = get_replacement(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    assert stored.effective_state is EffectiveReplacementState.ACTIVATED
+
+
+def test_an_activated_attempt_cannot_be_reopened_for_review(
+    migrated, profile_id, prepared
+):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    _force_activated(migrated, replacement_id)
+
+    with pytest.raises(ReplacementAlreadyActivatedError):
+        set_replacement_lifecycle(
+            migrated,
+            profile_id=profile_id,
+            replacement_id=replacement_id,
+            target=ReplacementLifecycle.REVIEWING,
+        )
+    with pytest.raises(ReplacementAlreadyActivatedError):
+        mark_ready_to_activate(
+            migrated, profile_id=profile_id, replacement_id=replacement_id
+        )
+
+
+def test_an_activated_attempt_is_not_an_open_replacement(
+    migrated, profile_id, prepared
+):
+    replacement_id = prepared["replacement"].id
+    answer_everything(migrated, profile_id, replacement_id)
+    mark_ready_to_activate(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    _force_activated(migrated, replacement_id)
+
+    assert get_open_replacement(migrated, profile_id) is None
+    # And the next attempt can be opened over another campaign.
+    other_document = ensure_cv_document(
+        migrated,
+        profile_id=profile_id,
+        content_sha256="19" * 32,
+        byte_size=4096,
+        page_count=2,
+    )
+    other_candidates = tuple(
+        make_candidate(
+            candidate.candidate_type,
+            candidate.raw_text,
+            rule_id=candidate.rule_id,
+            cv_sha256="19" * 32,
+        )
+        for candidate in new_cv_candidates()
+    )
+    other = ensure_extraction_with_manifest(
+        migrated,
+        profile_id=profile_id,
+        document_id=other_document.id,
+        extraction=make_extraction(other_candidates, cv_sha256="19" * 32),
+    )
+    reopened = open_replacement(
+        migrated, profile_id=profile_id, extraction_id=other.extraction.id
+    )
+    assert reopened.id != replacement_id
+    assert reopened.effective_state is EffectiveReplacementState.PREPARED
+
+
+def test_no_summary_or_error_carries_the_staged_value(migrated, profile_id, prepared):
+    replacement_id = prepared["replacement"].id
+    plan = compute_replacement_plan(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    entry = next(e for e in plan.entries if e.difference is DifferenceKind.NEW)
+    record_review_decision(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        candidate_id=entry.candidate_id,
+        decision=ReviewDecision.CORRECT,
+        staged_value=TEST_ONLY_CORRECTION,
+    )
+    digest = compute_review_digest(
+        migrated,
+        profile_id=profile_id,
+        replacement_id=replacement_id,
+        extraction_id=prepared["extraction"].id,
+    )
+    inputs = list_decision_digest_inputs(
+        migrated, profile_id=profile_id, replacement_id=replacement_id
+    )
+    printed = " ".join(
+        [digest, repr(inputs), repr(get_replacement(
+            migrated, profile_id=profile_id, replacement_id=replacement_id
+        ).summary())]
+    )
+    assert TEST_ONLY_CORRECTION not in printed

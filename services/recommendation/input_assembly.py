@@ -244,6 +244,26 @@ class RecommendationReadinessIssueCode(StrEnum):
     #: is still current can no longer be assembled.
     ELIGIBILITY_INPUT_INCOMPLETE = "ELIGIBILITY_INPUT_INCOMPLETE"
     INVALID_UPSTREAM_VALUE = "INVALID_UPSTREAM_VALUE"
+    #: A CV replacement was activated, so the persisted ranking was computed
+    #: from a profile that no longer exists. It is not stale in the ordinary
+    #: sense — nothing upstream drifted — the person deliberately replaced the
+    #: document every downstream phase reads. The state is published INCOMPLETE
+    #: by the activation itself, in its own transaction, so no ranking is ever
+    #: served as current for a CV it was not computed from; the phases that
+    #: repair it are named by the synchronization order, not by this module.
+    PROFILE_CV_ACTIVATION_PENDING_SYNC = "PROFILE_CV_ACTIVATION_PENDING_SYNC"
+
+
+#: The wording that accompanies the code above, kept beside it rather than in
+#: the activation: the CV package writes this issue, and the recommendation
+#: reader derives the same one when a stored READY turns out to have been
+#: overtaken. One message, so the two can never drift apart, and it is declared
+#: here because this is the module that owns the code.
+PROFILE_CV_ACTIVATION_PENDING_SYNC_MESSAGE = (
+    "a CV replacement was activated; skills, structured profile, eligibility, "
+    "Matching, Recommendation, Priority and Portfolio must be synchronized "
+    "again, in that order, before a recommendation describes this profile"
+)
 
 
 @dataclass(frozen=True)

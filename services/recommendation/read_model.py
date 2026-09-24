@@ -76,7 +76,10 @@ from typing import Any, Iterator, Mapping
 
 from services.collector.matching.fingerprint import canonical_json
 
+from services.profile_revision.watermark import SyncPhase, phase_is_current
+
 from .input_assembly import (
+    PROFILE_CV_ACTIVATION_PENDING_SYNC_MESSAGE as PENDING_SYNC_MESSAGE,
     RecommendationReadinessIssue,
     RecommendationReadinessIssueCode,
 )
@@ -664,6 +667,10 @@ def _current_run_id(
         raise RecommendationReadError(
             f"unknown recommendation state {status!r} for profile {profile_id}"
         )
+    if not phase_is_current(connection, profile_id, SyncPhase.RECOMMENDATION):
+        # A run computed for an earlier profile revision is history, so nothing
+        # in the listing is marked current. The listing itself is unchanged.
+        return None
     return _positive(current_run_id, f"current_run_id for profile {profile_id}")
 
 
@@ -850,6 +857,32 @@ def _read_current(
     if status != _STATUS_READY:
         raise RecommendationReadError(
             f"unknown recommendation state {status!r} for profile {profile_id}"
+        )
+    if not phase_is_current(connection, profile_id, SyncPhase.RECOMMENDATION):
+        # A stored READY that a later CV activation overtook. The activation
+        # itself publishes INCOMPLETE, so reaching this is either a
+        # synchronization that republished READY from projections that had not
+        # caught up, or a state written by some path that does not go through
+        # the persistence owner. Either way the answer is the same one the
+        # activation would have given, in the same existing vocabulary, and the
+        # stored row is left exactly as it is for the audit to see.
+        return RecommendationProfileReadModel(
+            profile_id,
+            _STATUS_INCOMPLETE,
+            persistence_version,
+            input_assembly_version,
+            None,
+            None,
+            history_count,
+            (
+                RecommendationReadinessIssue(
+                    code=(
+                        RecommendationReadinessIssueCode
+                        .PROFILE_CV_ACTIVATION_PENDING_SYNC
+                    ),
+                    message=PENDING_SYNC_MESSAGE,
+                ),
+            ),
         )
     if readiness_issues_json != _NO_READINESS_ISSUES:
         raise RecommendationReadError(

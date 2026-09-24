@@ -109,7 +109,7 @@ export default async function MatchingPage() {
   const matching = await loadMatching();
   return <main className="page-shell"><header className="hero"><div><p className="eyebrow">Correspondance avec le profil</p><h1>Matching</h1><p className="subtitle">Ces résultats proviennent du dernier snapshot de matching persisté.</p></div><Link className="health-link" href="/">Retour aux opportunités</Link></header>
     {matching === null ? <section className="status-panel" role="status"><h2>Matching temporairement indisponible</h2></section>
-      : matching.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Matching non encore calculé</h2><p>Aucun snapshot de matching n’a encore été enregistré.</p></section>
+      : matching.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Matching à synchroniser</h2><p>Aucun résultat de matching ne correspond au profil actuel. Lancez la synchronisation pour en obtenir un.</p></section>
       : matching.status === "EMPTY" ? <section className="status-panel" role="status"><h2>Aucune opportunité dans le périmètre de matching actuel.</h2></section>
       : <Ready matching={matching} />}
   </main>;
