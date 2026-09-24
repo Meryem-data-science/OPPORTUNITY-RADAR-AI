@@ -15,11 +15,7 @@ from services.collector.matching import (
     read_matching_run,
 )
 from services.priority import PriorityProfileAuditStatus, audit_current_priority
-from services.priority.read_model import (
-    PriorityProfileReadStatus,
-    PriorityReadError,
-    read_current_priority,
-)
+from services.priority.read_model import PriorityReadError, read_current_priority
 
 from .models import PortfolioInput
 
@@ -178,7 +174,12 @@ def assemble_portfolio_inputs(
 ) -> PortfolioAssemblyResult:
     """Assemble the whole current Priority cohort, without writes or scoring."""
     # The derived state decides whether there is anything to build on, and the
-    # audit is asked only about a run that would actually be used. The audit
+    # audit is asked only about a run that would actually be used. The question
+    # asked of it is the only one that matters here — is there a current run to
+    # build on — so it is `current_run` that is read, not the status beside it.
+    # `read_current_priority` already answers `None` for every reason there can
+    # be: nothing synchronized, and, since B1b-C, a snapshot belonging to an
+    # earlier profile revision. The audit
     # reads the stored `current_run_id`, which after a CV activation still names
     # the previous run and still passes — the run is intact, it simply describes
     # somebody who no longer exists. Asking it first would say READY about a run
@@ -186,11 +187,7 @@ def assemble_portfolio_inputs(
     # used to reach an `assert`. A stale dependency is a business answer, not an
     # invariant violation, so it is reported as one.
     current = _readable_current_priority(connection, profile_id)
-    if (
-        current is None
-        or current.status is not PriorityProfileReadStatus.READY
-        or current.current_run is None
-    ):
+    if current is None or current.current_run is None:
         return _incomplete(
             profile_id, [_priority_unavailable(connection, profile_id)]
         )

@@ -405,7 +405,17 @@ def store_matching_batch(
     batch computed before a CV activation must never be able to claim the
     revision that activation created. Only `sync_matching`, which computes and
     persists under one transaction, is in a position to make that claim.
+
+    The batch is validated **before** the transaction is opened, which is the
+    older contract of the two and the one callers rely on: a malformed batch, a
+    duplicate opportunity id or a fingerprint that does not reproduce is a
+    caller mistake, and it is refused without the connection being touched at
+    all. `_prepare` is pure and deterministic, so the primitive running it again
+    inside the transaction costs one repeated computation and no divergence —
+    cheaper than moving validation out of the primitive, which would let a
+    direct caller of the primitive skip it.
     """
+    _prepare(profile_id, batch, selection_version)
     connection.execute("BEGIN IMMEDIATE")
     try:
         result = store_matching_batch_in_transaction(
@@ -423,6 +433,18 @@ def store_matching_batch(
         raise
 
 
+def _validate_empty_state_arguments(
+    profile_id: object, selection_version: object
+) -> None:
+    """Refuse absurd arguments without touching the connection."""
+    if (
+        not isinstance(profile_id, int)
+        or profile_id <= 0
+        or not _valid_text(selection_version)
+    ):
+        raise MatchingPersistenceError("invalid EMPTY state arguments")
+
+
 def set_matching_state_empty_in_transaction(
     connection: sqlite3.Connection, profile_id: int, *, selection_version: str
 ) -> None:
@@ -432,12 +454,7 @@ def set_matching_state_empty_in_transaction(
     emptiness was decided by a selection this call never saw.
     """
     _require_transaction(connection, "publishing an empty matching state")
-    if (
-        not isinstance(profile_id, int)
-        or profile_id <= 0
-        or not _valid_text(selection_version)
-    ):
-        raise MatchingPersistenceError("invalid EMPTY state arguments")
+    _validate_empty_state_arguments(profile_id, selection_version)
     if (
         connection.execute(
             "SELECT 1 FROM profiles WHERE id=?", (profile_id,)
@@ -454,8 +471,10 @@ def set_matching_state_empty(
     """Publish the EMPTY state on its own. Persistence contract unchanged.
 
     Like `store_matching_batch`, it advances no watermark: the selection that
-    found nothing to match happened outside this transaction.
+    found nothing to match happened outside this transaction. And like it, the
+    arguments are checked before the connection is touched.
     """
+    _validate_empty_state_arguments(profile_id, selection_version)
     connection.execute("BEGIN IMMEDIATE")
     try:
         set_matching_state_empty_in_transaction(
