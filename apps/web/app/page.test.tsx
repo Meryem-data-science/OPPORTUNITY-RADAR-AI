@@ -65,7 +65,7 @@ describe("Home", () => {
     loadOpportunitiesMock.mockResolvedValue(fixture);
     const html = await renderHome();
 
-    expect(html).toContain("37 opportunités détectées");
+    expect(html).toContain("37 opportunités enregistrées par le radar");
     expect(html).toContain("Test Data Engineer");
     expect(html).toContain("Fixture Company");
     expect(html).toContain("Paris, France");

@@ -1,58 +1,45 @@
 import "server-only";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
-const OPPORTUNITIES_PATH = "/api/opportunities?limit=20";
+const OPPORTUNITIES_PATH = "/api/opportunities";
 
-export type Opportunity = {
-  id: number;
-  canonical_title: string;
-  organization: string;
-  location: string | null;
-  original_url: string;
-  last_seen_at: string;
-};
+export * from "./opportunity-contract";
 
-export type OpportunitiesResponse = {
-  items: Opportunity[];
-  returned: number;
-  total: number;
-};
+import {
+  OPPORTUNITIES_MAX_LIMIT,
+  OPPORTUNITIES_PAGE_SIZE,
+  isOpportunitiesResponse,
+  type OpportunitiesResponse,
+} from "./opportunity-contract";
 
-function isOpportunity(value: unknown): value is Opportunity {
-  if (typeof value !== "object" || value === null) return false;
-
-  const opportunity = value as Record<string, unknown>;
-  return (
-    typeof opportunity.id === "number" &&
-    typeof opportunity.canonical_title === "string" &&
-    typeof opportunity.organization === "string" &&
-    (typeof opportunity.location === "string" || opportunity.location === null) &&
-    typeof opportunity.original_url === "string" &&
-    typeof opportunity.last_seen_at === "string"
-  );
-}
-
-function isOpportunitiesResponse(value: unknown): value is OpportunitiesResponse {
-  if (typeof value !== "object" || value === null) return false;
-
-  const response = value as Record<string, unknown>;
-  return (
-    Array.isArray(response.items) &&
-    response.items.every(isOpportunity) &&
-    typeof response.returned === "number" &&
-    typeof response.total === "number"
-  );
-}
-
-export async function getOpportunities(): Promise<OpportunitiesResponse> {
+/**
+ * One page of opportunities.
+ *
+ * `limit` and `offset` are validated here as well as by the backend. The
+ * backend answering 422 would be correct but useless to a page: a bad page
+ * request is a bug in this app, and it is worth failing where it was made.
+ */
+export async function getOpportunities(
+  limit: number = OPPORTUNITIES_PAGE_SIZE,
+  offset: number = 0,
+): Promise<OpportunitiesResponse> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > OPPORTUNITIES_MAX_LIMIT) {
+    throw new Error("Opportunity page limit is out of range");
+  }
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error("Opportunity page offset is out of range");
+  }
   const baseUrl = (process.env.OPPORTUNITY_API_BASE_URL ?? DEFAULT_API_BASE_URL).replace(
     /\/$/,
     "",
   );
-  const response = await fetch(`${baseUrl}${OPPORTUNITIES_PATH}`, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(5_000),
-  });
+  const response = await fetch(
+    `${baseUrl}${OPPORTUNITIES_PATH}?limit=${limit}&offset=${offset}`,
+    {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5_000),
+    },
+  );
 
   if (!response.ok) {
     throw new Error("Opportunity API request failed");
@@ -66,9 +53,13 @@ export async function getOpportunities(): Promise<OpportunitiesResponse> {
   return payload;
 }
 
-export async function loadOpportunities(): Promise<OpportunitiesResponse | null> {
+/** One page, or null when the listing cannot be read right now. */
+export async function loadOpportunities(
+  limit: number = OPPORTUNITIES_PAGE_SIZE,
+  offset: number = 0,
+): Promise<OpportunitiesResponse | null> {
   try {
-    return await getOpportunities();
+    return await getOpportunities(limit, offset);
   } catch {
     return null;
   }

@@ -54,22 +54,46 @@ def _response(count: int) -> OpportunityListResponse:
 
 
 @pytest.mark.parametrize(
-    ("query", "expected_limit"),
-    [("", 20), ("?limit=1", 1), ("?limit=100", 100)],
+    ("query", "expected_limit", "expected_offset"),
+    [
+        ("", 20, 0),
+        ("?limit=1", 1, 0),
+        ("?limit=100", 100, 0),
+        ("?offset=40", 20, 40),
+        ("?limit=5&offset=15", 5, 15),
+    ],
 )
-def test_valid_limits(monkeypatch, query: str, expected_limit: int) -> None:
+def test_valid_limits(
+    monkeypatch, query: str, expected_limit: int, expected_offset: int
+) -> None:
     observed = []
 
-    def read(limit: int) -> OpportunityListResponse:
-        observed.append(limit)
+    def read(limit: int, offset: int = 0) -> OpportunityListResponse:
+        observed.append((limit, offset))
         return _response(1)
 
     monkeypatch.setattr(main, "read_opportunities", read)
     response = TestClient(main.app).get(f"/api/opportunities{query}")
 
     assert response.status_code == 200
-    assert observed == [expected_limit]
+    assert observed == [(expected_limit, expected_offset)]
     assert "description" not in response.json()["items"][0]
+
+
+@pytest.mark.parametrize("value", ["-1", "not-a-number", "1.5"])
+def test_invalid_offsets_are_refused_before_the_reader(monkeypatch, value: str) -> None:
+    """An absurd page start is a 422 and never reaches the database."""
+    called = []
+
+    def read(limit: int, offset: int = 0) -> OpportunityListResponse:
+        called.append((limit, offset))
+        return _response(1)
+
+    monkeypatch.setattr(main, "read_opportunities", read)
+    response = TestClient(main.app).get(f"/api/opportunities?offset={value}")
+
+    assert response.status_code == 422
+    assert called == []
 
 
 @pytest.mark.parametrize("value", ["0", "101", "not-a-number"])
@@ -191,7 +215,11 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
         for record in records
         if record["event"] == "opportunity_api_request_succeeded"
     )
-    assert succeeded["context"] == {"items_returned": 1, "request_limit": 7}
+    assert succeeded["context"] == {
+        "items_returned": 1,
+        "request_limit": 7,
+        "request_offset": 0,
+    }
 
     assert failed_response.status_code == 503
     assert failed_response.json() == {"detail": PUBLIC_DATABASE_ERROR}
@@ -203,6 +231,7 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
     assert failed["context"] == {
         "error_type": "RuntimeError",
         "request_limit": 3,
+        "request_offset": 0,
     }
     rendered = stream.getvalue()
     assert secret not in rendered
@@ -215,7 +244,7 @@ def test_api_events_use_structured_json_logger_without_sensitive_content(
 def test_database_error_is_sanitized(monkeypatch) -> None:
     secret = "TEST_ONLY_TURSO_AUTH_TOKEN_DO_NOT_EXPOSE"
 
-    def fail(_limit: int) -> OpportunityListResponse:
+    def fail(_limit: int, _offset: int = 0) -> OpportunityListResponse:
         raise OpportunityReadError(PUBLIC_DATABASE_ERROR)
 
     monkeypatch.setattr(main, "read_opportunities", fail)

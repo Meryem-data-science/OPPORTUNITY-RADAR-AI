@@ -129,8 +129,24 @@ def _to_response(
     )
 
 
-def read_opportunities(limit: int) -> OpportunityListResponse:
-    """Read visible, active opportunities from the configured database."""
+def read_opportunities(limit: int, offset: int = 0) -> OpportunityListResponse:
+    """Read visible, active opportunities from the configured database.
+
+    `offset` skips that many rows of the same ordering, so a caller can walk
+    the whole listing a page at a time. It defaults to 0, which is exactly what
+    every existing caller already asked for: the first page, unchanged.
+
+    The ordering is `last_seen_at DESC, id DESC`. The second key is not
+    decoration — many opportunities share a `last_seen_at` to the microsecond
+    because one collection run stamps them together, and without a unique
+    tiebreaker SQLite may order those rows differently between two queries. The
+    same row could then be returned on two consecutive pages while another was
+    never returned at all. `id` is unique, so the order is total and the walk is
+    stable.
+
+    `total` counts the whole listing, not the page, so a caller knows when it
+    has seen everything.
+    """
     connection = None
     try:
         settings = load_settings()
@@ -167,9 +183,9 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
                    ON opportunity_qualifications.opportunity_id = opportunities.id
             WHERE opportunities.status = ? AND opportunities.is_active = ?
             ORDER BY opportunities.last_seen_at DESC, opportunities.id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            ("visible", 1, limit),
+            ("visible", 1, limit, offset),
         ).fetchall()
         observations = _read_observations(
             connection, [int(row[0]) for row in rows]
@@ -186,6 +202,7 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
                 "event": "opportunity_api_request_succeeded",
                 "items_returned": response.returned,
                 "request_limit": limit,
+                "request_offset": offset,
             },
         )
         return response
@@ -196,6 +213,7 @@ def read_opportunities(limit: int) -> OpportunityListResponse:
                 "event": "opportunity_api_request_failed",
                 "error_type": type(error).__name__,
                 "request_limit": limit,
+                "request_offset": offset,
             },
         )
         raise OpportunityReadError(PUBLIC_DATABASE_ERROR) from None

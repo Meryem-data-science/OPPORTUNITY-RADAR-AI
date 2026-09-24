@@ -94,10 +94,17 @@ app = FastAPI(title="Opportunity Radar API", version="1.6.0")
 @app.get("/api/opportunities", response_model=OpportunityListResponse)
 def list_opportunities(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> OpportunityListResponse:
-    """Return the most recently observed visible, active opportunities."""
+    """Return the most recently observed visible, active opportunities.
+
+    `limit` keeps its ceiling of 100 per request: paging is how a caller reads
+    more than that, not a bigger single answer. `offset` says where the page
+    starts, and both are validated here rather than inside the reader, so an
+    absurd value is a 422 from FastAPI and never reaches SQL.
+    """
     try:
-        return read_opportunities(limit)
+        return read_opportunities(limit, offset)
     except OpportunityReadError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

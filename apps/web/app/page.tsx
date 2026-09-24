@@ -1,38 +1,12 @@
 import Link from "next/link";
 import React from "react";
-import ApplicationActions from "@/components/application-actions";
+import OpportunityList, {
+  type TrackedStatuses,
+} from "@/components/opportunity-list";
 import PushNotifications from "@/components/push-notifications";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { loadApplications } from "@/lib/applications";
-import { loadOpportunities, type Opportunity } from "@/lib/opportunities";
-
-function OpportunityCard({
-  opportunity,
-  trackedStatus,
-}: {
-  opportunity: Opportunity;
-  trackedStatus: ApplicationStatus | null;
-}) {
-  return (
-    <article className="opportunity-card">
-      <div>
-        <p className="organization">{opportunity.organization}</p>
-        <h2>{opportunity.canonical_title}</h2>
-        <p className="location">{opportunity.location ?? "Lieu non précisé"}</p>
-      </div>
-      <ApplicationActions
-        opportunityId={opportunity.id}
-        status={trackedStatus}
-      />
-      <div className="card-footer">
-        <span>Vue récemment par le radar</span>
-        <a href={opportunity.original_url} target="_blank" rel="noreferrer">
-          Voir l’offre originale
-        </a>
-      </div>
-    </article>
-  );
-}
+import { loadOpportunities } from "@/lib/opportunities";
 
 export default async function Home() {
   // Both surfaces are read independently: the tracking one being unavailable
@@ -41,10 +15,12 @@ export default async function Home() {
     loadOpportunities(),
     loadApplications(),
   ]);
-  const tracked = new Map<number, ApplicationStatus>(
+  // A plain object rather than a Map: this crosses into a client component,
+  // and only serializable props do.
+  const tracked: TrackedStatuses = Object.fromEntries(
     (applications?.items ?? []).map((application) => [
-      application.opportunity_id,
-      application.status,
+      String(application.opportunity_id),
+      application.status as ApplicationStatus,
     ]),
   );
 
@@ -55,7 +31,9 @@ export default async function Home() {
           <p className="eyebrow">Veille d’opportunités</p>
           <h1>Opportunity Radar AI</h1>
           <p className="subtitle">
-            Les opportunités affichées proviennent des sources collectées par le radar.
+            Les opportunités affichées proviennent des sources collectées par le
+            radar. Leur date de validité n’est pas vérifiée&nbsp;: certaines
+            annonces peuvent déjà être closes.
           </p>
         </div>
         <nav className="hero-links" aria-label="Pages de supervision">
@@ -97,24 +75,14 @@ export default async function Home() {
         <section aria-labelledby="opportunities-heading">
           <div className="section-heading">
             <h2 id="opportunities-heading">Opportunités détectées</h2>
-            <p>{opportunities.total} opportunités détectées</p>
+            <p>{opportunities.total} opportunités enregistrées par le radar</p>
           </div>
 
-          {opportunities.items.length === 0 ? (
-            <div className="status-panel" role="status">
-              <p>Aucune opportunité disponible pour le moment.</p>
-            </div>
-          ) : (
-            <div className="opportunity-grid">
-              {opportunities.items.map((opportunity) => (
-                <OpportunityCard
-                  key={opportunity.id}
-                  opportunity={opportunity}
-                  trackedStatus={tracked.get(opportunity.id) ?? null}
-                />
-              ))}
-            </div>
-          )}
+          <OpportunityList
+            initial={opportunities.items}
+            total={opportunities.total}
+            tracked={tracked}
+          />
         </section>
       )}
     </main>

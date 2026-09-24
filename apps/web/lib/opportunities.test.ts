@@ -31,7 +31,7 @@ describe("getOpportunities", () => {
 
     await expect(getOpportunities()).resolves.toEqual(fixture);
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://127.0.0.1:8000/api/opportunities?limit=20",
+      "http://127.0.0.1:8000/api/opportunities?limit=20&offset=0",
       expect.objectContaining({ cache: "no-store" }),
     );
   });
@@ -57,7 +57,7 @@ describe("getOpportunities", () => {
     await getOpportunities();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://fastapi.internal:9000/api/opportunities?limit=20",
+      "http://fastapi.internal:9000/api/opportunities?limit=20&offset=0",
       expect.any(Object),
     );
   });
