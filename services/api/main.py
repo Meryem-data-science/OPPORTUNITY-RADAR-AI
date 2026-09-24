@@ -70,6 +70,23 @@ from services.api.explorer import (
 )
 from services.collector.qualification.fine_taxonomy import FineCategory
 from services.digital_twin.preferences.models import OpportunityType
+from services.api.cv_replacement import (
+    ActivationResponse,
+    CancelResponse,
+    CvReplacementApiConflictError,
+    CvReplacementApiError,
+    CvReplacementApiNotFoundError,
+    CvReplacementApiRequestError,
+    PUBLIC_CV_REPLACEMENT_ERROR,
+    PUBLIC_CV_REPLACEMENT_REQUEST_ERROR,
+    ReviewSnapshotResponse,
+    activate_surface,
+    cancel_review_surface,
+    mark_ready_surface,
+    open_review_surface,
+    read_current_review_surface,
+    record_decision_surface,
+)
 from services.api.applications import (
     PUBLIC_APPLICATION_ERROR,
     PUBLIC_APPLICATION_REQUEST_ERROR,
@@ -359,3 +376,156 @@ async def patch_application_tracking(
         return update_tracking_surface(application_id, body)
     except _APPLICATION_ERRORS as error:
         raise _application_failure(error) from None
+
+
+# --------------------------------------------------------- CV replacement
+
+
+async def _cv_replacement_body(request: Request) -> object:
+    """Read a JSON body without letting a parser echo a CV value back.
+
+    The bodies on this surface can carry a correction somebody typed about
+    themselves. A validation error that quoted the offending input would put
+    that text in an HTTP response and in whatever logs it, so the parsing is
+    done by hand below and a broken body gets one fixed sentence.
+    """
+    try:
+        return await request.json()
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=PUBLIC_CV_REPLACEMENT_REQUEST_ERROR,
+        ) from None
+
+
+async def _reject_cv_replacement_body(request: Request) -> None:
+    """Refuse a body on a route that takes none.
+
+    `ready` and `cancel` name their target in the path and carry no business
+    payload, so a body is either a misunderstanding or an attempt to smuggle a
+    field — `profile_id` above all — past a surface that resolves the owner
+    itself. Only the *presence* of bytes is read: what they contain is never
+    parsed, never logged and never echoed, because a refused body may still
+    hold a correction somebody typed.
+    """
+    if await request.body():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=PUBLIC_CV_REPLACEMENT_REQUEST_ERROR,
+        )
+
+
+def _cv_replacement_failure(error: Exception) -> HTTPException:
+    """Map one refusal onto the answer the caller is owed.
+
+    400 for a malformed request, 404 for something this profile does not have,
+    409 for every business refusal the review raises, and 503 with a fixed
+    sentence for anything else — an unusable database, a missing migration, a
+    broken configuration. No internal message and no CV value escapes here.
+    """
+    if isinstance(error, CvReplacementApiRequestError):
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)
+        )
+    if isinstance(error, CvReplacementApiNotFoundError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    if isinstance(error, CvReplacementApiConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error))
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=PUBLIC_CV_REPLACEMENT_ERROR,
+    )
+
+
+_CV_REPLACEMENT_ERRORS = (
+    CvReplacementApiRequestError,
+    CvReplacementApiNotFoundError,
+    CvReplacementApiConflictError,
+    CvReplacementApiError,
+)
+
+
+@app.get("/api/cv/replacements/current", response_model=ReviewSnapshotResponse)
+def read_current_cv_replacement() -> ReviewSnapshotResponse:
+    """The open CV replacement review of the server-resolved profile, if any."""
+    try:
+        return read_current_review_surface()
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
+
+
+@app.post(
+    "/api/cv/replacements",
+    response_model=ReviewSnapshotResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def open_cv_replacement(request: Request) -> ReviewSnapshotResponse:
+    """Open a review over an extraction this profile already holds.
+
+    No upload, no parsing and no extraction happens here: the extraction must
+    exist already, and this call only starts the human review of it.
+    """
+    body = await _cv_replacement_body(request)
+    try:
+        return open_review_surface(body)
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
+
+
+@app.put(
+    "/api/cv/replacements/{replacement_id}/decision",
+    response_model=ReviewSnapshotResponse,
+)
+async def record_cv_replacement_decision(
+    replacement_id: int, request: Request
+) -> ReviewSnapshotResponse:
+    """Record or replace one answer, and return the review as it now stands."""
+    body = await _cv_replacement_body(request)
+    try:
+        return record_decision_surface(replacement_id, body)
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
+
+
+@app.post(
+    "/api/cv/replacements/{replacement_id}/ready",
+    response_model=ReviewSnapshotResponse,
+)
+async def mark_cv_replacement_ready(
+    replacement_id: int, request: Request
+) -> ReviewSnapshotResponse:
+    """Declare the review complete and hand back the token sealing it."""
+    await _reject_cv_replacement_body(request)
+    try:
+        return mark_ready_surface(replacement_id)
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
+
+
+@app.post(
+    "/api/cv/replacements/{replacement_id}/activate",
+    response_model=ActivationResponse,
+)
+async def activate_cv_replacement_surface(
+    replacement_id: int, request: Request
+) -> ActivationResponse:
+    """Apply the reviewed replacement, against the token the person confirmed."""
+    body = await _cv_replacement_body(request)
+    try:
+        return activate_surface(replacement_id, body)
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
+
+
+@app.post(
+    "/api/cv/replacements/{replacement_id}/cancel", response_model=CancelResponse
+)
+async def cancel_cv_replacement(
+    replacement_id: int, request: Request
+) -> CancelResponse:
+    """Abandon an open review. Its decisions stay stored and auditable."""
+    await _reject_cv_replacement_body(request)
+    try:
+        return cancel_review_surface(replacement_id)
+    except _CV_REPLACEMENT_ERRORS as error:
+        raise _cv_replacement_failure(error) from None
