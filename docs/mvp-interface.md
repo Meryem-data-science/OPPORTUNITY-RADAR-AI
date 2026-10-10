@@ -10,11 +10,15 @@ Dans le dossier du projet :
 2. Attendre la préparation du site et de l’API : le navigateur s’ouvre automatiquement quand ils sont prêts.
 3. Si une erreur apparaît, la fenêtre reste ouverte pour permettre de lire le message. Les détails restent dans `data\runtime`.
 
+Si le code de l’interface est plus récent que la compilation, le lanceur demande au superviseur d’arrêter ses processus, reconstruit l’interface, puis relance Radar. Cela permet d’appliquer les changements avec le même bouton **Lancer-Radar.cmd**. Une compilation peut prendre quelques minutes.
+
 **Ouvrir Radar.url** ouvre seulement l’adresse : il faut que le serveur soit déjà démarré. Le lancement automatique à l’ouverture de session Windows reste discret, sans fenêtre ni ouverture du navigateur.
 
 L’aperçu de l’agent Codex est limité par son isolation Windows : utiliser le lancement normal ci-dessus pour accéder aux données locales.
 
 Le menu à gauche donne accès à l’accueil, aux offres, aux recommandations, aux candidatures et aux sources. Les filtres agissent sur les offres réellement enregistrées. « Sauvegarder », « Préparer la candidature » et « J’ai postulé » mettent à jour le suivi local.
+
+L’interface présente les fonctionnalités activées. Le bloc de notifications non configurées est retiré de l’accueil. La page Sources montre uniquement les sources activées ; ses compteurs portent sur ces mêmes sources. Une source activée qui rencontre un problème garde son état visible pour expliquer une collecte manquante.
 
 ### Consulter l’annonce originale
 
@@ -53,6 +57,8 @@ Le résumé se trouve dans `data\runtime\availability-state.json` ; les motifs d
 ## Démarrage automatique
 
 Le raccourci **Opportunity Radar AI** du dossier Démarrage Windows lance le site et la collecte à l’ouverture de session. Un cycle commence immédiatement, puis le suivant 60 minutes après la fin du précédent. Le PC doit rester allumé et connecté pour collecter.
+
+Le retour d’Internet entre deux cycles ne déclenche pas immédiatement une nouvelle collecte. Les sources sont réessayées au prochain cycle, y compris après une panne réseau.
 
 La collecte contrôle les expirations puis recalcule les correspondances, recommandations, priorités et portefeuille avec le profil existant. Une autorisation Gmail indisponible fait échouer cette source sans ouvrir de fenêtre de connexion. Les sources publiques continuent.
 

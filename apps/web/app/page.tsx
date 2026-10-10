@@ -3,7 +3,6 @@ import Link from "next/link";
 import React from "react";
 import Icon from "@/components/icon";
 import { OpportunityCard, type TrackedStatuses } from "@/components/opportunity-list";
-import PushNotifications from "@/components/push-notifications";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { loadApplications } from "@/lib/applications";
 import { loadExplorer } from "@/lib/explorer";
@@ -92,6 +91,5 @@ export default async function Home() {
 
     <section className="mission-banner"><div><p className="eyebrow">OPPORTUNITY RADAR AI</p><h2>Moins de dispersion.<br /><em>Plus de perspectives.</em></h2></div><div><p>Un espace pour réunir votre veille, comprendre les opportunités et organiser la suite de votre parcours.</p><Link href="/recommendation">Découvrir mes recommandations <Icon name="arrow-right" size={18} /></Link></div></section>
     <footer className="home-footer"><p>Opportunity Radar AI <span>· Veille personnelle Data & IA</span></p><Link href="/health">État du système <Icon name="arrow-up-right" size={14} /></Link></footer>
-    <details className="optional-notifications"><summary>Notifications de cet appareil</summary><PushNotifications /></details>
   </main>;
 }

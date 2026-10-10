@@ -38,7 +38,7 @@ function SourceCard({ entry }: { entry: SourceHealthEntry }) {
   return <article className="source-card" data-anomaly={hasAnomaly ? "true" : "false"}>
     <div className="source-card-header">
       <span className="organization-avatar" aria-hidden="true">{organizationInitials(name)}</span>
-      <div className="source-card-title"><h3>{name}</h3><span className="source-enabled">{entry.enabled ? "Source activée" : "Source désactivée"}</span></div>
+      <div className="source-card-title"><h3>{name}</h3><span className="source-enabled">Source activée</span></div>
       <span className="source-status" data-status={entry.status?.toLowerCase() ?? "unknown"}>{entry.status === null ? "Aucune collecte" : statusLabels[entry.status] ?? entry.status}</span>
     </div>
     <p className="source-last-run">Dernière collecte enregistrée <strong>{entry.last_run_at === null ? NEVER_RUN : <time dateTime={entry.last_run_at}>{formatDateTime(entry.last_run_at)}</time>}</strong></p>
@@ -61,24 +61,24 @@ function SourceCard({ entry }: { entry: SourceHealthEntry }) {
 
 export default async function SourceHealthPage() {
   const health = await loadSourceHealth();
-  const enabled = health?.items.filter((entry) => entry.enabled).length ?? 0;
-  const successful = health?.items.filter((entry) => entry.status === "SUCCESS").length ?? 0;
-  const failed = health?.items.filter((entry) => entry.status === "FAILED").length ?? 0;
+  const activeSources = health?.items.filter((entry) => entry.enabled) ?? [];
+  const successful = activeSources.filter((entry) => entry.status === "SUCCESS").length;
+  const failed = activeSources.filter((entry) => entry.status === "FAILED").length;
   return <main className="page-shell">
     <header className="hero">
       <div><p className="eyebrow">Vos collectes enregistrées</p><h1>Les sources de votre radar.</h1><p className="subtitle">La dernière collecte de chaque source, ses résultats et les éventuels problèmes signalés.</p></div>
       <Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link>
     </header>
     {health === null ? <section className="status-panel" role="status"><h2>État des sources temporairement indisponible</h2><p>Le radar ne peut pas afficher l’état des sources pour le moment.</p></section>
-      : health.items.length === 0 ? <section className="status-panel" role="status"><h2>Aucune source enregistrée</h2><p>L’état des sources apparaîtra après leur configuration.</p></section>
+      : activeSources.length === 0 ? <section className="status-panel" role="status"><h2>Aucune source activée</h2><p>Les collectes apparaîtront lorsqu’une source sera activée.</p></section>
       : <>
         <section className="matching-summary source-summary" aria-label="Synthèse des dernières collectes">
-          <dl><div><dt>Sources activées</dt><dd>{enabled}</dd></div><div><dt>Dernières collectes réussies</dt><dd>{successful}</dd></div><div><dt>Dernières collectes en échec</dt><dd>{failed}</dd></div></dl>
+          <dl><div><dt>Sources activées</dt><dd>{activeSources.length}</dd></div><div><dt>Dernières collectes réussies</dt><dd>{successful}</dd></div><div><dt>Dernières collectes en échec</dt><dd>{failed}</dd></div></dl>
           <p className="source-summary-note">Les statuts et compteurs correspondent à la dernière collecte enregistrée pour chaque source.</p>
         </section>
         <section aria-labelledby="source-health-heading">
-          <div className="section-heading"><h2 id="source-health-heading">Sources surveillées</h2><p>{health.returned} source{health.returned > 1 ? "s" : ""} connue{health.returned > 1 ? "s" : ""}</p></div>
-          <div className="source-grid">{health.items.map((entry) => <SourceCard key={entry.source_id} entry={entry} />)}</div>
+          <div className="section-heading"><h2 id="source-health-heading">Sources surveillées</h2><p>{activeSources.length} source{activeSources.length > 1 ? "s" : ""} activée{activeSources.length > 1 ? "s" : ""}</p></div>
+          <div className="source-grid">{activeSources.map((entry) => <SourceCard key={entry.source_id} entry={entry} />)}</div>
         </section>
       </>}
   </main>;

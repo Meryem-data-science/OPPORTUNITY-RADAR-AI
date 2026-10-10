@@ -4,6 +4,8 @@
 
 Application locale pour les opportunités Data & IA au Maroc, avec FastAPI, SQLite et Next.js. Le parcours MVP est décrit dans `docs/mvp-interface.md`. Les scripts Windows sont dans `scripts/` ; `Lancer-Radar.cmd` ouvre le site. Ne pas ajouter ou exécuter de tests sans demande de l'utilisateur.
 
+L’interface utilisateur présente seulement les fonctionnalités activées. Ne pas exposer de blocs de fonctionnalités non configurées, de boutons sans action ou de sources désactivées. Les notifications push sont retirées du parcours MVP. Conserver les messages utiles signalant l’échec temporaire d’une fonctionnalité ou d’une source activée.
+
 ## Sauvegarde en fin de séance
 
 Le 11 octobre 2026, l'utilisateur a autorisé la sauvegarde du code sur son dépôt GitHub **après chaque séance de développement**, sans redemander cette confirmation.
