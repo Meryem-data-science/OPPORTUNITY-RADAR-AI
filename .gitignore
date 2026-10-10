@@ -50,3 +50,9 @@ Thumbs.db
 *.swo
 *.tmp
 *.log
+
+# Local assistant configuration and transfer/audit reports
+.claude/
+TRANSFER_README.txt
+TRANSFER_CHECKSUMS.txt
+phase8a2*_audit.txt

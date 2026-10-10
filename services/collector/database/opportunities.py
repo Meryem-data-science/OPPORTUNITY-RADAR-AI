@@ -135,6 +135,8 @@ def _update_candidate(
     candidate: OpportunityCandidate,
     observed_at: str,
 ) -> None:
+    # Collection refreshes content, not recruitment availability. Preserve every
+    # confirmed expiry until the dedicated public availability check proves reopening.
     primary = connection.execute(
         "SELECT source_url FROM opportunities WHERE id = ?", (opportunity_id,)
     ).fetchone()
@@ -166,8 +168,8 @@ def _update_candidate(
             application_url = COALESCE(?, application_url),
             canonical_url = COALESCE(?, canonical_url),
             last_seen_at = ?,
-            status = ?,
-            is_active = 1,
+            status = CASE WHEN status = 'expired' THEN status ELSE ? END,
+            is_active = CASE WHEN status = 'expired' THEN is_active ELSE 1 END,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,

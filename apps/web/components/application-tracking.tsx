@@ -2,6 +2,7 @@
 
 import React from "react";
 import { useRouter } from "next/navigation";
+import Icon from "@/components/icon";
 import {
   SELECTABLE_STATUSES,
   statusLabel,
@@ -31,6 +32,7 @@ export default function ApplicationTracking({
   const [notes, setNotes] = React.useState(application.notes ?? "");
 
   async function send(path: string, body: unknown, refusal: string) {
+    if (busy) return;
     setBusy(true);
     setMessage(null);
     try {
@@ -81,7 +83,7 @@ export default function ApplicationTracking({
   const statusField = `application-${application.id}-status`;
 
   return (
-    <div className="application-tracking">
+    <div className="application-tracking" aria-busy={busy}>
       <p>
         <label htmlFor={statusField}>Statut</label>{" "}
         <select
@@ -142,7 +144,7 @@ export default function ApplicationTracking({
         </p>
         <p>
           <button type="submit" disabled={busy}>
-            Enregistrer le suivi
+            <Icon name="check" size={16} />{busy ? "Enregistrement…" : "Enregistrer le suivi"}
           </button>
         </p>
       </form>

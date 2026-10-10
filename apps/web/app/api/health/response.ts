@@ -7,5 +7,6 @@ export async function createHealthResponse(
 
   return Response.json(health, {
     status: health.status === "ok" ? 200 : 503,
+    headers: { "Cache-Control": "no-store" },
   });
 }

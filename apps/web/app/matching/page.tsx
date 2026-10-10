@@ -1,5 +1,7 @@
 import Link from "next/link";
 import React from "react";
+import Icon from "@/components/icon";
+import { organizationInitials } from "@/lib/display";
 import { loadMatching, type MatchingItem, type MatchingLane, type MatchingResponse } from "@/lib/matching";
 
 export const dynamic = "force-dynamic";
@@ -65,12 +67,10 @@ function SupportingSkillExplanation({ label, value, emptyMessage }: { label: str
 function MatchingCard({ item }: { item: MatchingItem }) {
   const explanation = item.matching.explanation;
   return <article className="matching-card">
-    <p className="organization">{item.opportunity.organization}</p>
-    <h3>{item.opportunity.canonical_title}</h3>
-    <p className="location">{item.opportunity.location ?? "Lieu non précisé"}</p>
+    <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(item.opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{item.opportunity.organization}</p><h3>{item.opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{item.opportunity.location ?? "Lieu non précisé"}</p></div></div>
     <span className="matching-badge">{laneLabels[item.matching.lane]}</span>
     <div className="matching-scores">
-      <p><strong>Qualité du matching</strong><span>{percent(item.matching.match_quality)}</span></p>
+      <p><strong>Adéquation au profil</strong><span>{percent(item.matching.match_quality)}</span></p>
       <p><strong>Couverture des preuves</strong><span>{percent(item.matching.evidence_coverage)}</span></p>
     </div>
     <details className="matching-details"><summary>Pourquoi ce résultat ?</summary>
@@ -81,7 +81,7 @@ function MatchingCard({ item }: { item: MatchingItem }) {
       <SupportingSkillExplanation label="Compétences préférées" value={record(explanation.supporting)?.preferred} emptyMessage="aucune compétence préférée requise" />
       <SupportingSkillExplanation label="Compétences de contexte" value={record(explanation.supporting)?.context} emptyMessage="aucun signal de contexte disponible" />
     </details>
-    <a href={item.opportunity.original_url} target="_blank" rel="noreferrer">Voir l’offre originale</a>
+    <div className="card-footer"><span>Correspondance enregistrée</span><a href={item.opportunity.original_url} target="_blank" rel="noopener noreferrer">Voir l’offre originale<Icon name="arrow-up-right" size={16} /></a></div>
   </article>;
 }
 
@@ -89,7 +89,7 @@ function Ready({ matching }: { matching: MatchingResponse }) {
   const run = matching.current_run!;
   return <>
     <section className="matching-summary" aria-labelledby="matching-summary-heading">
-      <div className="section-heading"><div><h2 id="matching-summary-heading">Matching prêt</h2><p>{run.assessment_count} opportunités évaluées</p></div><p>{matching.history_count} snapshot{matching.history_count > 1 ? "s" : ""} enregistré{matching.history_count > 1 ? "s" : ""}</p></div>
+      <div className="section-heading"><div><h2 id="matching-summary-heading">Correspondances analysées</h2><p>{run.assessment_count} opportunités évaluées</p></div><p>{matching.history_count} analyse{matching.history_count > 1 ? "s" : ""} enregistrée{matching.history_count > 1 ? "s" : ""}</p></div>
       <dl>{lanes.map((lane) => <div key={lane}><dt>{laneLabels[lane]}</dt><dd>{run.lane_counts[lane]}</dd></div>)}</dl>
     </section>
     <div className="matching-lanes">{lanes.map((lane) => {
@@ -107,10 +107,10 @@ function Ready({ matching }: { matching: MatchingResponse }) {
 
 export default async function MatchingPage() {
   const matching = await loadMatching();
-  return <main className="page-shell"><header className="hero"><div><p className="eyebrow">Correspondance avec le profil</p><h1>Matching</h1><p className="subtitle">Ces résultats proviennent du dernier snapshot de matching persisté.</p></div><Link className="health-link" href="/">Retour aux opportunités</Link></header>
-    {matching === null ? <section className="status-panel" role="status"><h2>Matching temporairement indisponible</h2></section>
-      : matching.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Matching non encore calculé</h2><p>Aucun snapshot de matching n’a encore été enregistré.</p></section>
-      : matching.status === "EMPTY" ? <section className="status-panel" role="status"><h2>Aucune opportunité dans le périmètre de matching actuel.</h2></section>
+  return <main className="page-shell"><header className="hero"><div><p className="eyebrow">Comprendre l’adéquation</p><h1>Vos correspondances.</h1><p className="subtitle">Compétences, domaine et proximité sémantique : les résultats de la dernière analyse de votre profil.</p></div><Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link></header>
+    {matching === null ? <section className="status-panel" role="status"><h2>Correspondances temporairement indisponibles</h2></section>
+      : matching.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Correspondances non encore calculées</h2><p>Aucune analyse de correspondance n’a encore été enregistrée.</p></section>
+      : matching.status === "EMPTY" ? <section className="status-panel" role="status"><h2>Aucune opportunité dans le périmètre actuel.</h2><Link className="health-link" href="/explorer">Explorer toutes les offres</Link></section>
       : <Ready matching={matching} />}
   </main>;
 }

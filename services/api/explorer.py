@@ -8,6 +8,7 @@ comparison against a value an earlier phase already persisted:
 
     country / city      opportunity_location_resolutions (Phase 7), RESOLVED only
     opportunity_type    opportunity_constraints.opportunity_type (Phase 3.5)
+    offer_category      persisted qualification / constraint opportunity types
     domain              opportunity_qualifications.fine_primary_category (Phase 8)
     source              opportunity_sources JOIN sources
     freshness           opportunities.last_seen_at against the request clock
@@ -37,6 +38,9 @@ from services.collector.config import DatabaseBackend, load_settings
 from services.collector.database.connection import connect_readonly_database
 from services.collector.logging_config import get_logger
 from services.collector.qualification.fine_taxonomy import FineCategory
+from services.collector.qualification.taxonomy import (
+    OpportunityType as QualificationOpportunityType,
+)
 from services.digital_twin.preferences.models import OpportunityType
 
 
@@ -55,6 +59,40 @@ class ExplorerFreshness(StrEnum):
     LAST_24_HOURS = "24h"
     LAST_7_DAYS = "7d"
     LAST_30_DAYS = "30d"
+
+
+class ExplorerOfferCategory(StrEnum):
+    """Navigation groups built only from persisted opportunity types."""
+
+    STAGES = "STAGES"
+    PFE = "PFE"
+    EMPLOIS = "EMPLOIS"
+    ALTERNANCE = "ALTERNANCE"
+
+
+# Both taxonomies assert positive types; neither establishes a CDI contract.
+OFFER_CATEGORY_TYPES: dict[
+    ExplorerOfferCategory,
+    tuple[tuple[QualificationOpportunityType, ...], tuple[OpportunityType, ...]],
+] = {
+    ExplorerOfferCategory.STAGES: (
+        (QualificationOpportunityType.INTERNSHIP, QualificationOpportunityType.PFE),
+        (
+            OpportunityType.INTERNSHIP, OpportunityType.PFA, OpportunityType.PFE,
+            OpportunityType.SUMMER_INTERNSHIP, OpportunityType.PRE_HIRE_INTERNSHIP,
+        ),
+    ),
+    ExplorerOfferCategory.PFE: (
+        (QualificationOpportunityType.PFE,), (OpportunityType.PFE,),
+    ),
+    ExplorerOfferCategory.EMPLOIS: (
+        (QualificationOpportunityType.JOB, QualificationOpportunityType.GRADUATE),
+        (OpportunityType.FIRST_JOB, OpportunityType.JUNIOR_ROLE),
+    ),
+    ExplorerOfferCategory.ALTERNANCE: (
+        (QualificationOpportunityType.APPRENTICESHIP,), (OpportunityType.ALTERNANCE,),
+    ),
+}
 
 
 FRESHNESS_WINDOWS: dict[ExplorerFreshness, timedelta] = {
@@ -80,6 +118,7 @@ class ExplorerQuery:
     freshness: ExplorerFreshness | None = None
     limit: int = DEFAULT_LIMIT
     offset: int = 0
+    offer_category: ExplorerOfferCategory | None = None
 
 
 class ExplorerResolvedLocationResponse(BaseModel):
@@ -104,6 +143,8 @@ class ExplorerItemResponse(BaseModel):
     fine_primary_category: FineCategory | None
     #: Persisted Phase 3.5 value. `None` means not asserted, never a default.
     opportunity_type: OpportunityType | None
+    #: Persisted qualification type, independently of a constraints row.
+    listing_type: QualificationOpportunityType | None = None
     #: Only RESOLVED persisted resolutions; UNKNOWN/AMBIGUOUS are never shown.
     resolved_locations: list[ExplorerResolvedLocationResponse]
     has_unresolved_location: bool
@@ -184,6 +225,14 @@ def _filtered_from(query: ExplorerQuery, now: Callable[[], datetime]) -> tuple[s
     if query.opportunity_type is not None:
         clauses.append("k.opportunity_type = ?")
         parameters.append(query.opportunity_type.value)
+    if query.offer_category is not None:
+        listing_types, constraint_types = OFFER_CATEGORY_TYPES[query.offer_category]
+        clauses.append(
+            f"(q.opportunity_type IN ({_placeholders(listing_types)})"
+            f" OR k.opportunity_type IN ({_placeholders(constraint_types)}))"
+        )
+        parameters.extend(value.value for value in listing_types)
+        parameters.extend(value.value for value in constraint_types)
     if query.domain is not None:
         clauses.append("q.fine_primary_category = ?")
         parameters.append(query.domain.value)
@@ -287,7 +336,7 @@ def _items(connection: Any, query: ExplorerQuery, now: Callable[[], datetime]) -
         o.last_seen_at, o.source_url, o.application_url, o.canonical_url,
         q.qualification, q.fine_primary_category, q.fine_secondary_categories_json,
         q.fine_category_evidence_json, q.fine_reasons_json, q.fine_classifier_version,
-        k.opportunity_type
+        k.opportunity_type, q.opportunity_type
         {filtered_from}
         ORDER BY o.last_seen_at DESC, o.id DESC
         LIMIT ? OFFSET ?""",
@@ -317,6 +366,7 @@ def _items(connection: Any, query: ExplorerQuery, now: Callable[[], datetime]) -
                 last_seen_at=row[4],
                 fine_primary_category=fine.primary_category,
                 opportunity_type=row[14],
+                listing_type=row[15],
                 resolved_locations=resolved.get(opportunity_id, []),
                 has_unresolved_location=opportunity_id in unresolved,
                 sources=sources.get(opportunity_id, []),

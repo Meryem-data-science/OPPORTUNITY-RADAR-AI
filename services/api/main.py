@@ -8,13 +8,21 @@ candidature. Both resolve the profile on the server; neither accepts one.
 
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import FastAPI, HTTPException, Path, Query, Request, Response, status
+
+from services.api.health import SystemHealthResponse, read_system_health
 
 from services.api.opportunities import (
     OpportunityListResponse,
     OpportunityReadError,
     PUBLIC_DATABASE_ERROR,
     read_opportunities,
+)
+from services.api.opportunity_detail import (
+    OpportunityDetailResponse,
+    OpportunityNotFoundError,
+    PUBLIC_OPPORTUNITY_NOT_FOUND,
+    read_opportunity_detail,
 )
 from services.api.source_health import (
     PUBLIC_SOURCE_HEALTH_ERROR,
@@ -64,6 +72,7 @@ from services.api.explorer import (
     PUBLIC_EXPLORER_ERROR,
     ExplorerApiReadError,
     ExplorerFreshness,
+    ExplorerOfferCategory,
     ExplorerQuery,
     ExplorerResponse,
     read_explorer_surface,
@@ -91,6 +100,18 @@ from services.api.applications import (
 app = FastAPI(title="Opportunity Radar API", version="1.6.0")
 
 
+@app.get("/api/health", response_model=SystemHealthResponse)
+def get_system_health(response: Response) -> SystemHealthResponse:
+    """Report operational readiness without exposing database configuration."""
+    health = read_system_health()
+    response.status_code = (
+        status.HTTP_200_OK if health.status == "ok"
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return health
+
+
 @app.get("/api/opportunities", response_model=OpportunityListResponse)
 def list_opportunities(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -105,6 +126,28 @@ def list_opportunities(
     """
     try:
         return read_opportunities(limit, offset)
+    except OpportunityReadError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=PUBLIC_DATABASE_ERROR,
+        ) from None
+
+
+@app.get(
+    "/api/opportunities/{opportunity_id}", response_model=OpportunityDetailResponse
+)
+def get_opportunity_detail(
+    opportunity_id: Annotated[int, Path(ge=1)], response: Response
+) -> OpportunityDetailResponse:
+    """Return collected text for one visible, active posting, read-only."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return read_opportunity_detail(opportunity_id)
+    except OpportunityNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=PUBLIC_OPPORTUNITY_NOT_FOUND,
+        ) from None
     except OpportunityReadError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -177,6 +220,7 @@ def get_explorer(
     country: Annotated[str | None, Query(pattern=r"^[A-Z]{2}$")] = None,
     city: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     opportunity_type: OpportunityType | None = None,
+    offer_category: ExplorerOfferCategory | None = None,
     domain: FineCategory | None = None,
     source: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     freshness: ExplorerFreshness | None = None,
@@ -190,6 +234,7 @@ def get_explorer(
                 country=country,
                 city=city,
                 opportunity_type=opportunity_type,
+                offer_category=offer_category,
                 domain=domain,
                 source=source,
                 freshness=freshness,

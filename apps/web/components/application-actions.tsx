@@ -1,7 +1,9 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Icon, { type IconName } from "@/components/icon";
 import {
   APPLICATION_ACTIONS,
   statusLabel,
@@ -16,6 +18,7 @@ const LABELS: Record<ApplicationAction, string> = {
 };
 
 const ORDER: readonly ApplicationAction[] = APPLICATION_ACTIONS;
+const ACTION_ICONS: Record<ApplicationAction, IconName> = { SAVE: "bookmark", PREPARE: "folder", MARK_SUBMITTED: "check" };
 
 /**
  * The three real actions on a real opportunity.
@@ -36,8 +39,10 @@ export default function ApplicationActions({
   const router = useRouter();
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
+  const [applicationId, setApplicationId] = React.useState<number | null>(null);
 
   async function run(action: ApplicationAction) {
+    if (busy) return;
     setBusy(true);
     setMessage(null);
     try {
@@ -54,7 +59,9 @@ export default function ApplicationActions({
         );
         return;
       }
-      const payload: { changed?: unknown } = await response.json();
+      const payload: { changed?: unknown; application?: { id?: unknown } } = await response.json();
+      const id = payload.application?.id;
+      if (typeof id === "number" && Number.isInteger(id) && id > 0) setApplicationId(id);
       setMessage(
         payload.changed === true
           ? "Candidature mise à jour."
@@ -79,15 +86,18 @@ export default function ApplicationActions({
         {ORDER.map((action) => (
           <button
             key={action}
+            className={`application-action application-action-${action.toLowerCase()}`}
             type="button"
             disabled={busy}
+            aria-busy={busy}
             onClick={() => run(action)}
           >
-            {LABELS[action]}
+            <Icon name={ACTION_ICONS[action]} size={16} />{LABELS[action]}
           </button>
         ))}
       </p>
       {message !== null && <p role="status">{message}</p>}
+      {(status !== null || applicationId !== null) && <Link className="application-follow-link" href={applicationId === null ? "/applications" : `/applications/${applicationId}`}>Voir {applicationId === null ? "mes candidatures" : "cette candidature"}<Icon name="arrow-right" size={15} /></Link>}
     </div>
   );
 }

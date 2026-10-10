@@ -8,6 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from services.api.active_opportunities import (
+    read_active_opportunity_ids,
+    read_surface_snapshot,
+)
 from services.api.link_priority import (
     SourceObservation,
     preferred_link,
@@ -62,6 +66,8 @@ class MatchingCurrentRunResponse(BaseModel):
     run_id: int
     created_at: str
     assessment_count: int
+    #: The immutable run's count; assessment_count counts the active projection.
+    snapshot_assessment_count: int | None = None
     persistence_version: str
     selection_version: str
     matching_engine_version: str
@@ -155,86 +161,94 @@ def read_matching_surface() -> MatchingResponse:
             enabled = connection.execute("PRAGMA query_only").fetchone()
             if enabled is None or enabled[0] != 1:
                 raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-        current = read_current_matching(connection, profile_id)
-        audit = audit_matching_profile_history(connection, profile_id)
-        if not audit.ok:
-            LOGGER.error(
-                "Matching persistence audit failed.",
+        with read_surface_snapshot(connection):
+            current = read_current_matching(connection, profile_id)
+            audit = audit_matching_profile_history(connection, profile_id)
+            if not audit.ok:
+                LOGGER.error(
+                    "Matching persistence audit failed.",
+                    extra={
+                        "event": "matching_api_audit_failed",
+                        "issue_codes": [item.code for item in audit.issues],
+                    },
+                )
+                raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
+            integrity = MatchingIntegrityResponse(
+                ok=True,
+                audit_version=audit.audit_version,
+                audit_fingerprint=audit.audit_fingerprint,
+            )
+            run_response = None
+            if current.status == "READY":
+                run = current.current_run
+                if run is None:
+                    raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
+                ids = [item.opportunity_id for item in run.assessments]
+                metadata = _metadata(connection, ids)
+                if set(metadata) != set(ids):
+                    raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
+                counts = {lane: 0 for lane in LANES}
+                items = []
+                for assessment in run.assessments:
+                    if assessment.lane not in counts:
+                        raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
+                    counts[assessment.lane] += 1
+                    items.append(
+                        MatchingItemResponse(
+                            opportunity_id=assessment.opportunity_id,
+                            opportunity=metadata[assessment.opportunity_id],
+                            matching=MatchingSnapshotResponse(
+                                lane=assessment.lane,
+                                match_quality=assessment.match_quality,
+                                evidence_coverage=assessment.evidence_coverage,
+                                assessment_fingerprint=assessment.assessment_fingerprint,
+                                explanation=_json_value(assessment.assessment_payload),
+                            ),
+                        )
+                    )
+                if len(items) != run.assessment_count:
+                    raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
+                # Validate the whole snapshot first, then hide closed postings.
+                active_ids = read_active_opportunity_ids(connection, ids)
+                items = [item for item in items if item.opportunity_id in active_ids]
+                counts = {lane: 0 for lane in LANES}
+                for item in items:
+                    counts[item.matching.lane] += 1
+                run_response = MatchingCurrentRunResponse(
+                    run_id=run.run_id,
+                    created_at=run.created_at,
+                    assessment_count=len(items),
+                    snapshot_assessment_count=run.assessment_count,
+                    persistence_version=run.persistence_version,
+                    selection_version=run.selection_version,
+                    matching_engine_version=run.matching_engine_version,
+                    matching_rules_version=run.matching_rules_version,
+                    semantic_percentile_version=run.semantic_percentile_version,
+                    run_fingerprint=run.run_fingerprint,
+                    batch_fingerprint=run.batch_fingerprint,
+                    lane_counts=counts,
+                    items=items,
+                )
+            response = MatchingResponse(
+                profile_id=current.profile_id,
+                status=current.status,
+                persistence_version=current.persistence_version,
+                selection_version=current.selection_version,
+                history_count=current.history_count,
+                current_run=run_response,
+                integrity=integrity,
+            )
+            LOGGER.info(
+                "Matching API request succeeded.",
                 extra={
-                    "event": "matching_api_audit_failed",
-                    "issue_codes": [item.code for item in audit.issues],
+                    "event": "matching_api_request_succeeded",
+                    "status": response.status,
+                    "assessment_count": 0
+                    if run_response is None
+                    else run_response.assessment_count,
                 },
             )
-            raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-        integrity = MatchingIntegrityResponse(
-            ok=True,
-            audit_version=audit.audit_version,
-            audit_fingerprint=audit.audit_fingerprint,
-        )
-        run_response = None
-        if current.status == "READY":
-            run = current.current_run
-            if run is None:
-                raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-            ids = [item.opportunity_id for item in run.assessments]
-            metadata = _metadata(connection, ids)
-            if set(metadata) != set(ids):
-                raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-            counts = {lane: 0 for lane in LANES}
-            items = []
-            for assessment in run.assessments:
-                if assessment.lane not in counts:
-                    raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-                counts[assessment.lane] += 1
-                items.append(
-                    MatchingItemResponse(
-                        opportunity_id=assessment.opportunity_id,
-                        opportunity=metadata[assessment.opportunity_id],
-                        matching=MatchingSnapshotResponse(
-                            lane=assessment.lane,
-                            match_quality=assessment.match_quality,
-                            evidence_coverage=assessment.evidence_coverage,
-                            assessment_fingerprint=assessment.assessment_fingerprint,
-                            explanation=_json_value(assessment.assessment_payload),
-                        ),
-                    )
-                )
-            if len(items) != run.assessment_count:
-                raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
-            run_response = MatchingCurrentRunResponse(
-                run_id=run.run_id,
-                created_at=run.created_at,
-                assessment_count=run.assessment_count,
-                persistence_version=run.persistence_version,
-                selection_version=run.selection_version,
-                matching_engine_version=run.matching_engine_version,
-                matching_rules_version=run.matching_rules_version,
-                semantic_percentile_version=run.semantic_percentile_version,
-                run_fingerprint=run.run_fingerprint,
-                batch_fingerprint=run.batch_fingerprint,
-                lane_counts=counts,
-                items=items,
-            )
-        response = MatchingResponse(
-            profile_id=current.profile_id,
-            status=current.status,
-            persistence_version=current.persistence_version,
-            selection_version=current.selection_version,
-            history_count=current.history_count,
-            current_run=run_response,
-            integrity=integrity,
-        )
-        LOGGER.info(
-            "Matching API request succeeded.",
-            extra={
-                "event": "matching_api_request_succeeded",
-                "status": response.status,
-                "assessment_count": 0
-                if run_response is None
-                else run_response.assessment_count,
-            },
-        )
-        return response
+            return response
     except MatchingApiReadError:
         raise
     except Exception as error:

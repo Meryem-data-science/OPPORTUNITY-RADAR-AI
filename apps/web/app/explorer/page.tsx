@@ -1,13 +1,16 @@
 import Link from "next/link";
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
+import Icon from "@/components/icon";
 import type { ApplicationStatus } from "@/lib/application-contract";
+import { formatDateTime, organizationInitials } from "@/lib/display";
 import { loadApplications } from "@/lib/applications";
 import {
   EXPLORER_DEFAULT_LIMIT,
   EXPLORER_FINE_CATEGORIES,
   EXPLORER_FRESHNESS,
   EXPLORER_MAX_LIMIT,
+  EXPLORER_OFFER_CATEGORIES,
   EXPLORER_OPPORTUNITY_TYPES,
   explorerSearchParams,
   loadExplorer,
@@ -15,6 +18,8 @@ import {
   type ExplorerFineCategory,
   type ExplorerFreshness,
   type ExplorerItem,
+  type ExplorerListingType,
+  type ExplorerOfferCategory,
   type ExplorerOpportunityType,
   type ExplorerQuery,
   type ExplorerResponse,
@@ -49,6 +54,27 @@ const typeLabels: Record<ExplorerOpportunityType, string> = {
   JUNIOR_ROLE: "Poste junior",
 };
 
+const offerCategoryLabels: Record<ExplorerOfferCategory, string> = {
+  STAGES: "Stages (PFA, PFE et autres stages)",
+  PFE: "PFE",
+  EMPLOIS: "Emplois — tous niveaux",
+  ALTERNANCE: "Alternance",
+};
+
+const listingTypeLabels: Record<ExplorerListingType, string> = {
+  PFE: "PFE (projet de fin d’études)",
+  INTERNSHIP: "Stage",
+  GRADUATE: "Programme diplômés",
+  APPRENTICESHIP: "Alternance",
+  JOB: "Emploi",
+  UNKNOWN: "Type non renseigné",
+};
+
+function opportunityTypeLabel(item: ExplorerItem): string {
+  if (item.opportunity_type !== null) return typeLabels[item.opportunity_type];
+  return item.listing_type ? listingTypeLabels[item.listing_type] : "Type non renseigné";
+}
+
 const freshnessLabels: Record<ExplorerFreshness, string> = {
   "24h": "Vue dans les dernières 24 h",
   "7d": "Vue dans les 7 derniers jours",
@@ -73,15 +99,16 @@ function integer(min: number, max: number) {
   };
 }
 
-type ParsedExplorerQuery = { valid: true; query: ExplorerQuery } | { valid: false };
+type ParsedExplorerQuery = { valid: true; query: ExplorerQuery; countrySelection: string } | { valid: false };
 
 /**
- * The Explorer query named by the URL. An absent or empty supported parameter
- * is no filter; a present but malformed one invalidates the whole request, so
- * it is never silently read as "filter absent". Unrelated parameters are ignored.
+ * The URL selects Morocco by default. ALL is a presentation-only choice:
+ * the backend receives no country filter for that selection. Other absent
+ * filters are unrestricted; malformed supported values invalidate the request.
  */
 function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuery {
   const query: ExplorerQuery = {};
+  const countrySelection = first(params.country) ?? "MA";
   let valid = true;
   function read<K extends keyof ExplorerQuery>(key: K, parse: (value: string) => ExplorerQuery[K] | undefined) {
     const value = first(params[key]);
@@ -90,19 +117,27 @@ function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuer
     if (parsed === undefined) valid = false;
     else query[key] = parsed;
   }
-  read("country", (value) => (/^[A-Z]{2}$/.test(value) ? value : undefined));
+  if (countrySelection !== "ALL") {
+    if (/^[A-Z]{2}$/.test(countrySelection)) query.country = countrySelection;
+    else valid = false;
+  }
   read("city", (value) => value);
+  read("offer_category", oneOf(EXPLORER_OFFER_CATEGORIES));
   read("opportunity_type", oneOf(EXPLORER_OPPORTUNITY_TYPES));
   read("domain", oneOf(EXPLORER_FINE_CATEGORIES));
   read("source", (value) => value);
   read("freshness", oneOf(EXPLORER_FRESHNESS));
   read("limit", integer(1, EXPLORER_MAX_LIMIT));
   read("offset", integer(0, Number.MAX_SAFE_INTEGER));
-  return valid ? { valid: true, query } : { valid: false };
+  return valid ? { valid: true, query, countrySelection } : { valid: false };
 }
 
-function explorerHref(query: ExplorerQuery, offset: number): string {
-  return `/explorer?${explorerSearchParams({ ...query, offset }).toString()}`;
+function explorerHref(query: ExplorerQuery, offset: number, countrySelection: string): string {
+  const parameters = explorerSearchParams({ ...query, offset });
+  // Preserve an explicit worldwide selection when navigating the UI. ALL is
+  // never put in the query passed to loadExplorer.
+  parameters.set("country", countrySelection);
+  return `/explorer?${parameters.toString()}`;
 }
 
 function countryLabel(code: string): string {
@@ -114,10 +149,15 @@ function countryLabel(code: string): string {
   }
 }
 
-function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query: ExplorerQuery }) {
+function Filters({ filters, query, countrySelection }: { filters: ExplorerAvailableFilters; query: ExplorerQuery; countrySelection: string }) {
+  const queryWithoutPreciseType = { ...query };
+  delete queryWithoutPreciseType.opportunity_type;
+  const hasPreciseType = query.opportunity_type !== undefined;
   // Presentation only: one option per persisted city_key, labelled with its countries.
+  const countryCodes = [...new Set(["MA", ...(countrySelection === "ALL" ? [] : [countrySelection]), ...filters.countries])];
   const cities = new Map<string, string[]>();
   for (const city of filters.cities) {
+    if (countrySelection !== "ALL" && city.country_code !== countrySelection) continue;
     const countries = cities.get(city.city_key) ?? [];
     if (!countries.includes(city.country_code)) countries.push(city.country_code);
     cities.set(city.city_key, countries);
@@ -125,9 +165,9 @@ function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query:
   return <form className="explorer-filters" method="get" action="/explorer" aria-label="Filtres Explorer">
     <div className="explorer-filter-grid">
       <label>Pays
-        <select name="country" defaultValue={query.country ?? ""}>
-          <option value="">Tous les pays</option>
-          {filters.countries.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
+        <select name="country" defaultValue={countrySelection}>
+          <option value="ALL">Tous les pays</option>
+          {countryCodes.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
         </select>
       </label>
       <label>Ville
@@ -136,10 +176,10 @@ function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query:
           {[...cities].map(([cityKey, countries]) => <option key={cityKey} value={cityKey}>{cityKey} ({countries.join(", ")})</option>)}
         </select>
       </label>
-      <label>Type d’opportunité
-        <select name="opportunity_type" defaultValue={query.opportunity_type ?? ""}>
-          <option value="">Tous les types</option>
-          {filters.opportunity_types.map((type) => <option key={type} value={type}>{typeLabels[type]}</option>)}
+      <label>Type d’offre
+        <select name="offer_category" defaultValue={query.offer_category ?? ""} disabled={hasPreciseType} aria-describedby={hasPreciseType ? "explorer-precise-type" : undefined}>
+          <option value="">{hasPreciseType ? "Filtre précis actif" : "Toutes les offres"}</option>
+          {EXPLORER_OFFER_CATEGORIES.map((category) => <option key={category} value={category}>{offerCategoryLabels[category]}</option>)}
         </select>
       </label>
       <label>Domaine Data/IA
@@ -161,10 +201,15 @@ function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query:
         </select>
       </label>
     </div>
+    {query.opportunity_type !== undefined && <p id="explorer-precise-type" className="muted">
+      <input type="hidden" name="opportunity_type" value={query.opportunity_type} />
+      {query.offer_category !== undefined && <input type="hidden" name="offer_category" value={query.offer_category} />}
+      Filtre précis : {typeLabels[query.opportunity_type]}. <Link className="health-link" href={explorerHref(queryWithoutPreciseType, 0, countrySelection)}>Supprimer le filtre précis</Link> pour choisir une autre catégorie.
+    </p>}
     {query.limit !== undefined && query.limit !== EXPLORER_DEFAULT_LIMIT && <input type="hidden" name="limit" value={query.limit} />}
     <div className="explorer-filter-actions">
       <button type="submit">Appliquer les filtres</button>
-      <Link className="health-link" href="/explorer">Réinitialiser</Link>
+      <Link className="health-link" href="/explorer">Réinitialiser · Maroc</Link>
     </div>
   </form>;
 }
@@ -186,29 +231,30 @@ function Locations({ item }: { item: ExplorerItem }) {
 
 function ExplorerCard({ item, trackedStatus }: { item: ExplorerItem; trackedStatus: ApplicationStatus | null }) {
   return <article className="explorer-card" data-opportunity-id={item.opportunity_id}>
-    <p className="organization">{item.organization}</p>
-    <h3>{item.canonical_title}</h3>
-    <p className="location">{item.raw_location ?? "Lieu non précisé"}</p>
+    <div className="opportunity-card-top">
+      <span className="organization-avatar" aria-hidden="true">{organizationInitials(item.organization)}</span>
+      <div className="opportunity-card-body"><p className="organization">{item.organization}</p><h3>{item.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{item.raw_location ?? "Lieu non précisé"}</p></div>
+    </div>
     <dl className="explorer-meta">
       <div><dt>Domaine Data/IA</dt><dd>{item.fine_primary_category === null ? "Domaine non renseigné" : domainLabels[item.fine_primary_category]}</dd></div>
-      <div><dt>Type d’opportunité</dt><dd>{item.opportunity_type === null ? "Type non renseigné" : typeLabels[item.opportunity_type]}</dd></div>
-      <div><dt>Vue pour la dernière fois</dt><dd>{item.last_seen_at}</dd></div>
+      <div><dt>Type d’offre</dt><dd>{opportunityTypeLabel(item)}</dd></div>
+      <div><dt>Dernière détection</dt><dd>{formatDateTime(item.last_seen_at)}</dd></div>
     </dl>
-    <Locations item={item} />
+    <details className="offer-context"><summary>Localisation et sources</summary><Locations item={item} />
     <div className="explorer-meta-row">
       <strong>Sources</strong>
       {item.sources.length === 0 ? <span className="explorer-unresolved">Aucune source enregistrée</span>
         : <ul className="explorer-chips">{item.sources.map((source) => <li key={source.source_id}>{source.source_id} ({source.source_type})</li>)}</ul>}
-    </div>
+    </div></details>
     <ApplicationActions opportunityId={item.opportunity_id} status={trackedStatus} />
     <div className="card-footer">
-      <span>Opportunité Data/IA persistée</span>
-      <a href={item.original_url} target="_blank" rel="noreferrer">Voir l’offre originale</a>
+      <span>Data & IA</span>
+      <a href={item.original_url} target="_blank" rel="noopener noreferrer">Voir l’offre originale<Icon name="arrow-up-right" size={16} /></a>
     </div>
   </article>;
 }
 
-function Results({ explorer, query, tracked }: { explorer: ExplorerResponse; query: ExplorerQuery; tracked: Map<number, ApplicationStatus> }) {
+function Results({ explorer, query, tracked, countrySelection }: { explorer: ExplorerResponse; query: ExplorerQuery; tracked: Map<number, ApplicationStatus>; countrySelection: string }) {
   const { items, total, returned, limit, offset } = explorer;
   const hasPrevious = offset > 0;
   const hasNext = offset + returned < total;
@@ -219,27 +265,29 @@ function Results({ explorer, query, tracked }: { explorer: ExplorerResponse; que
     </div>
     {items.length === 0 ? <div className="status-panel" role="status">
       <h2>Aucune opportunité ne correspond à ces filtres</h2>
-      <p><Link href="/explorer">Réinitialiser les filtres</Link></p>
+      <p><Link href="/explorer">Réinitialiser les filtres · Maroc</Link></p>
     </div>
       // Rendered in exactly the order the API returned: navigation, not a ranking.
       : <div className="explorer-list">{items.map((item) => <ExplorerCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
     {(hasPrevious || hasNext) && <nav className="explorer-pagination" aria-label="Pagination Explorer">
-      {hasPrevious && <Link className="health-link" href={explorerHref(query, Math.max(offset - limit, 0))}>Page précédente</Link>}
-      {hasNext && <Link className="health-link" href={explorerHref(query, offset + returned)}>Page suivante</Link>}
+      {hasPrevious && <Link className="health-link" href={explorerHref(query, Math.max(offset - limit, 0), countrySelection)}>Page précédente</Link>}
+      {hasNext && <Link className="health-link" href={explorerHref(query, offset + returned, countrySelection)}>Page suivante</Link>}
     </nav>}
   </section>;
 }
 
-function Header() {
+function Header({ countrySelection }: { countrySelection?: string }) {
+  const scope = countrySelection === "ALL" ? "Tous les pays."
+    : countrySelection === "MA" ? "Pays sélectionné : Maroc."
+    : countrySelection ? `Pays sélectionné : ${countryLabel(countrySelection)}.` : "";
   return <header className="hero">
     <div>
       <p className="eyebrow">Exploration Data & IA</p>
-      <h1>Explorer Data & AI</h1>
-      <p className="subtitle">Parcourez les opportunités Data/IA enregistrées par le radar, indépendamment du matching et de la recommandation pour votre CV.</p>
+      <h1>Trouvez votre prochaine opportunité.</h1>
+      <p className="subtitle">Toutes les offres Data & IA : stages, PFE et emplois, tous niveaux. {scope} Le type de contrat est à vérifier dans l’annonce d’origine.</p>
     </div>
     <nav className="hero-links" aria-label="Navigation Explorer">
-      <Link className="health-link" href="/recommendation">Recommandé pour mon CV</Link>
-      <Link className="health-link" href="/">Retour aux opportunités</Link>
+      <Link className="health-link" href="/recommendation">Mes recommandations<Icon name="arrow-right" size={16} /></Link>
     </nav>
   </header>;
 }
@@ -251,25 +299,25 @@ export default async function ExplorerPage({ searchParams }: { searchParams: Pro
     return <main className="page-shell">
       <Header />
       <section className="status-panel" role="status">
-        <h2>Paramètres Explorer invalides</h2>
-        <p>Un ou plusieurs paramètres de l’adresse ne sont pas reconnus. <Link href="/explorer">Revenir à l’Explorer sans filtre</Link></p>
+        <h2>Filtres non reconnus</h2>
+        <p>Un ou plusieurs paramètres de l’adresse ne sont pas reconnus. <Link href="/explorer">Revenir aux offres au Maroc</Link></p>
       </section>
     </main>;
   }
-  const query = parsed.query;
+  const { query, countrySelection } = parsed;
   // Read independently: tracking being unavailable must not hide the Explorer.
   const [explorer, applications] = await Promise.all([loadExplorer(query), loadApplications()]);
   const tracked = new Map<number, ApplicationStatus>(
     (applications?.items ?? []).map((application) => [application.opportunity_id, application.status]),
   );
   return <main className="page-shell">
-    <Header />
+    <Header countrySelection={countrySelection} />
     {explorer === null ? <section className="status-panel" role="status">
-      <h2>Explorer temporairement indisponible</h2>
-      <p>Le radar ne peut pas afficher l’exploration pour le moment.</p>
+      <h2>Offres temporairement indisponibles</h2>
+      <p>Le radar ne peut pas afficher les offres pour le moment.</p><Link className="health-link" href="/source-health">Consulter l’état des sources</Link>
     </section> : <>
-      <Filters filters={explorer.available_filters} query={query} />
-      <Results explorer={explorer} query={query} tracked={tracked} />
+      <Filters filters={explorer.available_filters} query={query} countrySelection={countrySelection} />
+      <Results explorer={explorer} query={query} tracked={tracked} countrySelection={countrySelection} />
     </>}
   </main>;
 }

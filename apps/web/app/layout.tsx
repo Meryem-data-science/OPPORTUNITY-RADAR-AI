@@ -1,10 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import ServiceWorkerRegistration from "@/components/service-worker-registration";
+import AppShell from "@/components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Opportunity Radar AI",
-  description: "Opportunity Radar AI project foundation",
+  description: "Explorez les opportunités Data et IA et suivez vos candidatures.",
   applicationName: "Opportunity Radar AI",
   // `app/manifest.ts` is served at this path and linked automatically; naming
   // it here keeps the link explicit alongside the rest of the PWA metadata.
@@ -25,10 +26,10 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="fr">
       <body>
         <ServiceWorkerRegistration />
-        {children}
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

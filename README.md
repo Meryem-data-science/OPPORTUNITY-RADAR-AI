@@ -1,5 +1,11 @@
 # Opportunity Radar AI
 
+## MVP local et sauvegarde GitHub
+
+Le parcours actuel de présentation est décrit dans [docs/mvp-interface.md](docs/mvp-interface.md). Double-cliquer sur **Lancer-Radar.cmd** pour ouvrir le site local.
+
+Après chaque séance de développement avec l'agent, le code est sauvegardé sur la branche **`sauvegarde-mvp-2026-10-11`**, conformément à `AGENTS.md`. Pour les modifications faites ailleurs, utiliser **Sauvegarder-GitHub.cmd**. La procédure de récupération et le périmètre des données privées sont décrits dans [docs/github-backup.md](docs/github-backup.md).
+
 Opportunity Radar AI is a locally operated opportunity-collection and review
 prototype for Data & AI roles. Phase 2 implements a complete local path from
 three real sources, through SQLite persistence and deterministic qualification,

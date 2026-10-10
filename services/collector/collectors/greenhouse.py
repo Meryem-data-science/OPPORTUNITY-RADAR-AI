@@ -7,7 +7,12 @@ import httpx
 
 from services.collector.collectors.base import BaseCollector
 from services.collector.models.opportunity import OpportunityCandidate
+from services.collector.logging_config import get_logger
+from services.collector.official_links import refresh_official_offer_links
 from services.collector.sources import SourceConfig
+
+
+LOGGER = get_logger("services.collector.greenhouse")
 
 
 class GreenhouseCollectionError(RuntimeError):
@@ -62,9 +67,35 @@ class GreenhouseCollector(BaseCollector):
                 f"Greenhouse network request failed: {type(error).__name__}"
             ) from error
         try:
-            return response.json()
+            payload = response.json()
         except ValueError as error:
             raise GreenhousePayloadError("Greenhouse returned invalid JSON") from error
+        if self.source.board_token == "artefact":
+            self._refresh_official_links(payload)
+        return payload
+
+    def _refresh_official_links(self, primary_payload: Any) -> None:
+        """An optional second public board supplies presentation links only."""
+        try:
+            self.parse(primary_payload)
+            endpoint = f"{self.API_ROOT}/artefactlinkedin/jobs"
+            if self._client is not None:
+                response = self._client.get(
+                    endpoint, params={"content": "true"}, timeout=self.TIMEOUT_SECONDS,
+                )
+            else:
+                response = httpx.get(
+                    endpoint, params={"content": "true"}, timeout=self.TIMEOUT_SECONDS,
+                    follow_redirects=True,
+                )
+            response.raise_for_status()
+            refresh_official_offer_links(primary_payload, response.json())
+        except Exception as error:
+            # Do not fail the real board's collection or expose collected text.
+            LOGGER.warning(
+                "Optional official posting links could not be refreshed.",
+                extra={"event": "official_offer_links_refresh_failed", "error_type": type(error).__name__},
+            )
 
     def parse(self, payload: Any) -> list[dict[str, Any]]:
         """Validate the top-level Greenhouse jobs collection."""

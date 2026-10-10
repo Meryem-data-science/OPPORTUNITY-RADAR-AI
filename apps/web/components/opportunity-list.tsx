@@ -2,7 +2,9 @@
 
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
+import Icon from "@/components/icon";
 import type { ApplicationStatus } from "@/lib/application-contract";
+import { formatDate, organizationInitials } from "@/lib/display";
 import {
   OPPORTUNITIES_PAGE_SIZE,
   applyOpportunityPage,
@@ -49,26 +51,30 @@ const LOAD_FAILED =
 
 export type TrackedStatuses = Readonly<Record<string, ApplicationStatus>>;
 
-function OpportunityCard({
+export function OpportunityCard({
   opportunity,
   trackedStatus,
+  offerLabel,
 }: {
   opportunity: Opportunity;
   trackedStatus: ApplicationStatus | null;
+  offerLabel?: string;
 }) {
   return (
     <article className="opportunity-card">
-      <div>
-        <p className="organization">{opportunity.organization}</p>
-        <h2>{opportunity.canonical_title}</h2>
-        <p className="location">{opportunity.location ?? "Lieu non précisé"}</p>
+      <div className="opportunity-card-top">
+        <span className="organization-avatar" aria-hidden="true">{organizationInitials(opportunity.organization)}</span>
+        <div className="opportunity-card-body">
+          <p className="organization">{opportunity.organization}</p>
+          <h3>{opportunity.canonical_title}</h3>
+          <p className="location"><Icon name="pin" size={15} />{opportunity.location ?? "Lieu non précisé"}</p>
+          {offerLabel && <span className="opportunity-kind">{offerLabel}</span>}
+        </div>
       </div>
       <ApplicationActions opportunityId={opportunity.id} status={trackedStatus} />
       <div className="card-footer">
-        <span>Vue récemment par le radar</span>
-        <a href={opportunity.original_url} target="_blank" rel="noreferrer">
-          Voir l’offre originale
-        </a>
+        <span>Détectée le {formatDate(opportunity.last_seen_at)}</span>
+        <a href={opportunity.original_url} target="_blank" rel="noopener noreferrer">Voir l’offre originale<Icon name="arrow-up-right" size={16} /></a>
       </div>
     </article>
   );

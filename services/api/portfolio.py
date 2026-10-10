@@ -8,6 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from services.api.active_opportunities import (
+    read_active_opportunity_ids,
+    read_surface_snapshot,
+)
 from services.api.link_priority import (
     SourceObservation,
     preferred_link,
@@ -71,6 +75,8 @@ class PortfolioCurrentRunResponse(BaseModel):
     matching_run_id: int
     created_at: str
     assessment_count: int
+    #: The immutable run's count; assessment_count counts the active projection.
+    snapshot_assessment_count: int | None = None
     included_count: int
     excluded_count: int
     bucket_counts: dict[str, int]
@@ -197,99 +203,109 @@ def read_portfolio_surface() -> PortfolioResponse:
         enabled = connection.execute("PRAGMA query_only").fetchone()
         if enabled is None or enabled[0] != 1:
             raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-        current = read_current_portfolio(connection, profile_id)
-        audit = audit_current_portfolio(connection, profile_id)
-        if audit.status is PortfolioProfileAuditStatus.CORRUPT:
-            LOGGER.error(
-                "Portfolio audit failed.",
-                extra={
-                    "event": "portfolio_api_audit_failed",
-                    "issue_codes": [issue.code.value for issue in audit.issues],
-                },
-            )
-            raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-        run_response = None
-        if current.status.value == "READY":
-            if (
-                audit.status is not PortfolioProfileAuditStatus.READY
-                or current.current_run is None
-            ):
-                raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-            run = current.current_run
-            ids = [item.opportunity_id for item in run.assessments]
-            metadata = _metadata(connection, ids)
-            if set(metadata) != set(ids) or len(ids) != len(set(ids)):
-                raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-            items = [
-                PortfolioItemResponse(
-                    opportunity_id=a.opportunity_id,
-                    opportunity=metadata[a.opportunity_id],
-                    portfolio=_snapshot(a),
+        with read_surface_snapshot(connection):
+            current = read_current_portfolio(connection, profile_id)
+            audit = audit_current_portfolio(connection, profile_id)
+            if audit.status is PortfolioProfileAuditStatus.CORRUPT:
+                LOGGER.error(
+                    "Portfolio audit failed.",
+                    extra={
+                        "event": "portfolio_api_audit_failed",
+                        "issue_codes": [issue.code.value for issue in audit.issues],
+                    },
                 )
-                for a in run.assessments
-            ]
-            items.sort(key=lambda item: item.opportunity_id)
-            bucket_counts = {
-                "SAFE": run.safe_count,
-                "TARGET": run.target_count,
-                "AMBITIOUS": run.ambitious_count,
-            }
-            if (
-                len(items) != run.assessment_count
-                or run.included_count + run.excluded_count != run.assessment_count
-                or sum(bucket_counts.values()) != run.included_count
-            ):
                 raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-            for item in items:
-                snapshot = item.portfolio
-                included = snapshot.disposition == "INCLUDED"
-                matched, total, score = (
-                    snapshot.required_skill_matched_count,
-                    snapshot.required_skill_total_count,
-                    snapshot.required_skill_score,
-                )
+            run_response = None
+            if current.status.value == "READY":
                 if (
-                    included != (snapshot.bucket is not None)
-                    or matched < 0
-                    or total < 0
-                    or matched > total
-                    or (total == 0 and (matched != 0 or score is not None))
-                    or (
-                        total > 0
-                        and (
-                            score is None
-                            or round(score, 12) != round(matched / total, 12)
-                        )
-                    )
+                    audit.status is not PortfolioProfileAuditStatus.READY
+                    or current.current_run is None
                 ):
                     raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-            run_response = PortfolioCurrentRunResponse(
-                run_id=run.run_id,
-                priority_run_id=run.priority_run_id,
-                matching_run_id=run.matching_run_id,
-                created_at=run.created_at,
-                assessment_count=run.assessment_count,
-                included_count=run.included_count,
-                excluded_count=run.excluded_count,
-                bucket_counts=bucket_counts,
-                persistence_version=run.persistence_version,
-                input_assembly_version=run.input_assembly_version,
-                portfolio_engine_version=run.portfolio_engine_version,
-                portfolio_rules_version=run.portfolio_rules_version,
-                priority_run_fingerprint=run.priority_run_fingerprint,
-                matching_run_fingerprint=run.matching_run_fingerprint,
-                run_fingerprint=run.run_fingerprint,
-                items=items,
+                run = current.current_run
+                ids = [item.opportunity_id for item in run.assessments]
+                metadata = _metadata(connection, ids)
+                if set(metadata) != set(ids) or len(ids) != len(set(ids)):
+                    raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
+                items = [
+                    PortfolioItemResponse(
+                        opportunity_id=a.opportunity_id,
+                        opportunity=metadata[a.opportunity_id],
+                        portfolio=_snapshot(a),
+                    )
+                    for a in run.assessments
+                ]
+                items.sort(key=lambda item: item.opportunity_id)
+                bucket_counts = {
+                    "SAFE": run.safe_count,
+                    "TARGET": run.target_count,
+                    "AMBITIOUS": run.ambitious_count,
+                }
+                if (
+                    len(items) != run.assessment_count
+                    or run.included_count + run.excluded_count != run.assessment_count
+                    or sum(bucket_counts.values()) != run.included_count
+                ):
+                    raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
+                for item in items:
+                    snapshot = item.portfolio
+                    included = snapshot.disposition == "INCLUDED"
+                    matched, total, score = (
+                        snapshot.required_skill_matched_count,
+                        snapshot.required_skill_total_count,
+                        snapshot.required_skill_score,
+                    )
+                    if (
+                        included != (snapshot.bucket is not None)
+                        or matched < 0
+                        or total < 0
+                        or matched > total
+                        or (total == 0 and (matched != 0 or score is not None))
+                        or (
+                            total > 0
+                            and (
+                                score is None
+                                or round(score, 12) != round(matched / total, 12)
+                            )
+                        )
+                    ):
+                        raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
+                active_ids = read_active_opportunity_ids(connection, ids)
+                items = [item for item in items if item.opportunity_id in active_ids]
+                bucket_counts = {bucket: 0 for bucket in BUCKETS}
+                included_count = 0
+                for item in items:
+                    if item.portfolio.disposition == "INCLUDED":
+                        included_count += 1
+                        bucket_counts[item.portfolio.bucket] += 1
+                run_response = PortfolioCurrentRunResponse(
+                    run_id=run.run_id,
+                    priority_run_id=run.priority_run_id,
+                    matching_run_id=run.matching_run_id,
+                    created_at=run.created_at,
+                    assessment_count=len(items),
+                    snapshot_assessment_count=run.assessment_count,
+                    included_count=included_count,
+                    excluded_count=len(items) - included_count,
+                    bucket_counts=bucket_counts,
+                    persistence_version=run.persistence_version,
+                    input_assembly_version=run.input_assembly_version,
+                    portfolio_engine_version=run.portfolio_engine_version,
+                    portfolio_rules_version=run.portfolio_rules_version,
+                    priority_run_fingerprint=run.priority_run_fingerprint,
+                    matching_run_fingerprint=run.matching_run_fingerprint,
+                    run_fingerprint=run.run_fingerprint,
+                    items=items,
+                )
+            return PortfolioResponse(
+                profile_id=current.profile_id,
+                status=current.status.value,
+                persistence_version=current.persistence_version,
+                input_assembly_version=current.input_assembly_version,
+                history_count=current.history_count,
+                current_run=run_response,
+                integrity=PortfolioIntegrityResponse(ok=True),
             )
-        return PortfolioResponse(
-            profile_id=current.profile_id,
-            status=current.status.value,
-            persistence_version=current.persistence_version,
-            input_assembly_version=current.input_assembly_version,
-            history_count=current.history_count,
-            current_run=run_response,
-            integrity=PortfolioIntegrityResponse(ok=True),
-        )
     except PortfolioApiReadError:
         raise
     except Exception as error:

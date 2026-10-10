@@ -8,6 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from services.api.active_opportunities import (
+    read_active_opportunity_ids,
+    read_surface_snapshot,
+)
 from services.api.link_priority import (
     SourceObservation,
     preferred_link,
@@ -71,6 +75,8 @@ class PriorityCurrentRunResponse(BaseModel):
     evaluation_date: str
     created_at: str
     assessment_count: int
+    #: The immutable run's count; assessment_count counts the active projection.
+    snapshot_assessment_count: int | None = None
     persistence_version: str
     input_assembly_version: str
     priority_engine_version: str
@@ -218,89 +224,96 @@ def read_priority_surface() -> PriorityResponse:
         enabled = connection.execute("PRAGMA query_only").fetchone()
         if enabled is None or enabled[0] != 1:
             raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-        current = read_current_priority(connection, profile_id)
-        audit = audit_current_priority(connection, profile_id)
-        if audit.status is PriorityProfileAuditStatus.CORRUPT:
-            LOGGER.error(
-                "Priority audit failed.",
-                extra={
-                    "event": "priority_api_audit_failed",
-                    "issue_codes": [issue.code.value for issue in audit.issues],
-                },
-            )
-            raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-        run_response = None
-        if current.status.value == "READY":
-            if (
-                audit.status is not PriorityProfileAuditStatus.READY
-                or current.current_run is None
-            ):
-                raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-            run = current.current_run
-            ids = [item.opportunity_id for item in run.assessments]
-            metadata = _metadata(connection, ids)
-            if set(metadata) != set(ids) or len(ids) != len(set(ids)):
-                raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-            counts = {category: 0 for category in CATEGORIES}
-            items = []
-            for assessment in run.assessments:
-                category = (
-                    "NONE"
-                    if assessment.priority_category is None
-                    else assessment.priority_category.value
+        with read_surface_snapshot(connection):
+            current = read_current_priority(connection, profile_id)
+            audit = audit_current_priority(connection, profile_id)
+            if audit.status is PriorityProfileAuditStatus.CORRUPT:
+                LOGGER.error(
+                    "Priority audit failed.",
+                    extra={
+                        "event": "priority_api_audit_failed",
+                        "issue_codes": [issue.code.value for issue in audit.issues],
+                    },
                 )
-                counts[category] += 1
-                items.append(
-                    PriorityItemResponse(
-                        opportunity_id=assessment.opportunity_id,
-                        opportunity=metadata[assessment.opportunity_id],
-                        priority=_snapshot(assessment),
+                raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
+            run_response = None
+            if current.status.value == "READY":
+                if (
+                    audit.status is not PriorityProfileAuditStatus.READY
+                    or current.current_run is None
+                ):
+                    raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
+                run = current.current_run
+                ids = [item.opportunity_id for item in run.assessments]
+                metadata = _metadata(connection, ids)
+                if set(metadata) != set(ids) or len(ids) != len(set(ids)):
+                    raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
+                counts = {category: 0 for category in CATEGORIES}
+                items = []
+                for assessment in run.assessments:
+                    category = (
+                        "NONE"
+                        if assessment.priority_category is None
+                        else assessment.priority_category.value
+                    )
+                    counts[category] += 1
+                    items.append(
+                        PriorityItemResponse(
+                            opportunity_id=assessment.opportunity_id,
+                            opportunity=metadata[assessment.opportunity_id],
+                            priority=_snapshot(assessment),
+                        )
+                    )
+                rank = {category: index for index, category in enumerate(CATEGORIES)}
+                items.sort(
+                    key=lambda item: (
+                        rank[
+                            "NONE"
+                            if item.priority.category is None
+                            else item.priority.category
+                        ],
+                        item.priority.priority_score is None,
+                        -(item.priority.priority_score or 0),
+                        item.opportunity_id,
                     )
                 )
-            rank = {category: index for index, category in enumerate(CATEGORIES)}
-            items.sort(
-                key=lambda item: (
-                    rank[
-                        "NONE"
-                        if item.priority.category is None
-                        else item.priority.category
-                    ],
-                    item.priority.priority_score is None,
-                    -(item.priority.priority_score or 0),
-                    item.opportunity_id,
+                if (
+                    len(items) != run.assessment_count
+                    or sum(counts.values()) != run.assessment_count
+                ):
+                    raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
+                active_ids = read_active_opportunity_ids(connection, ids)
+                items = [item for item in items if item.opportunity_id in active_ids]
+                counts = {category: 0 for category in CATEGORIES}
+                for item in items:
+                    counts[item.priority.category or "NONE"] += 1
+                run_response = PriorityCurrentRunResponse(
+                    run_id=run.run_id,
+                    matching_run_id=run.matching_run_id,
+                    evaluation_date=run.evaluation_date.isoformat(),
+                    created_at=run.created_at,
+                    assessment_count=len(items),
+                    snapshot_assessment_count=run.assessment_count,
+                    persistence_version=run.persistence_version,
+                    input_assembly_version=run.input_assembly_version,
+                    priority_engine_version=run.priority_engine_version,
+                    priority_rules_version=run.priority_rules_version,
+                    freshness_version=run.freshness_version,
+                    quality_version=run.quality_version,
+                    matching_run_fingerprint=run.matching_run_fingerprint,
+                    run_fingerprint=run.run_fingerprint,
+                    category_counts=counts,
+                    items=items,
                 )
+            return PriorityResponse(
+                profile_id=current.profile_id,
+                status=current.status.value,
+                persistence_version=current.persistence_version,
+                input_assembly_version=current.input_assembly_version,
+                history_count=current.history_count,
+                current_run=run_response,
+                integrity=PriorityIntegrityResponse(ok=True),
             )
-            if (
-                len(items) != run.assessment_count
-                or sum(counts.values()) != run.assessment_count
-            ):
-                raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-            run_response = PriorityCurrentRunResponse(
-                run_id=run.run_id,
-                matching_run_id=run.matching_run_id,
-                evaluation_date=run.evaluation_date.isoformat(),
-                created_at=run.created_at,
-                assessment_count=run.assessment_count,
-                persistence_version=run.persistence_version,
-                input_assembly_version=run.input_assembly_version,
-                priority_engine_version=run.priority_engine_version,
-                priority_rules_version=run.priority_rules_version,
-                freshness_version=run.freshness_version,
-                quality_version=run.quality_version,
-                matching_run_fingerprint=run.matching_run_fingerprint,
-                run_fingerprint=run.run_fingerprint,
-                category_counts=counts,
-                items=items,
-            )
-        return PriorityResponse(
-            profile_id=current.profile_id,
-            status=current.status.value,
-            persistence_version=current.persistence_version,
-            input_assembly_version=current.input_assembly_version,
-            history_count=current.history_count,
-            current_run=run_response,
-            integrity=PriorityIntegrityResponse(ok=True),
-        )
     except PriorityApiReadError:
         raise
     except Exception as error:

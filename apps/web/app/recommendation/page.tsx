@@ -1,7 +1,9 @@
 import Link from "next/link";
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
+import Icon from "@/components/icon";
 import type { ApplicationStatus } from "@/lib/application-contract";
+import { organizationInitials } from "@/lib/display";
 import { loadApplications } from "@/lib/applications";
 import {
   loadRecommendation,
@@ -16,9 +18,9 @@ export const dynamic = "force-dynamic";
 
 const dispositionLabels: Record<RecommendationDisposition, string> = {
   RECOMMENDED: "Recommandée",
-  UNCERTAIN: "Des incertitudes restent à lever",
-  OUTSIDE_PREFERENCES: "Contredit une préférence déclarée",
-  KNOWN_BLOCKER: "Un obstacle connu existe",
+  UNCERTAIN: "À confirmer",
+  OUTSIDE_PREFERENCES: "Hors préférences",
+  KNOWN_BLOCKER: "Obstacle identifié",
 };
 
 const fineCategoryLabels: Record<FineCategory, string> = {
@@ -128,23 +130,21 @@ function RecommendationCard({ item, trackedStatus }: { item: RecommendationItem;
       <span className="recommendation-rank">n° {item.rank_position}</span>
       <span className={`recommendation-badge recommendation-badge-${recommendation.disposition.toLowerCase()}`}>{dispositionLabels[recommendation.disposition]}</span>
     </div>
-    <p className="organization">{opportunity.organization}</p>
-    <h3>{opportunity.canonical_title}</h3>
-    <p className="location">{opportunity.location ?? "Lieu non précisé"}</p>
+    <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{opportunity.organization}</p><h3>{opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{opportunity.location ?? "Lieu non précisé"}</p></div></div>
     <div className="matching-scores">
       <p><strong>Score de recommandation</strong><span>{recommendation.recommendation_score === null ? "Score non disponible" : percent(recommendation.recommendation_score)}</span></p>
       <p><strong>Couverture des preuves</strong><span>{percent(recommendation.evidence_coverage)}</span></p>
     </div>
     <p className="recommendation-category"><strong>Catégorie Data/IA</strong><span>{fineCategoryLabel(opportunity)}</span></p>
-    <div className="recommendation-reason-groups">
+    <details className="recommendation-explanation"><summary><Icon name="sparkles" size={16} />Comprendre cette recommandation</summary><div className="recommendation-reason-groups">
       <ReasonGroup title="Forces" kind="strengths" codes={recommendation.strengths} emptyMessage="Aucune force établie." />
       <ReasonGroup title="Écarts confirmés" kind="gaps" codes={recommendation.confirmed_gaps} emptyMessage="Aucun écart confirmé." />
       <ReasonGroup title="À confirmer" kind="unknowns" codes={recommendation.unknowns} emptyMessage="Aucun point à confirmer." />
-    </div>
+    </div></details>
     <ApplicationActions opportunityId={item.opportunity_id} status={trackedStatus} />
     <div className="card-footer">
-      <span>Classement persisté</span>
-      <a href={opportunity.original_url} target="_blank" rel="noreferrer">Voir l’offre originale</a>
+      <span>Classement enregistré</span>
+      <a href={opportunity.original_url} target="_blank" rel="noopener noreferrer">Voir l’offre originale<Icon name="arrow-up-right" size={16} /></a>
     </div>
   </article>;
 }
@@ -160,11 +160,11 @@ function Ready({ recommendation, tracked }: { recommendation: RecommendationResp
         <div>
           <h2 id="recommendation-heading">Recommandations</h2>
           <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""}</p>
-          <p className="recommendation-target-note">Seules les opportunités dont la géographie ciblée et le type d’opportunité sont confirmés par la recommandation enregistrée sont affichées. Cette confirmation porte uniquement sur ces deux critères de recherche : elle ne dit rien de votre compatibilité globale ni de votre éligibilité, que chaque carte détaille séparément.</p>
+          <p className="recommendation-target-note">Les cartes confirment la géographie et le type d’opportunité recherchés. L’adéquation globale et l’éligibilité sont détaillées pour chaque offre.</p>
         </div>
-        <p>{recommendation.history_count} snapshot{recommendation.history_count > 1 ? "s" : ""} enregistré{recommendation.history_count > 1 ? "s" : ""}</p>
+        <p>{recommendation.history_count} analyse{recommendation.history_count > 1 ? "s" : ""} enregistrée{recommendation.history_count > 1 ? "s" : ""}</p>
       </div>
-      {shown.length === 0 ? <div className="status-panel" role="status"><p>Aucune opportunité confirmée pour la géographie et le type d’opportunité ciblés dans cette recommandation.</p></div>
+      {shown.length === 0 ? <div className="status-panel" role="status"><p>Aucune opportunité confirmée pour la géographie et le type d’opportunité ciblés dans cette recommandation.</p><Link className="health-link" href="/explorer">Explorer toutes les offres</Link></div>
         // Rendered in exactly the order the API returned: the ranking is Phase 9's.
         : <div className="recommendation-list">{shown.map((item) => <RecommendationCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
     </section>
@@ -195,8 +195,8 @@ export default async function RecommendationPage() {
   );
   return <main className="page-shell">
     <header className="hero">
-      <div><p className="eyebrow">Recommandation persistée</p><h1>Recommandé pour mon CV</h1><p className="subtitle">Ce classement provient de la dernière recommandation enregistrée pour votre profil.</p></div>
-      <Link className="health-link" href="/">Retour aux opportunités</Link>
+      <div><p className="eyebrow">Votre sélection personnalisée</p><h1>Des opportunités qui vous correspondent.</h1><p className="subtitle">Le dernier classement enregistré pour votre profil, avec ses forces et ses points à confirmer.</p></div>
+      <Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link>
     </header>
     {recommendation === null ? <section className="status-panel" role="status"><h2>Recommandations temporairement indisponibles</h2><p>Le radar ne peut pas afficher les recommandations pour le moment.</p></section>
       : recommendation.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Recommandation non synchronisée</h2><p>Aucune recommandation n’a encore été synchronisée.</p></section>

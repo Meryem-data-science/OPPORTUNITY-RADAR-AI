@@ -8,13 +8,17 @@ was kept as canonical.
 
 The policy is expressed once here, for the source types actually supported
 today, and read from data already persisted in `opportunity_sources` joined to
-`sources`. It is read-only and adds no column, table, or migration.
+`sources`. A validated local cache can choose the equivalent descriptive
+posting on the same company's public ATS. Reading adds no column, table,
+network request, or migration.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable
+
+from services.collector.official_links import resolve_official_offer_url
 
 
 #: Source types whose observations point at an official career page / ATS,
@@ -61,11 +65,11 @@ def preferred_link(
     source_url: str | None,
     canonical_url: str | None,
 ) -> str | None:
-    """Return the first usable link, preferring application, then source, then canonical."""
-    for value in (application_url, source_url, canonical_url):
+    """Prefer the original posting, then canonical posting, then application form."""
+    for value in (source_url, canonical_url, application_url):
         usable = _usable(value)
         if usable is not None:
-            return usable
+            return resolve_official_offer_url(usable)
     return None
 
 

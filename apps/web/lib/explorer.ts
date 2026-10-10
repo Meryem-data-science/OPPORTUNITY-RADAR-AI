@@ -21,6 +21,12 @@ export const EXPLORER_OPPORTUNITY_TYPES = [
 ] as const;
 export type ExplorerOpportunityType = (typeof EXPLORER_OPPORTUNITY_TYPES)[number];
 
+export const EXPLORER_OFFER_CATEGORIES = ["STAGES", "PFE", "EMPLOIS", "ALTERNANCE"] as const;
+export type ExplorerOfferCategory = (typeof EXPLORER_OFFER_CATEGORIES)[number];
+
+export const EXPLORER_LISTING_TYPES = ["PFE", "INTERNSHIP", "GRADUATE", "APPRENTICESHIP", "JOB", "UNKNOWN"] as const;
+export type ExplorerListingType = (typeof EXPLORER_LISTING_TYPES)[number];
+
 export const EXPLORER_FRESHNESS = ["24h", "7d", "30d"] as const;
 export type ExplorerFreshness = (typeof EXPLORER_FRESHNESS)[number];
 
@@ -40,6 +46,8 @@ export type ExplorerItem = {
   fine_primary_category: ExplorerFineCategory | null;
   /** Persisted Phase 3.5 value; null means unknown. */
   opportunity_type: ExplorerOpportunityType | null;
+  /** Persisted qualification value; optional for older API payloads. */
+  listing_type?: ExplorerListingType | null;
   resolved_locations: ExplorerResolvedLocation[];
   has_unresolved_location: boolean;
   sources: ExplorerSource[];
@@ -64,6 +72,7 @@ export type ExplorerResponse = {
 export type ExplorerQuery = {
   country?: string;
   city?: string;
+  offer_category?: ExplorerOfferCategory;
   opportunity_type?: ExplorerOpportunityType;
   domain?: ExplorerFineCategory;
   source?: string;
@@ -74,7 +83,7 @@ export type ExplorerQuery = {
 
 /** The supported query keys, in the order they are emitted. */
 export const EXPLORER_QUERY_KEYS = [
-  "country", "city", "opportunity_type", "domain", "source", "freshness", "limit", "offset",
+  "country", "city", "offer_category", "opportunity_type", "domain", "source", "freshness", "limit", "offset",
 ] as const;
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -83,6 +92,8 @@ const count = (value: unknown): value is number => Number.isInteger(value) && (v
 const member = <T extends string>(vocabulary: readonly T[]) => (value: unknown): value is T => (vocabulary as readonly unknown[]).includes(value);
 const fineCategory = member(EXPLORER_FINE_CATEGORIES);
 const opportunityType = member(EXPLORER_OPPORTUNITY_TYPES);
+const offerCategory = member(EXPLORER_OFFER_CATEGORIES);
+const listingType = member(EXPLORER_LISTING_TYPES);
 
 function isSource(value: unknown): value is ExplorerSource {
   return object(value) && typeof value.source_id === "string" && typeof value.source_type === "string";
@@ -99,6 +110,7 @@ function isItem(value: unknown): value is ExplorerItem {
     typeof value.original_url === "string" && typeof value.last_seen_at === "string" &&
     (value.fine_primary_category === null || fineCategory(value.fine_primary_category)) &&
     (value.opportunity_type === null || opportunityType(value.opportunity_type)) &&
+    (value.listing_type === undefined || value.listing_type === null || listingType(value.listing_type)) &&
     Array.isArray(value.resolved_locations) && value.resolved_locations.every(isResolvedLocation) &&
     typeof value.has_unresolved_location === "boolean" &&
     Array.isArray(value.sources) && value.sources.every(isSource);
@@ -121,6 +133,9 @@ function isExplorerResponse(value: unknown): value is ExplorerResponse {
 
 /** Only defined values become parameters; URLSearchParams encodes them. */
 export function explorerSearchParams(query: ExplorerQuery): URLSearchParams {
+  if (query.offer_category !== undefined && !offerCategory(query.offer_category)) {
+    throw new Error("Explorer offer category is invalid");
+  }
   const parameters = new URLSearchParams();
   for (const key of EXPLORER_QUERY_KEYS) {
     const value = query[key];

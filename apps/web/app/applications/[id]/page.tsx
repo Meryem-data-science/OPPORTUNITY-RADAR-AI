@@ -1,8 +1,10 @@
 import Link from "next/link";
 import React from "react";
 import ApplicationTracking from "@/components/application-tracking";
+import Icon from "@/components/icon";
 import { statusLabel, type ApplicationEvent } from "@/lib/application-contract";
 import { loadApplication } from "@/lib/applications";
+import { formatDateTime } from "@/lib/display";
 
 const EVENT_LABELS: Record<ApplicationEvent["event_type"], string> = {
   APPLICATION_CREATED: "Candidature créée",
@@ -61,14 +63,7 @@ export default async function ApplicationDetailPage({
           <Link className="health-link" href="/applications">
             Retour aux candidatures
           </Link>
-          <a
-            className="health-link"
-            href={opportunity.original_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Voir l’offre originale
-          </a>
+          <a className="health-link" href={opportunity.original_url} target="_blank" rel="noopener noreferrer">Voir l’offre originale<Icon name="arrow-up-right" size={16} /></a>
         </nav>
       </header>
 
@@ -76,8 +71,8 @@ export default async function ApplicationDetailPage({
         <div className="section-heading">
           <h2 id="application-tracking-heading">Suivi</h2>
           <p>
-            Envoyée&nbsp;: {application.submitted_at ?? "pas encore envoyée"} ·
-            Dernier changement&nbsp;: {application.last_status_change}
+            Envoyée&nbsp;: {application.submitted_at === null ? "pas encore envoyée" : formatDateTime(application.submitted_at)} ·
+            Dernier changement&nbsp;: {formatDateTime(application.last_status_change)}
           </p>
         </div>
         <ApplicationTracking application={application} />
@@ -91,7 +86,7 @@ export default async function ApplicationDetailPage({
         <ol className="application-timeline">
           {application.events.map((event) => (
             <li key={event.id}>
-              <span>{event.occurred_at}</span> — {EVENT_LABELS[event.event_type]}
+              <time dateTime={event.occurred_at}>{formatDateTime(event.occurred_at)}</time> — {EVENT_LABELS[event.event_type]}
               {describe(event) === "" ? "" : ` (${describe(event)})`}
             </li>
           ))}
