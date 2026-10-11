@@ -1,3 +1,5 @@
+import { isOptionalAvailability, type OpportunityAvailability } from "./availability";
+
 /**
  * The shape of one collected opportunity, shared by both sides of the app.
  *
@@ -15,6 +17,7 @@ export type Opportunity = {
   location: string | null;
   original_url: string;
   last_seen_at: string;
+  availability?: OpportunityAvailability;
 };
 
 export type OpportunitiesResponse = {
@@ -45,7 +48,8 @@ export function isOpportunity(value: unknown): value is Opportunity {
     typeof opportunity.organization === "string" &&
     (typeof opportunity.location === "string" || opportunity.location === null) &&
     typeof opportunity.original_url === "string" &&
-    typeof opportunity.last_seen_at === "string"
+    typeof opportunity.last_seen_at === "string" &&
+    isOptionalAvailability(opportunity.availability)
   );
 }
 

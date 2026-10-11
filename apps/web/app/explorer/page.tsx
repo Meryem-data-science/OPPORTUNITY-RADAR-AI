@@ -2,6 +2,7 @@ import Link from "next/link";
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { formatDateTime, organizationInitials } from "@/lib/display";
 import { loadApplications } from "@/lib/applications";
@@ -122,6 +123,7 @@ function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuer
   read("domain", oneOf(EXPLORER_FINE_CATEGORIES));
   read("source", (value) => value);
   read("freshness", oneOf(EXPLORER_FRESHNESS));
+  read("verified_only", (value) => value === "true" ? true : value === "false" ? false : undefined);
   read("limit", integer(1, EXPLORER_MAX_LIMIT));
   read("offset", integer(0, Number.MAX_SAFE_INTEGER));
   return valid ? { valid: true, query } : { valid: false };
@@ -137,7 +139,7 @@ function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query:
   delete queryWithoutPreciseType.opportunity_type;
   const hasPreciseType = query.opportunity_type !== undefined;
   const cities = [...new Set(filters.cities.filter((city) => city.country_code === "MA").map((city) => city.city_key))];
-  return <form className="explorer-filters" method="get" action="/explorer" aria-label="Filtres Explorer">
+  return <form key={explorerSearchParams(query).toString()} className="explorer-filters" method="get" action="/explorer" aria-label="Filtres Explorer">
     <input type="hidden" name="country" value="MA" />
     <div className="explorer-filter-grid">
       <label>Ville
@@ -170,6 +172,13 @@ function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query:
           {EXPLORER_FRESHNESS.map((window) => <option key={window} value={window}>{freshnessLabels[window]}</option>)}
         </select>
       </label>
+    </div>
+    <div>
+      <label className="availability-filter">
+        <input type="checkbox" name="verified_only" value="true" defaultChecked={query.verified_only === true} aria-describedby="availability-filter-hint" />
+        Voir seulement les offres vérifiées
+      </label>
+      <p className="availability-filter__hint" id="availability-filter-hint">L’ouverture doit avoir été confirmée récemment. Une collecte récente ne prouve pas l’ouverture.</p>
     </div>
     {query.opportunity_type !== undefined && <p id="explorer-precise-type" className="muted">
       <input type="hidden" name="opportunity_type" value={query.opportunity_type} />
@@ -205,6 +214,7 @@ function ExplorerCard({ item, trackedStatus }: { item: ExplorerItem; trackedStat
       <span className="organization-avatar" aria-hidden="true">{organizationInitials(item.organization)}</span>
       <div className="opportunity-card-body"><p className="organization">{item.organization}</p><h3>{item.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{item.raw_location ?? "Lieu non précisé"}</p></div>
     </div>
+    <AvailabilityStatus availability={item.availability} />
     <dl className="explorer-meta">
       <div><dt>Domaine Data/IA</dt><dd>{item.fine_primary_category === null ? "Domaine non renseigné" : domainLabels[item.fine_primary_category]}</dd></div>
       <div><dt>Type d’offre</dt><dd>{opportunityTypeLabel(item)}</dd></div>
@@ -230,11 +240,11 @@ function Results({ explorer, query, tracked }: { explorer: ExplorerResponse; que
   const hasNext = offset + returned < total;
   return <section aria-labelledby="explorer-results-heading">
     <div className="section-heading">
-      <h2 id="explorer-results-heading">{total} opportunité{total > 1 ? "s" : ""} au Maroc</h2>
+      <h2 id="explorer-results-heading">{total} opportunité{total > 1 ? "s" : ""} au Maroc{query.verified_only === true ? " · ouverture confirmée" : ""}</h2>
       {returned > 0 && <p>Résultats {offset + 1}–{offset + returned} sur {total}</p>}
     </div>
     {items.length === 0 ? <div className="status-panel" role="status">
-      <h2>Aucune opportunité ne correspond à ces filtres</h2>
+      <h2>{query.verified_only === true ? "Aucune ouverture confirmée pour ces filtres" : "Aucune opportunité ne correspond à ces filtres"}</h2>
       <p><Link href="/explorer">Réinitialiser les filtres · Maroc</Link></p>
     </div>
       // Rendered in exactly the order the API returned: navigation, not a ranking.

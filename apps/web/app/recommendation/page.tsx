@@ -2,6 +2,7 @@ import Link from "next/link";
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { organizationInitials } from "@/lib/display";
 import { loadApplications } from "@/lib/applications";
@@ -131,6 +132,7 @@ function RecommendationCard({ item, displayRank, trackedStatus }: { item: Recomm
       <span className={`recommendation-badge recommendation-badge-${recommendation.disposition.toLowerCase()}`}>{dispositionLabels[recommendation.disposition]}</span>
     </div>
     <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{opportunity.organization}</p><h3>{opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{opportunity.location ?? "Lieu non précisé"}</p></div></div>
+    <AvailabilityStatus availability={opportunity.availability} />
     <div className="matching-scores">
       <p><strong>Score de recommandation</strong><span>{recommendation.recommendation_score === null ? "Score non disponible" : percent(recommendation.recommendation_score)}</span></p>
       <p><strong>Couverture des preuves</strong><span>{percent(recommendation.evidence_coverage)}</span></p>
@@ -159,7 +161,7 @@ function Ready({ recommendation, tracked }: { recommendation: RecommendationResp
       <div className="section-heading">
         <div>
           <h2 id="recommendation-heading">Recommandations au Maroc</h2>
-          <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""} au Maroc</p>
+          <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} correspondant aux préférences sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""} au Maroc</p>
           <p className="recommendation-target-note">Cette sélection concerne le Maroc et les types d’offres de vos préférences. L’adéquation au profil et l’éligibilité sont détaillées pour chaque offre.</p>
         </div>
         <p>{recommendation.history_count} analyse{recommendation.history_count > 1 ? "s" : ""} enregistrée{recommendation.history_count > 1 ? "s" : ""}</p>

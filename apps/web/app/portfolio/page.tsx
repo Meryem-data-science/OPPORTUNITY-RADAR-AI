@@ -1,6 +1,7 @@
 import Link from "next/link";
 import React from "react";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import { organizationInitials } from "@/lib/display";
 import { loadPortfolio, type PortfolioBucket, type PortfolioItem, type PortfolioResponse } from "@/lib/portfolio";
 
@@ -31,6 +32,7 @@ function Card({ item, excluded = false }: { item: PortfolioItem; excluded?: bool
   const portfolio = item.portfolio;
   return <article className="matching-card">
     <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(item.opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{item.opportunity.organization}</p><h3>{item.opportunity.canonical_title}</h3>{item.opportunity.location && <p className="location"><Icon name="pin" size={15} />{item.opportunity.location}</p>}</div></div>
+    <AvailabilityStatus availability={item.opportunity.availability} />
     {!excluded && portfolio.bucket !== null && <span className="matching-badge">{bucketLabels[portfolio.bucket]}</span>}
     <div className="matching-scores">
       <p><strong>Priorité</strong><span>{portfolio.priority_category === null ? "Non classée" : priorityLabels[portfolio.priority_category]}</span></p>

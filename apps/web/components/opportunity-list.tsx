@@ -3,6 +3,7 @@
 import React from "react";
 import ApplicationActions from "@/components/application-actions";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { formatDate, organizationInitials } from "@/lib/display";
 import {
@@ -71,6 +72,7 @@ export function OpportunityCard({
           {offerLabel && <span className="opportunity-kind">{offerLabel}</span>}
         </div>
       </div>
+      <AvailabilityStatus availability={opportunity.availability} />
       <ApplicationActions opportunityId={opportunity.id} status={trackedStatus} />
       <div className="card-footer">
         <span>Détectée le {formatDate(opportunity.last_seen_at)}</span>

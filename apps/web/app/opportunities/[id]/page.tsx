@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import ApplicationActions from "@/components/application-actions";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
+import { readAvailability } from "@/lib/availability";
 import { loadApplications } from "@/lib/applications";
 import { formatDateTime, organizationInitials } from "@/lib/display";
 import { loadOpportunityDetail, type OpportunityListingType } from "@/lib/opportunity-detail";
@@ -54,6 +56,7 @@ export default async function OpportunityDetailPage({ params }: { params: Promis
   }
 
   const { opportunity } = result;
+  const availability = readAvailability(opportunity.availability);
   const trackedStatus = applications?.items.find((application) => application.opportunity_id === opportunity.id)?.status ?? null;
   const applicationUrl = externalUrl(opportunity.original_url);
   const description = opportunity.description?.trim() ?? "";
@@ -75,6 +78,7 @@ export default async function OpportunityDetailPage({ params }: { params: Promis
       <p className="offer-detail-location"><Icon name="pin" size={17} />{opportunity.location ?? "Lieu non précisé"}</p>
       {opportunity.listing_type !== null && opportunity.listing_type !== "UNKNOWN" &&
         <span className="opportunity-kind">{listingLabels[opportunity.listing_type]}</span>}
+      <AvailabilityStatus availability={opportunity.availability} showDate={false} />
     </header>
 
     <div className="offer-detail-layout">
@@ -107,10 +111,12 @@ export default async function OpportunityDetailPage({ params }: { params: Promis
             <div><dt>Type d’offre</dt><dd>{opportunity.listing_type === null ? "Non renseigné" : listingLabels[opportunity.listing_type]}</dd></div>
             <div><dt>Contrat / rythme indiqué</dt><dd>{employmentLabels[employmentType] ?? employmentType}</dd></div>
             {opportunity.published_at !== null && <div><dt>Publication indiquée par la source</dt><dd>{formatDateTime(opportunity.published_at)}</dd></div>}
+            {availability.last_checked_at !== null && <div><dt>Dernier contrôle d’ouverture</dt><dd>{formatDateTime(availability.last_checked_at)}</dd></div>}
+            {availability.verified_at !== null && <div><dt>Dernière ouverture confirmée</dt><dd>{formatDateTime(availability.verified_at)}</dd></div>}
             <div><dt>Première collecte par Radar</dt><dd>{formatDateTime(opportunity.discovered_at)}</dd></div>
             <div><dt>Dernière détection par Radar</dt><dd>{formatDateTime(opportunity.last_seen_at)}</dd></div>
           </dl>
-          <p className="offer-detail-note">La disponibilité de l’offre et le contrat exact (CDI, CDD…) sont à vérifier dans l’annonce d’origine. Les dates de collecte correspondent aux passages de Radar.</p>
+          <p className="offer-detail-note">Le badge décrit le résultat du contrôle d’ouverture. Les dates de collecte correspondent aux passages de Radar. Vérifiez le contrat exact (CDI, CDD…) dans l’annonce d’origine.</p>
         </section>
       </aside>
     </div>

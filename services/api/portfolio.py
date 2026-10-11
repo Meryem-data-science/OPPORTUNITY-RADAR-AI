@@ -6,7 +6,11 @@ import os
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services.api.availability import (
+    AvailabilityProjection, AvailabilityResponse, load_availability_projection,
+)
 
 from services.api.active_opportunities import (
     read_surface_snapshot,
@@ -46,6 +50,7 @@ class PortfolioOpportunityResponse(BaseModel):
     location: str | None
     last_seen_at: str
     original_url: str
+    availability: AvailabilityResponse = Field(default_factory=AvailabilityResponse)
 
 
 class PortfolioSnapshotResponse(BaseModel):
@@ -120,10 +125,19 @@ def _json_value(value: Any) -> Any:
 
 
 def _metadata(
-    connection: Any, ids: list[int]
+    connection: Any, ids: list[int],
+    projection: AvailabilityProjection | None = None,
 ) -> dict[int, PortfolioOpportunityResponse]:
     if not ids:
         return {}
+    if projection is None:
+        projection = load_availability_projection()
+    if len(ids) > 500:
+        result: dict[int, PortfolioOpportunityResponse] = {}
+        for start in range(0, len(ids), 500):
+            result.update(_metadata(connection, ids[start:start + 500], projection))
+        return result
+    availability = projection.read(connection, ids)
     placeholders = ", ".join("?" for _ in ids)
     rows = connection.execute(
         f"""SELECT id,canonical_title,organization,location,last_seen_at,
@@ -152,6 +166,7 @@ def _metadata(
             organization=row[2],
             location=row[3],
             last_seen_at=row[4],
+            availability=availability.get(int(row[0]), AvailabilityResponse()),
             original_url=select_original_url(
                 observations.get(int(row[0]), ()), fallback=fallback
             ),

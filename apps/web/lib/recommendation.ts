@@ -1,4 +1,5 @@
 import "server-only";
+import { isOptionalAvailability, type OpportunityAvailability } from "./availability";
 
 /**
  * Server-side read of the persisted Phase 9 Recommendation (Phase 11.1A API).
@@ -21,7 +22,7 @@ export type FineCategory = (typeof FINE_CATEGORIES)[number];
 export type FineEvidence = { category: FineCategory; field: "TITLE" | "DESCRIPTION"; kind: string; signal: string };
 export type RecommendationOpportunity = {
   id: number; canonical_title: string; organization: string; location: string | null;
-  last_seen_at: string; original_url: string;
+  last_seen_at: string; original_url: string; availability?: OpportunityAvailability;
   fine_primary_category: FineCategory | null;
   fine_secondary_categories: FineCategory[] | null;
   fine_category_evidence: FineEvidence[] | null;
@@ -77,6 +78,7 @@ function isOpportunity(value: unknown): value is RecommendationOpportunity {
   return Number.isInteger(value.id) && typeof value.canonical_title === "string" &&
     typeof value.organization === "string" && nullableString(value.location) &&
     typeof value.last_seen_at === "string" && typeof value.original_url === "string" &&
+    isOptionalAvailability(value.availability) &&
     (value.fine_primary_category === null || fineCategory(value.fine_primary_category)) &&
     (value.fine_secondary_categories === null || (Array.isArray(value.fine_secondary_categories) && value.fine_secondary_categories.every(fineCategory))) &&
     (value.fine_category_evidence === null || (Array.isArray(value.fine_category_evidence) && value.fine_category_evidence.every(isEvidence))) &&

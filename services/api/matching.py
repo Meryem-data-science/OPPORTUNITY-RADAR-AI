@@ -6,7 +6,11 @@ import os
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services.api.availability import (
+    AvailabilityProjection, AvailabilityResponse, load_availability_projection,
+)
 
 from services.api.active_opportunities import (
     read_surface_snapshot,
@@ -46,6 +50,7 @@ class MatchingOpportunityResponse(BaseModel):
     location: str | None
     last_seen_at: str
     original_url: str
+    availability: AvailabilityResponse = Field(default_factory=AvailabilityResponse)
 
 
 class MatchingSnapshotResponse(BaseModel):
@@ -110,10 +115,19 @@ def _json_value(value: Any) -> Any:
 
 
 def _metadata(
-    connection: Any, opportunity_ids: list[int]
+    connection: Any, opportunity_ids: list[int],
+    projection: AvailabilityProjection | None = None,
 ) -> dict[int, MatchingOpportunityResponse]:
     if not opportunity_ids:
         return {}
+    if projection is None:
+        projection = load_availability_projection()
+    if len(opportunity_ids) > 500:
+        result: dict[int, MatchingOpportunityResponse] = {}
+        for start in range(0, len(opportunity_ids), 500):
+            result.update(_metadata(connection, opportunity_ids[start:start + 500], projection))
+        return result
+    availability = projection.read(connection, opportunity_ids)
     placeholders = ", ".join("?" for _ in opportunity_ids)
     rows = connection.execute(
         f"""SELECT id,canonical_title,organization,location,last_seen_at,
@@ -142,6 +156,7 @@ def _metadata(
             organization=row[2],
             location=row[3],
             last_seen_at=row[4],
+            availability=availability.get(int(row[0]), AvailabilityResponse()),
             original_url=select_original_url(
                 observations.get(int(row[0]), ()), fallback=fallback
             ),
@@ -184,7 +199,9 @@ def read_matching_surface() -> MatchingResponse:
                 if run is None:
                     raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
                 ids = [item.opportunity_id for item in run.assessments]
-                metadata = _metadata(connection, ids)
+                metadata = _metadata(connection, ids, load_availability_projection(
+                    enabled=settings.database_backend is DatabaseBackend.SQLITE
+                ))
                 if set(metadata) != set(ids):
                     raise MatchingApiReadError(PUBLIC_MATCHING_ERROR)
                 counts = {lane: 0 for lane in LANES}

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import React from "react";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import { organizationInitials } from "@/lib/display";
 import { loadMatching, type MatchingItem, type MatchingLane, type MatchingResponse } from "@/lib/matching";
 
@@ -68,6 +69,7 @@ function MatchingCard({ item }: { item: MatchingItem }) {
   const explanation = item.matching.explanation;
   return <article className="matching-card">
     <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(item.opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{item.opportunity.organization}</p><h3>{item.opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{item.opportunity.location ?? "Lieu non précisé"}</p></div></div>
+    <AvailabilityStatus availability={item.opportunity.availability} />
     <span className="matching-badge">{laneLabels[item.matching.lane]}</span>
     <div className="matching-scores">
       <p><strong>Adéquation au profil</strong><span>{percent(item.matching.match_quality)}</span></p>

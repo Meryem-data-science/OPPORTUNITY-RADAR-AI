@@ -22,7 +22,11 @@ import os
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services.api.availability import (
+    AvailabilityProjection, AvailabilityResponse, load_availability_projection,
+)
 
 from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.fine_classification import (
@@ -75,6 +79,7 @@ class RecommendationOpportunityResponse(BaseModel):
     location: str | None
     last_seen_at: str
     original_url: str
+    availability: AvailabilityResponse = Field(default_factory=AvailabilityResponse)
     #: The persisted Phase 8 fine classification, with the same three states as
     #: `GET /api/opportunities`: all five `None` when never fine-classified.
     fine_primary_category: FineCategory | None
@@ -156,11 +161,20 @@ def _json_value(value: Any) -> Any:
 
 
 def _metadata(
-    connection: Any, opportunity_ids: list[int]
+    connection: Any, opportunity_ids: list[int],
+    projection: AvailabilityProjection | None = None,
 ) -> dict[int, RecommendationOpportunityResponse]:
     """Project persisted opportunity rows; classify nothing and rank nothing."""
     if not opportunity_ids:
         return {}
+    if projection is None:
+        projection = load_availability_projection()
+    if len(opportunity_ids) > 500:
+        result: dict[int, RecommendationOpportunityResponse] = {}
+        for start in range(0, len(opportunity_ids), 500):
+            result.update(_metadata(connection, opportunity_ids[start:start + 500], projection))
+        return result
+    availability = projection.read(connection, opportunity_ids)
     placeholders = ", ".join("?" for _ in opportunity_ids)
     # LEFT JOIN: an opportunity with no qualification row is never-classified,
     # not missing. The coarse `qualification` only validates the fine values.
@@ -213,6 +227,7 @@ def _metadata(
             organization=row[2],
             location=row[3],
             last_seen_at=row[4],
+            availability=availability.get(int(row[0]), AvailabilityResponse()),
             original_url=select_original_url(
                 observations.get(int(row[0]), ()), fallback=fallback
             ),

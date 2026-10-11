@@ -217,6 +217,7 @@ def get_recommendation() -> RecommendationResponse:
 
 @app.get("/api/explorer", response_model=ExplorerResponse)
 def get_explorer(
+    response: Response,
     country: Annotated[str | None, Query(pattern=r"^[A-Z]{2}$")] = None,
     city: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     opportunity_type: OpportunityType | None = None,
@@ -224,10 +225,12 @@ def get_explorer(
     domain: FineCategory | None = None,
     source: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     freshness: ExplorerFreshness | None = None,
+    verified_only: bool = False,
     limit: Annotated[int, Query(ge=1, le=EXPLORER_MAX_LIMIT)] = EXPLORER_DEFAULT_LIMIT,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ExplorerResponse:
     """Explore the persisted Data/AI corpus; no profile, no score, no ranking."""
+    response.headers["Cache-Control"] = "no-store"
     try:
         return read_explorer_surface(
             ExplorerQuery(
@@ -238,6 +241,7 @@ def get_explorer(
                 domain=domain,
                 source=source,
                 freshness=freshness,
+                verified_only=verified_only,
                 limit=limit,
                 offset=offset,
             )

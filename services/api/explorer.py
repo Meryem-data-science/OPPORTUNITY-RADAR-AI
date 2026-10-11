@@ -12,6 +12,7 @@ comparison against a value an earlier phase already persisted:
     domain              opportunity_qualifications.fine_primary_category (Phase 8)
     source              opportunity_sources JOIN sources
     freshness           opportunities.last_seen_at against the request clock
+    verified_only       current public availability evidence beside the database
 
 A resolved Morocco location is mandatory for the catalogue. Other dimensions
 that are NULL, UNKNOWN or AMBIGUOUS never match an explicit filter; missing
@@ -26,7 +27,11 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any, Callable, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services.api.availability import (
+    AvailabilityProjection, AvailabilityResponse, load_availability_projection,
+)
 
 from services.api.morocco_catalogue import (
     CATALOGUE_QUALIFICATIONS, MOROCCO_COUNTRY_CODE,
@@ -123,6 +128,7 @@ class ExplorerQuery:
     limit: int = DEFAULT_LIMIT
     offset: int = 0
     offer_category: ExplorerOfferCategory | None = None
+    verified_only: bool = False
 
 
 class ExplorerResolvedLocationResponse(BaseModel):
@@ -153,6 +159,7 @@ class ExplorerItemResponse(BaseModel):
     resolved_locations: list[ExplorerResolvedLocationResponse]
     has_unresolved_location: bool
     sources: list[ExplorerSourceResponse]
+    availability: AvailabilityResponse = Field(default_factory=AvailabilityResponse)
 
 
 class ExplorerCityOptionResponse(BaseModel):
@@ -175,6 +182,7 @@ class ExplorerResponse(BaseModel):
     limit: int
     offset: int
     available_filters: ExplorerAvailableFiltersResponse
+    verified_only: bool = False
 
 
 def _utc_now() -> datetime:
@@ -335,9 +343,43 @@ def _observations(
     return observations, by_source_id
 
 
-def _items(connection: Any, query: ExplorerQuery, now: Callable[[], datetime]) -> tuple[list[ExplorerItemResponse], int]:
+def _items(
+    connection: Any, query: ExplorerQuery, now: Callable[[], datetime],
+    projection: AvailabilityProjection | None = None,
+) -> tuple[list[ExplorerItemResponse], int]:
+    if projection is None:
+        projection = load_availability_projection(now=now())
     filtered_from, parameters = _filtered_from(query, now)
-    total = int(connection.execute(f"SELECT COUNT(*) {filtered_from}", tuple(parameters)).fetchone()[0])
+    page_parameters = [*parameters, query.limit, query.offset]
+    page_clause = "LIMIT ? OFFSET ?"
+    availability: dict[int, AvailabilityResponse] | None = None
+    if query.verified_only:
+        # Apply every ordinary filter first, then the current availability
+        # verdict to the complete candidate set before counting or paging.
+        # The file is loaded once and observation IDs are read in batches of
+        # 500. Only the resulting page needs an IN clause, never the whole
+        # verified catalogue, so SQLite's parameter limit stays bounded.
+        candidate_rows = connection.execute(
+            f"SELECT o.id {filtered_from} ORDER BY o.last_seen_at DESC, o.id DESC",
+            tuple(parameters),
+        ).fetchall()
+        candidate_ids = [int(row[0]) for row in candidate_rows]
+        availability = projection.read(connection, candidate_ids)
+        verified_ids = [
+            value for value in candidate_ids
+            if availability[value].status == "OPEN_CONFIRMED"
+        ]
+        total = len(verified_ids)
+        page_ids = verified_ids[query.offset:query.offset + query.limit]
+        if not page_ids:
+            return [], total
+        filtered_from += f" AND o.id IN ({_placeholders(page_ids)})"
+        page_parameters = [*parameters, *page_ids]
+        page_clause = ""
+    else:
+        total = int(connection.execute(
+            f"SELECT COUNT(*) {filtered_from}", tuple(parameters)
+        ).fetchone()[0])
     rows = connection.execute(
         f"""SELECT o.id, o.canonical_title, o.organization, o.location,
         o.last_seen_at, o.source_url, o.application_url, o.canonical_url,
@@ -346,12 +388,14 @@ def _items(connection: Any, query: ExplorerQuery, now: Callable[[], datetime]) -
         k.opportunity_type, q.opportunity_type
         {filtered_from}
         ORDER BY o.last_seen_at DESC, o.id DESC
-        LIMIT ? OFFSET ?""",
-        (*parameters, query.limit, query.offset),
+        {page_clause}""",
+        tuple(page_parameters),
     ).fetchall()
     ids = [int(row[0]) for row in rows]
     if not ids:
         return [], total
+    if availability is None:
+        availability = projection.read(connection, ids)
     resolved, unresolved = _locations(connection, ids)
     observations, sources = _observations(connection, ids)
     items = []
@@ -377,6 +421,7 @@ def _items(connection: Any, query: ExplorerQuery, now: Callable[[], datetime]) -
                 resolved_locations=resolved.get(opportunity_id, []),
                 has_unresolved_location=opportunity_id in unresolved,
                 sources=sources.get(opportunity_id, []),
+                availability=availability.get(opportunity_id, AvailabilityResponse()),
             )
         )
     return items, total
@@ -439,7 +484,10 @@ def _read_one_snapshot(
     if owns_snapshot:
         connection.execute("BEGIN")
     try:
-        items, total = _items(connection, query, now)
+        # Hold both ordinary freshness and availability to one request clock.
+        request_time = now()
+        projection = load_availability_projection(now=request_time)
+        items, total = _items(connection, query, lambda: request_time, projection)
         return ExplorerResponse(
             items=items,
             returned=len(items),
@@ -447,6 +495,7 @@ def _read_one_snapshot(
             limit=query.limit,
             offset=query.offset,
             available_filters=_available_filters(connection),
+            verified_only=query.verified_only,
         )
     finally:
         if owns_snapshot and connection.in_transaction:

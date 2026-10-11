@@ -1,10 +1,11 @@
 import "server-only";
+import { isOptionalAvailability, type OpportunityAvailability } from "./availability";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
 const MATCHING_PATH = "/api/matching";
 
 export type MatchingLane = "PRIMARY" | "UNCERTAIN" | "OUTSIDE_PREFERENCES";
-export type MatchingOpportunity = { id: number; canonical_title: string; organization: string; location: string | null; last_seen_at: string; original_url: string };
+export type MatchingOpportunity = { id: number; canonical_title: string; organization: string; location: string | null; last_seen_at: string; original_url: string; availability?: OpportunityAvailability };
 export type MatchingSnapshot = { lane: MatchingLane; match_quality: number | null; evidence_coverage: number; assessment_fingerprint: string; explanation: Record<string, unknown> };
 export type MatchingItem = { opportunity_id: number; opportunity: MatchingOpportunity; matching: MatchingSnapshot };
 export type MatchingRun = {
@@ -33,7 +34,7 @@ function isItem(value: unknown): value is MatchingItem {
   return Number.isInteger(value.opportunity_id) && Number.isInteger(opportunity.id) &&
     typeof opportunity.canonical_title === "string" && typeof opportunity.organization === "string" &&
     nullableString(opportunity.location) && typeof opportunity.last_seen_at === "string" &&
-    typeof opportunity.original_url === "string" && lanes.includes(matching.lane as MatchingLane) &&
+    typeof opportunity.original_url === "string" && isOptionalAvailability(opportunity.availability) && lanes.includes(matching.lane as MatchingLane) &&
     (matching.match_quality === null || finiteNumber(matching.match_quality)) &&
     finiteNumber(matching.evidence_coverage) && typeof matching.assessment_fingerprint === "string" &&
     object(matching.explanation);

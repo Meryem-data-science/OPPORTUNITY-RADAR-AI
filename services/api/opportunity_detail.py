@@ -3,6 +3,7 @@
 import os
 from typing import Any
 
+from services.api.availability import load_availability_projection
 from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.opportunities import (
     OpportunityReadError,
@@ -98,7 +99,10 @@ def _read_detail_snapshot(
         if row is None:
             raise OpportunityNotFoundError(PUBLIC_OPPORTUNITY_NOT_FOUND)
         observations = _read_observations(connection, (opportunity_id,))
-        summary = _to_response(row, observations.get(opportunity_id, ()))
+        availability = load_availability_projection().read(connection, (opportunity_id,))
+        summary = _to_response(
+            row, observations.get(opportunity_id, ()), availability.get(opportunity_id)
+        )
         return OpportunityDetailResponse(
             **summary.model_dump(),
             description=normalize_description(row[17]) or None,

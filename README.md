@@ -5,7 +5,7 @@ Pour reconnecter les alertes LinkedIn reçues dans Gmail, lancer
 utilise un client OAuth **Application de bureau**, sans domaine Internet acheté.
 La procédure est décrite dans [docs/connexion-linkedin.md](docs/connexion-linkedin.md).
 
-Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. La collecte inclut maintenant SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md).
+Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. La collecte inclut maintenant SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md). Les badges et le filtre des offres vérifiées sont décrits dans [Disponibilité des offres](docs/disponibilite-offres.md).
 
 ## MVP local et sauvegarde GitHub
 

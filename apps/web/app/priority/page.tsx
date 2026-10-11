@@ -1,6 +1,7 @@
 import Link from "next/link";
 import React from "react";
 import Icon from "@/components/icon";
+import AvailabilityStatus from "@/components/availability-status";
 import { formatDate, organizationInitials } from "@/lib/display";
 import { loadPriority, type PriorityItem, type PriorityMatchingLane, type PriorityResponse } from "@/lib/priority";
 
@@ -37,6 +38,7 @@ function Card({ item }: { item: PriorityItem }) {
       <span className="organization-avatar" aria-hidden="true">{organizationInitials(item.opportunity.organization)}</span>
       <div className="opportunity-card-body"><p className="organization">{item.opportunity.organization}</p><h3>{item.opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{item.opportunity.location ?? "Lieu non précisé"}</p></div>
     </div>
+    <AvailabilityStatus availability={item.opportunity.availability} />
     <span className="matching-badge">{labels[priority.category ?? "NONE"]}</span>
     <div className="matching-scores">
       <p><strong>Score de priorité</strong><span>{percent(priority.priority_score)}</span></p>

@@ -2,7 +2,9 @@
 
 from typing import Any, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from services.api.availability import AvailabilityResponse, load_availability_projection
 
 from services.api.active_opportunities import read_surface_snapshot
 from services.api.morocco_catalogue import (
@@ -41,6 +43,7 @@ class OpportunityResponse(BaseModel):
     discovered_at: str
     last_seen_at: str
     status: str
+    availability: AvailabilityResponse = Field(default_factory=AvailabilityResponse)
     description_length: int
     #: The Phase 8 fine Data/AI classification, read from
     #: `opportunity_qualifications` exactly as persistence wrote it. Nothing is
@@ -74,6 +77,11 @@ def _read_observations(
     """Read every persisted observation of these opportunities, read-only."""
     if not opportunity_ids:
         return {}
+    if len(opportunity_ids) > 500:
+        result: dict[int, list[SourceObservation]] = {}
+        for start in range(0, len(opportunity_ids), 500):
+            result.update(_read_observations(connection, opportunity_ids[start:start + 500]))
+        return result
     placeholders = ", ".join("?" for _ in opportunity_ids)
     rows = connection.execute(
         f"""
@@ -102,7 +110,8 @@ def _read_observations(
 
 
 def _to_response(
-    row: Any, observations: Sequence[SourceObservation]
+    row: Any, observations: Sequence[SourceObservation],
+    availability: AvailabilityResponse | None = None,
 ) -> OpportunityResponse:
     fallback = preferred_link(row[5], row[4], row[6]) or row[4]
     original_url = select_original_url(observations, fallback=fallback)
@@ -124,6 +133,7 @@ def _to_response(
         discovered_at=row[7],
         last_seen_at=row[8],
         status=row[9],
+        availability=availability if availability is not None else AvailabilityResponse(),
         description_length=row[10],
         fine_primary_category=fine.primary_category,
         fine_secondary_categories=fine.secondary_categories,
@@ -191,8 +201,13 @@ def read_opportunities(limit: int, offset: int = 0) -> OpportunityListResponse:
             observations = _read_observations(
                 connection, [int(row[0]) for row in rows]
             )
+            availability = load_availability_projection(
+                enabled=settings.database_backend is DatabaseBackend.SQLITE
+            ).read(connection, [int(row[0]) for row in rows])
             items = [
-                _to_response(row, observations.get(int(row[0]), ())) for row in rows
+                _to_response(
+                    row, observations.get(int(row[0]), ()), availability.get(int(row[0]))
+                ) for row in rows
             ]
             response = OpportunityListResponse(
                 items=items, returned=len(items), total=int(total_row[0])

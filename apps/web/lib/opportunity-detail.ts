@@ -1,4 +1,5 @@
 import "server-only";
+import { isOptionalAvailability, type OpportunityAvailability } from "./availability";
 
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
 const LISTING_TYPES = ["PFE", "INTERNSHIP", "GRADUATE", "APPRENTICESHIP", "JOB", "UNKNOWN"] as const;
@@ -12,6 +13,7 @@ export type OpportunityDetail = {
   original_url: string;
   discovered_at: string;
   last_seen_at: string;
+  availability?: OpportunityAvailability;
   description: string | null;
   published_at: string | null;
   employment_type: string | null;
@@ -33,6 +35,7 @@ function validDetail(value: unknown): value is OpportunityDetail {
     typeof value.canonical_title === "string" && typeof value.organization === "string" &&
     nullableText(value.location) && typeof value.original_url === "string" &&
     typeof value.discovered_at === "string" && typeof value.last_seen_at === "string" &&
+    isOptionalAvailability(value.availability) &&
     nullableText(value.description) && nullableText(value.published_at) &&
     nullableText(value.employment_type) &&
     (value.listing_type === null || (LISTING_TYPES as readonly unknown[]).includes(value.listing_type));

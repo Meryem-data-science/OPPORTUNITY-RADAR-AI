@@ -1,4 +1,5 @@
 import "server-only";
+import { isOptionalAvailability, type OpportunityAvailability } from "./availability";
 
 /**
  * Server-side read of the Explorer Data & AI surface (Phase 11.1C API).
@@ -42,6 +43,7 @@ export type ExplorerItem = {
   raw_location: string | null;
   original_url: string;
   last_seen_at: string;
+  availability?: OpportunityAvailability;
   /** Persisted Phase 8 value; null is not OTHER. */
   fine_primary_category: ExplorerFineCategory | null;
   /** Persisted Phase 3.5 value; null means unknown. */
@@ -67,6 +69,7 @@ export type ExplorerResponse = {
   limit: number;
   offset: number;
   available_filters: ExplorerAvailableFilters;
+  verified_only?: boolean;
 };
 
 export type ExplorerQuery = {
@@ -77,13 +80,14 @@ export type ExplorerQuery = {
   domain?: ExplorerFineCategory;
   source?: string;
   freshness?: ExplorerFreshness;
+  verified_only?: boolean;
   limit?: number;
   offset?: number;
 };
 
 /** The supported query keys, in the order they are emitted. */
 export const EXPLORER_QUERY_KEYS = [
-  "country", "city", "offer_category", "opportunity_type", "domain", "source", "freshness", "limit", "offset",
+  "country", "city", "offer_category", "opportunity_type", "domain", "source", "freshness", "verified_only", "limit", "offset",
 ] as const;
 
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -108,6 +112,7 @@ function isItem(value: unknown): value is ExplorerItem {
   return Number.isInteger(value.opportunity_id) && typeof value.canonical_title === "string" &&
     typeof value.organization === "string" && nullableString(value.raw_location) &&
     typeof value.original_url === "string" && typeof value.last_seen_at === "string" &&
+    isOptionalAvailability(value.availability) &&
     (value.fine_primary_category === null || fineCategory(value.fine_primary_category)) &&
     (value.opportunity_type === null || opportunityType(value.opportunity_type)) &&
     (value.listing_type === undefined || value.listing_type === null || listingType(value.listing_type)) &&
@@ -128,13 +133,17 @@ function isAvailableFilters(value: unknown): value is ExplorerAvailableFilters {
 function isExplorerResponse(value: unknown): value is ExplorerResponse {
   if (!object(value) || !Array.isArray(value.items)) return false;
   return value.items.every(isItem) && count(value.returned) && count(value.total) && count(value.limit) &&
-    count(value.offset) && value.returned === value.items.length && isAvailableFilters(value.available_filters);
+    count(value.offset) && value.returned === value.items.length && isAvailableFilters(value.available_filters) &&
+    (value.verified_only === undefined || typeof value.verified_only === "boolean");
 }
 
 /** Only defined values become parameters; URLSearchParams encodes them. */
 export function explorerSearchParams(query: ExplorerQuery): URLSearchParams {
   if (query.offer_category !== undefined && !offerCategory(query.offer_category)) {
     throw new Error("Explorer offer category is invalid");
+  }
+  if (query.verified_only !== undefined && typeof query.verified_only !== "boolean") {
+    throw new Error("Explorer availability filter is invalid");
   }
   const parameters = new URLSearchParams();
   for (const key of EXPLORER_QUERY_KEYS) {
@@ -152,6 +161,13 @@ export async function getExplorer(query: ExplorerQuery = {}): Promise<ExplorerRe
   if (!response.ok) throw new Error("Explorer API request failed");
   const payload: unknown = await response.json();
   if (!isExplorerResponse(payload)) throw new Error("Explorer API response is invalid");
+  // An older API may ignore verified_only. Never present its unverified page
+  // as confirmed, or filter one page locally and misrepresent the total.
+  if (query.verified_only === true &&
+    (payload.verified_only !== true ||
+      payload.items.some((item) => item.availability?.status !== "OPEN_CONFIRMED"))) {
+    throw new Error("Explorer availability filter was not confirmed by the API");
+  }
   return payload;
 }
 
