@@ -7,9 +7,10 @@ ranked assessment from persisted rows, through the existing Phase 8 decoder and
 the existing link-priority helpers. No engine, synchronization, classifier or
 scorer is reachable from this module, and nothing is written.
 
-The complete persisted ranking is audited and validated before availability is
-projected. Only currently visible, active postings are emitted, preserving the
-stored order, ranks and scores. The audit and run fingerprints describe the
+The complete persisted ranking is audited and validated before the Morocco
+catalogue is projected. Active postings with confirmed Morocco locations are
+emitted in stored order with unchanged scores and contiguous display ranks.
+Original ranks remain in snapshot_rank_position. Run fingerprints describe the
 immutable complete run; snapshot_assessment_count records its original size.
 All reads share one deferred transaction, and incomplete metadata still causes
 the complete run to be refused.
@@ -23,7 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from services.api.active_opportunities import read_active_opportunity_ids
+from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.fine_classification import (
     FineEvidenceResponse,
     decode_fine_classification,
@@ -100,6 +101,8 @@ class RecommendationSnapshotResponse(BaseModel):
 class RecommendationItemResponse(BaseModel):
     opportunity_id: int
     rank_position: int
+    #: Position in the complete immutable ranking, before Morocco projection.
+    snapshot_rank_position: int | None = None
     opportunity: RecommendationOpportunityResponse
     recommendation: RecommendationSnapshotResponse
 
@@ -108,7 +111,7 @@ class RecommendationCurrentRunResponse(BaseModel):
     run_id: int
     created_at: str
     assessment_count: int
-    #: The immutable run's count; assessment_count counts the active projection.
+    #: The immutable run's count; assessment_count counts the Morocco projection.
     snapshot_assessment_count: int | None = None
     persistence_version: str
     input_assembly_version: str
@@ -249,7 +252,7 @@ def _snapshot(assessment: Any) -> RecommendationSnapshotResponse:
 
 
 def _current_run(connection: Any, run: Any) -> RecommendationCurrentRunResponse:
-    """Validate the whole READY run, then project its active postings in order."""
+    """Validate the whole READY run, then project its Morocco postings in order."""
     ids = [item.opportunity_id for item in run.assessments]
     if len(ids) != len(set(ids)) or len(ids) != run.assessment_count:
         raise RecommendationApiReadError(PUBLIC_RECOMMENDATION_ERROR)
@@ -267,15 +270,18 @@ def _current_run(connection: Any, run: Any) -> RecommendationCurrentRunResponse:
         RecommendationItemResponse(
             opportunity_id=assessment.opportunity_id,
             rank_position=assessment.rank_position,
+            snapshot_rank_position=assessment.rank_position,
             opportunity=metadata[assessment.opportunity_id],
             recommendation=_snapshot(assessment),
         )
         for assessment in run.assessments
     ]
-    # Keep scores, persisted ranks and relative ordering. The snapshot's audit
-    # and fingerprints still describe the complete immutable stored run.
-    active_ids = read_active_opportunity_ids(connection, ids)
-    items = [item for item in items if item.opportunity_id in active_ids]
+    # Preserve relative ordering, scores and immutable snapshot evidence. Only
+    # display ranks/counts describe this smaller Morocco catalogue projection.
+    catalogue_ids = read_morocco_catalogue_ids(connection, ids)
+    items = [item for item in items if item.opportunity_id in catalogue_ids]
+    for display_rank, item in enumerate(items, start=1):
+        item.rank_position = display_rank
     return RecommendationCurrentRunResponse(
         run_id=run.run_id,
         created_at=run.created_at,

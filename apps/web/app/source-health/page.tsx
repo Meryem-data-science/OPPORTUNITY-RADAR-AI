@@ -3,30 +3,12 @@ import React from "react";
 import Icon from "@/components/icon";
 import { formatDateTime, organizationInitials } from "@/lib/display";
 import { loadSourceHealth, type SourceHealthEntry } from "@/lib/source-health";
+import { displaySource } from "@/lib/source-display";
 
 export const dynamic = "force-dynamic";
 
 const NEVER_RUN = "Jamais exécutée";
 const statusLabels: Record<string, string> = { SUCCESS: "Collecte réussie", FAILED: "Collecte en échec", RUNNING: "Collecte en cours" };
-const sourceNames: Record<string, string> = {
-  scale_ai_greenhouse: "Scale AI",
-  artefact_greenhouse: "Artefact",
-  linkedin_job_alert_email: "Alertes LinkedIn",
-  stagiaires_ma: "Stagiaires.ma",
-  stage_ma: "Stage.ma",
-};
-
-function displaySource(id: string): string {
-  if (sourceNames[id]) return sourceNames[id];
-  const key = id.toLowerCase();
-  if (key.includes("scale")) return "Scale AI";
-  if (key.includes("artefact")) return "Artefact";
-  if (key.includes("linkedin") || key.includes("gmail")) return "Alertes LinkedIn";
-  if (key.includes("stagiaires")) return "Stagiaires.ma";
-  if (key.includes("stage")) return "Stage.ma";
-  return id;
-}
-
 function count(value: number | null) {
   return value === null ? <span className="unknown-value" title="Non renseigné">—<span className="sr-only"> Non renseigné</span></span> : value.toLocaleString("fr-FR");
 }

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -68,6 +69,8 @@ class SourceConfig:
             "gmail_linkedin_alert",
             "stagiaires_sitemap",
             "stage_ma_html",
+            "sqli_careers",
+            "lever",
         }:
             raise SourceConfigurationError(
                 f"source {source_id!r} has unsupported type {source_type!r}"
@@ -76,13 +79,13 @@ class SourceConfig:
             raise SourceConfigurationError(
                 f"source {source_id!r} enabled must be a boolean"
             )
-        if source_type == "greenhouse":
+        if source_type in {"greenhouse", "lever"}:
             for field_name, field_value in (("organization", organization), ("board_token", board_token)):
                 if not isinstance(field_value, str) or not field_value.strip():
                     raise SourceConfigurationError(
                         f"source {source_id!r} {field_name} must be a non-empty string"
                     )
-        elif source_type in {"stagiaires_sitemap", "stage_ma_html"}:
+        elif source_type in {"stagiaires_sitemap", "stage_ma_html", "sqli_careers"}:
             # Required for every collector that fetches one page per offer: an
             # unbounded run would read the whole site. There is no default — a
             # source that does not state its bound does not get to have one
@@ -109,6 +112,12 @@ class SourceConfig:
                 raise SourceConfigurationError(
                     f"source {source_id!r} gmail_message_limit must be an integer between 1 and 100"
                 )
+        if source_type in {"lever", "sqli_careers"} and country != "MA":
+            raise SourceConfigurationError(
+                f"source {source_id!r} must be restricted to country MA"
+            )
+        if source_type == "lever" and not re.fullmatch(r"[A-Za-z0-9_-]+", board_token):
+            raise SourceConfigurationError(f"source {source_id!r} has an invalid board_token")
         for field_name, field_value in (("category", category), ("country", country)):
             if field_value is not None and (
                 not isinstance(field_value, str) or not field_value.strip()

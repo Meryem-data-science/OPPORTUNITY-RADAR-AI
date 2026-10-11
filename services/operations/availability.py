@@ -25,6 +25,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import httpx
 
 from services.collector.config import DatabaseBackend, Settings, load_settings
+from services.collector.collectors.lever import API_ORIGIN as LEVER_API_ORIGIN, posting_identity as lever_posting_identity
 from services.collector.parsers.stage_ma import (
     STATE_EXPIRED, STATE_UNPUBLISHED, publication_state,
 )
@@ -48,6 +49,7 @@ _PAGE_HOSTS = {
     "linkedin": {"linkedin.com", "www.linkedin.com"},
     "stage": {"stage.ma", "www.stage.ma"},
     "stagiaires": {"stagiaires.ma", "www.stagiaires.ma"},
+    "sqli": {"www.sqli.com"},
 }
 _CLOSED_WORDS = (
     "no longer accepting applications", "candidatures ne sont plus acceptées",
@@ -210,6 +212,7 @@ def _page_identity(url: str) -> tuple[str, str] | None:
             "linkedin": r"/jobs/view/(?:[^/]*-)?([1-9][0-9]*)/?",
             "stage": r"/offres-stage/([1-9][0-9]*)(?:-[^/]*)?/?",
             "stagiaires": r"/stage-emploi-maroc/([1-9][0-9]*)(?:-[^/]*)?/?",
+            "sqli": r"/fr-fr/carriere/nos-offres-demploi/([^/]+)/?",
         }
         for kind, hosts in _PAGE_HOSTS.items():
             match = re.fullmatch(patterns[kind], parts.path)
@@ -225,7 +228,7 @@ class _PublicReader:
 
     def __init__(self, client: httpx.Client) -> None:
         self.client = client
-        self.last_request_at = 0.0
+        self.last_request_at = time.monotonic()
         self.robots: dict[str, tuple[Any, ...] | None] = {}
 
     def get(self, url: str) -> httpx.Response:
@@ -539,6 +542,43 @@ def _board_evidence(reader: _PublicReader, source: SourceConfig,
     return result
 
 
+def _lever_evidence(reader: _PublicReader, source: SourceConfig,
+                    observation: Observation) -> Evidence:
+    """Check the exact published Lever UUID, never absence from a filtered list.
+
+    Public API failures, authentication barriers, changed identities and robots
+    refusals remain UNKNOWN. A validated published posting proves OPEN; the
+    exact public endpoint's 404/410 proves CLOSED. This consumes one of the same
+    fifty due posting checks shared with the other non-Greenhouse sources.
+    """
+    board = source.board_token or ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", board):
+        return Evidence("UNKNOWN", "LEVER_BOARD_IDENTITY_UNRESOLVED")
+    posting_id = lever_posting_identity(observation.source_url, board)
+    if posting_id is None:
+        return Evidence("UNKNOWN", "LEVER_PUBLIC_POSTING_IDENTITY_UNRESOLVED")
+    url = f"{LEVER_API_ORIGIN}/v0/postings/{board}/{posting_id}?mode=json"
+    try:
+        if not reader.permits(url):
+            return Evidence("UNKNOWN", "LEVER_ROBOTS_UNRESOLVED_OR_DISALLOWED")
+        response = reader.get(url)
+        from services.collector.parsers.stage_ma import access_barrier as page_barrier
+        barrier = page_barrier(response.status_code, url, response.text)
+        if barrier:
+            return Evidence("UNKNOWN", barrier, response.status_code)
+        if response.status_code in {404, 410}:
+            return Evidence("CLOSED", "LEVER_EXACT_PUBLIC_POSTING_GONE", response.status_code)
+        if response.status_code != 200:
+            return Evidence("UNKNOWN", "LEVER_PUBLIC_API_HTTP_ERROR", response.status_code)
+        payload = response.json()
+        if (not isinstance(payload, dict) or payload.get("id") != posting_id
+                or lever_posting_identity(payload.get("hostedUrl"), board) != posting_id):
+            return Evidence("UNKNOWN", "LEVER_PUBLIC_POSTING_IDENTITY_CHANGED", response.status_code)
+        return Evidence("OPEN", "LEVER_EXACT_PUBLISHED_POSTING_PRESENT", response.status_code)
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+        return Evidence("UNKNOWN", "LEVER_PUBLIC_POSTING_UNAVAILABLE")
+
+
 def _apply_confirmed_states(connection: sqlite3.Connection, observations: list[Observation],
                             state: dict[str, Any], fresh_open_keys: set[str]) -> tuple[int, int]:
     grouped: dict[int, list[Observation]] = {}
@@ -603,7 +643,11 @@ def verify_catalog_availability(settings: Settings, source_configs: Iterable[Sou
                         or (retry_unknown and _record_for(state, item).get("state") == "UNKNOWN"))]
             due.sort(key=lambda item: (_record_for(state, item).get("checked_at", ""), item.opportunity_id, item.source_url))
             for observation in due[:max_page_checks]:
-                evidence[observation.key] = _page_evidence(reader, observation, now)
+                source = configured[observation.source_id]
+                evidence[observation.key] = (
+                    _lever_evidence(reader, source, observation)
+                    if source.type == "lever" else _page_evidence(reader, observation, now)
+                )
         fresh_open_keys = set()
         for observation in observations:
             result = evidence.get(observation.key)

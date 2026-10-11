@@ -4,6 +4,10 @@ from typing import Any, Sequence
 
 from pydantic import BaseModel
 
+from services.api.active_opportunities import read_surface_snapshot
+from services.api.morocco_catalogue import (
+    MOROCCO_CATALOGUE_PARAMETERS, morocco_catalogue_predicate,
+)
 from services.api.fine_classification import (
     FineEvidenceResponse,
     decode_fine_classification,
@@ -130,7 +134,7 @@ def _to_response(
 
 
 def read_opportunities(limit: int, offset: int = 0) -> OpportunityListResponse:
-    """Read visible, active opportunities from the configured database.
+    """Read active Data/AI opportunities with confirmed Morocco locations.
 
     `offset` skips that many rows of the same ordering, so a caller can walk
     the whole listing a page at a time. It defaults to 0, which is exactly what
@@ -153,49 +157,46 @@ def read_opportunities(limit: int, offset: int = 0) -> OpportunityListResponse:
         connection = connect_configured_database(settings)
         if settings.database_backend is DatabaseBackend.SQLITE:
             connection.execute("PRAGMA query_only = ON")
-        total_row = connection.execute(
-            "SELECT COUNT(*) FROM opportunities WHERE status = ? AND is_active = ?",
-            ("visible", 1),
-        ).fetchone()
-        # The join is additive and must stay a LEFT JOIN: an opportunity that
-        # has never been qualified is still a visible, active opportunity, and
-        # it keeps its place in this listing and in `total`. Migration 0004
-        # makes `opportunity_qualifications.opportunity_id` the primary key, so
-        # the join adds columns and can never add or drop a row. The coarse
-        # `qualification` is selected to validate the fine values against it;
-        # it stays internal and reaches no response field.
-        rows = connection.execute(
-            """
-            SELECT opportunities.id, opportunities.canonical_title,
-                   opportunities.organization, opportunities.location,
-                   opportunities.source_url, opportunities.application_url,
-                   opportunities.canonical_url, opportunities.discovered_at,
-                   opportunities.last_seen_at, opportunities.status,
-                   LENGTH(COALESCE(opportunities.description, '')),
-                   opportunity_qualifications.qualification,
-                   opportunity_qualifications.fine_primary_category,
-                   opportunity_qualifications.fine_secondary_categories_json,
-                   opportunity_qualifications.fine_category_evidence_json,
-                   opportunity_qualifications.fine_reasons_json,
-                   opportunity_qualifications.fine_classifier_version
-            FROM opportunities
-            LEFT JOIN opportunity_qualifications
-                   ON opportunity_qualifications.opportunity_id = opportunities.id
-            WHERE opportunities.status = ? AND opportunities.is_active = ?
-            ORDER BY opportunities.last_seen_at DESC, opportunities.id DESC
-            LIMIT ? OFFSET ?
-            """,
-            ("visible", 1, limit, offset),
-        ).fetchall()
-        observations = _read_observations(
-            connection, [int(row[0]) for row in rows]
-        )
-        items = [
-            _to_response(row, observations.get(int(row[0]), ())) for row in rows
-        ]
-        response = OpportunityListResponse(
-            items=items, returned=len(items), total=int(total_row[0])
-        )
+        with read_surface_snapshot(connection):
+            total_row = connection.execute(
+                f"SELECT COUNT(*) FROM opportunities WHERE {morocco_catalogue_predicate('opportunities')}",
+                MOROCCO_CATALOGUE_PARAMETERS,
+            ).fetchone()
+            # The catalogue requires persisted Data/AI qualification and a resolved
+            # Morocco location. Both the total and page use the same authority.
+            # The additive join reads the stored fine classification only.
+            rows = connection.execute(
+                f"""
+                SELECT opportunities.id, opportunities.canonical_title,
+                       opportunities.organization, opportunities.location,
+                       opportunities.source_url, opportunities.application_url,
+                       opportunities.canonical_url, opportunities.discovered_at,
+                       opportunities.last_seen_at, opportunities.status,
+                       LENGTH(COALESCE(opportunities.description, '')),
+                       opportunity_qualifications.qualification,
+                       opportunity_qualifications.fine_primary_category,
+                       opportunity_qualifications.fine_secondary_categories_json,
+                       opportunity_qualifications.fine_category_evidence_json,
+                       opportunity_qualifications.fine_reasons_json,
+                       opportunity_qualifications.fine_classifier_version
+                FROM opportunities
+                LEFT JOIN opportunity_qualifications
+                       ON opportunity_qualifications.opportunity_id = opportunities.id
+                WHERE {morocco_catalogue_predicate('opportunities')}
+                ORDER BY opportunities.last_seen_at DESC, opportunities.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*MOROCCO_CATALOGUE_PARAMETERS, limit, offset),
+            ).fetchall()
+            observations = _read_observations(
+                connection, [int(row[0]) for row in rows]
+            )
+            items = [
+                _to_response(row, observations.get(int(row[0]), ())) for row in rows
+            ]
+            response = OpportunityListResponse(
+                items=items, returned=len(items), total=int(total_row[0])
+            )
         LOGGER.info(
             "Opportunity API request succeeded.",
             extra={

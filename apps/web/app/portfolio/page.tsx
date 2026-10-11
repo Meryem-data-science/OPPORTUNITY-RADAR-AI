@@ -49,7 +49,7 @@ function Ready({ data }: { data: PortfolioResponse }) {
   const included = run.items.filter((item) => item.portfolio.disposition === "INCLUDED").sort(byId);
   const excluded = run.items.filter((item) => item.portfolio.disposition === "EXCLUDED").sort(byId);
   return <>
-    <section className="matching-summary"><div className="section-heading"><div><h2>Votre portefeuille actuel</h2><p>{run.assessment_count} opportunités évaluées · {run.included_count} retenues · {run.excluded_count} hors portefeuille</p></div></div><dl>{buckets.map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{run.bucket_counts[key]}</dd></div>)}</dl></section>
+    <section className="matching-summary"><div className="section-heading"><div><h2>Votre portefeuille au Maroc</h2><p>{run.assessment_count} opportunités au Maroc évaluées · {run.included_count} retenues · {run.excluded_count} hors portefeuille</p></div></div><dl>{buckets.map(([key, label]) => <div key={key}><dt>{label}</dt><dd>{run.bucket_counts[key]}</dd></div>)}</dl></section>
     {buckets.map(([key, label]) => {
       const items = included.filter((item) => item.portfolio.bucket === key);
       return <section key={key} aria-labelledby={`portfolio-${key}`}><div className="section-heading"><h2 id={`portfolio-${key}`}>{label}</h2><p>{items.length}</p></div>{items.length ? <div className="opportunity-grid">{items.map((item) => <Card key={item.opportunity_id} item={item} />)}</div> : <div className="status-panel"><p>Aucune opportunité dans ce groupe.</p></div>}</section>;
@@ -61,7 +61,7 @@ function Ready({ data }: { data: PortfolioResponse }) {
 export default async function PortfolioPage() {
   const data = await loadPortfolio();
   return <main className="page-shell">
-    <header className="hero"><div><p className="eyebrow">Équilibrer ses opportunités</p><h1>Votre portefeuille d’opportunités.</h1><p className="subtitle">Une répartition entre opportunités prudentes, cibles et ambitieuses selon les compétences et les évaluations enregistrées.</p></div><Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link></header>
+    <header className="hero"><div><p className="eyebrow">Équilibrer ses opportunités · Maroc</p><h1>Votre portefeuille d’opportunités.</h1><p className="subtitle">Vos offres Data & IA au Maroc, réparties entre opportunités prudentes, cibles et ambitieuses selon votre profil.</p></div><Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link></header>
     {data === null ? <section className="status-panel" role="status"><h2>Portefeuille temporairement indisponible</h2></section>
       : data.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Portefeuille non synchronisé</h2><p>Aucun classement de portefeuille n’a encore été enregistré.</p></section>
       : <Ready data={data} />}

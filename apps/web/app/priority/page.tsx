@@ -58,7 +58,7 @@ function Ready({ data }: { data: PriorityResponse }) {
   const run = data.current_run!;
   return <>
     <section className="matching-summary">
-      <div className="section-heading"><div><h2>Vos priorités</h2><p>{run.assessment_count} opportunités évaluées</p></div><p>Évaluation : {formatDate(run.evaluation_date)} · {data.history_count} analyse{data.history_count > 1 ? "s" : ""}</p></div>
+      <div className="section-heading"><div><h2>Vos priorités au Maroc</h2><p>{run.assessment_count} opportunités au Maroc évaluées</p></div><p>Évaluation : {formatDate(run.evaluation_date)} · {data.history_count} analyse{data.history_count > 1 ? "s" : ""}</p></div>
       <dl>{keys.map((key) => <div key={key}><dt>{labels[key]}</dt><dd>{run.category_counts[key]}</dd></div>)}</dl>
     </section>
     <div>{keys.map((key) => {
@@ -76,7 +76,7 @@ function Ready({ data }: { data: PriorityResponse }) {
 export default async function PriorityPage() {
   const data = await loadPriority();
   return <main className="page-shell">
-    <header className="hero"><div><p className="eyebrow">Choisir sa prochaine action</p><h1>L’essentiel, par priorité.</h1><p className="subtitle">Adéquation au profil, fraîcheur et échéances : les priorités de la dernière analyse enregistrée.</p></div><Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link></header>
+    <header className="hero"><div><p className="eyebrow">Choisir sa prochaine action · Maroc</p><h1>L’essentiel, par priorité.</h1><p className="subtitle">Vos offres Data & IA au Maroc, organisées selon l’adéquation au profil, la fraîcheur et les échéances.</p></div><Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link></header>
     {data === null ? <section className="status-panel" role="status"><h2>Priorités temporairement indisponibles</h2></section>
       : data.status === "NOT_SYNCED" ? <section className="status-panel" role="status"><h2>Priorités non encore calculées</h2><p>Aucune analyse de priorité n’a encore été enregistrée.</p></section>
       : <Ready data={data} />}

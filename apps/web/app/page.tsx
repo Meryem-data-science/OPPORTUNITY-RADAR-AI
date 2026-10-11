@@ -7,29 +7,14 @@ import type { ApplicationStatus } from "@/lib/application-contract";
 import { loadApplications } from "@/lib/applications";
 import { loadExplorer } from "@/lib/explorer";
 import { loadSourceHealth } from "@/lib/source-health";
+import { displaySource } from "@/lib/source-display";
 
 export const dynamic = "force-dynamic";
-
-const sourceNames: Record<string, string> = {
-  "scale-ai-greenhouse": "Scale AI", "artefact-greenhouse": "Artefact",
-  "linkedin-gmail-alerts": "Alertes LinkedIn", "stagiaires-ma": "Stagiaires.ma", "stage-ma": "Stage.ma",
-};
 
 const listingTypeLabels = {
   PFE: "PFE", INTERNSHIP: "Stage", GRADUATE: "Programme diplômés",
   APPRENTICESHIP: "Alternance", JOB: "Emploi", UNKNOWN: "Type non précisé",
 };
-
-function displaySource(id: string): string {
-  if (sourceNames[id]) return sourceNames[id];
-  const key = id.toLowerCase();
-  if (key.includes("scale")) return "Scale AI";
-  if (key.includes("artefact")) return "Artefact";
-  if (key.includes("linkedin") || key.includes("gmail")) return "Alertes LinkedIn";
-  if (key.includes("stagiaires")) return "Stagiaires.ma";
-  if (key.includes("stage")) return "Stage.ma";
-  return id;
-}
 
 function dateLabel(value: string): string {
   const date = new Date(value);
@@ -41,7 +26,6 @@ export default async function Home() {
     loadExplorer({ country: "MA", limit: 6 }), loadApplications(), loadSourceHealth(),
   ]);
   const moroccoCities = explorer ? new Set(explorer.available_filters.cities.filter((city) => city.country_code === "MA").map((city) => city.city_key)).size : undefined;
-  const countries = ["MA", ...(explorer?.available_filters.countries ?? []).filter((code) => code !== "MA")];
   const tracked: TrackedStatuses = Object.fromEntries((applications?.items ?? []).map((application) => [String(application.opportunity_id), application.status as ApplicationStatus]));
   const enabledSources = sources?.items.filter((source) => source.enabled) ?? [];
   const lastCollection = enabledSources.map((source) => source.last_run_at).filter((date): date is string => date !== null && !Number.isNaN(new Date(date).getTime())).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
@@ -61,7 +45,7 @@ export default async function Home() {
         <p className="editorial-intro">Stages, PFE et emplois Data & IA au Maroc, réunis au même endroit. Tous les niveaux d’expérience, pour construire la suite de votre parcours.</p>
         <form className="hero-search" action="/explorer" method="get" aria-label="Rechercher des opportunités Data et IA">
           <label className="hero-search-domain"><Icon name="search" size={19} /><span className="sr-only">Domaine recherché</span><select name="domain" defaultValue=""><option value="">Quel domaine vous intéresse ?</option><option value="DATA_SCIENCE">Data science</option><option value="DATA_ANALYTICS">Analyse de données</option><option value="DATA_ENGINEERING">Data engineering</option><option value="ARTIFICIAL_INTELLIGENCE">Intelligence artificielle</option><option value="MACHINE_LEARNING">Machine learning</option><option value="GENERATIVE_AI">IA générative</option></select></label>
-          <label className="hero-search-country"><Icon name="pin" size={17} /><span className="sr-only">Pays recherché</span><select name="country" defaultValue="MA"><option value="ALL">Tous les pays</option>{countries.map((code) => <option key={code} value={code}>{new Intl.DisplayNames(["fr"], { type: "region" }).of(code) ?? code}</option>)}</select></label>
+          <div className="hero-search-country hero-search-scope"><Icon name="pin" size={17} /><span>Maroc</span><input type="hidden" name="country" value="MA" /></div>
           <button type="submit">Explorer <Icon name="arrow-right" size={17} /></button>
         </form>
         <div className="hero-shortcuts" aria-label="Accès rapides aux offres au Maroc"><Link href="/explorer?country=MA"><Icon name="globe" size={15} />Toutes les offres</Link><Link href="/explorer?country=MA&offer_category=STAGES"><Icon name="briefcase" size={15} />Stages</Link><Link href="/explorer?country=MA&offer_category=PFE">PFE</Link><Link href="/explorer?country=MA&offer_category=EMPLOIS"><Icon name="briefcase" size={15} />Emplois</Link></div>
@@ -90,6 +74,6 @@ export default async function Home() {
     </section>
 
     <section className="mission-banner"><div><p className="eyebrow">OPPORTUNITY RADAR AI</p><h2>Moins de dispersion.<br /><em>Plus de perspectives.</em></h2></div><div><p>Un espace pour réunir votre veille, comprendre les opportunités et organiser la suite de votre parcours.</p><Link href="/recommendation">Découvrir mes recommandations <Icon name="arrow-right" size={18} /></Link></div></section>
-    <footer className="home-footer"><p>Opportunity Radar AI <span>· Veille personnelle Data & IA</span></p><Link href="/health">État du système <Icon name="arrow-up-right" size={14} /></Link></footer>
+    <footer className="home-footer"><p>Opportunity Radar AI <span>· Veille Data & IA au Maroc</span></p><Link href="/health">État du système <Icon name="arrow-up-right" size={14} /></Link></footer>
   </main>;
 }

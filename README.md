@@ -1,5 +1,7 @@
 # Opportunity Radar AI
 
+Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. La collecte inclut maintenant SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md).
+
 ## MVP local et sauvegarde GitHub
 
 Le parcours actuel de présentation est décrit dans [docs/mvp-interface.md](docs/mvp-interface.md). Double-cliquer sur **Lancer-Radar.cmd** pour ouvrir le site local.

@@ -1,7 +1,9 @@
 """Read one collected, visible opportunity without contacting its source."""
 
+import os
 from typing import Any
 
+from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.opportunities import (
     OpportunityReadError,
     OpportunityResponse,
@@ -44,6 +46,22 @@ class OpportunityNotFoundError(RuntimeError):
     """The requested posting is missing or is no longer publicly visible."""
 
 
+def _is_tracked_for_configured_profile(connection: Any, opportunity_id: int) -> bool:
+    """Keep access to an already tracked foreign posting without expanding search."""
+    raw = os.environ.get("OPPORTUNITY_RADAR_PROFILE_ID")
+    try:
+        profile_id = int(raw) if raw is not None else 0
+    except ValueError:
+        return False
+    if raw is None or profile_id <= 0 or raw.strip() != str(profile_id):
+        return False
+    row = connection.execute(
+        "SELECT 1 FROM applications WHERE profile_id = ? AND opportunity_id = ? LIMIT 1",
+        (profile_id, opportunity_id),
+    ).fetchone()
+    return row is not None
+
+
 def _read_detail_snapshot(
     connection: Any, opportunity_id: int
 ) -> OpportunityDetailResponse:
@@ -52,6 +70,9 @@ def _read_detail_snapshot(
     if owns_snapshot:
         connection.execute("BEGIN")
     try:
+        if (opportunity_id not in read_morocco_catalogue_ids(connection, (opportunity_id,))
+                and not _is_tracked_for_configured_profile(connection, opportunity_id)):
+            raise OpportunityNotFoundError(PUBLIC_OPPORTUNITY_NOT_FOUND)
         # The first 17 columns deliberately match the existing listing reader:
         # the same adapter decodes fine classification and chooses the original
         # link. LEFT JOIN preserves a visible posting with no qualification.

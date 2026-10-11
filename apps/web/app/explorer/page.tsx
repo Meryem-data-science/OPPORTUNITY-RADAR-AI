@@ -5,6 +5,7 @@ import Icon from "@/components/icon";
 import type { ApplicationStatus } from "@/lib/application-contract";
 import { formatDateTime, organizationInitials } from "@/lib/display";
 import { loadApplications } from "@/lib/applications";
+import { displaySource } from "@/lib/source-display";
 import {
   EXPLORER_DEFAULT_LIMIT,
   EXPLORER_FINE_CATEGORIES,
@@ -99,16 +100,14 @@ function integer(min: number, max: number) {
   };
 }
 
-type ParsedExplorerQuery = { valid: true; query: ExplorerQuery; countrySelection: string } | { valid: false };
+type ParsedExplorerQuery = { valid: true; query: ExplorerQuery } | { valid: false };
 
 /**
- * The URL selects Morocco by default. ALL is a presentation-only choice:
- * the backend receives no country filter for that selection. Other absent
- * filters are unrestricted; malformed supported values invalidate the request.
+ * The user-facing catalogue is restricted to Morocco. Older country choices
+ * in saved URLs cannot broaden it; the remaining filters retain validation.
  */
 function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuery {
-  const query: ExplorerQuery = {};
-  const countrySelection = first(params.country) ?? "MA";
+  const query: ExplorerQuery = { country: "MA" };
   let valid = true;
   function read<K extends keyof ExplorerQuery>(key: K, parse: (value: string) => ExplorerQuery[K] | undefined) {
     const value = first(params[key]);
@@ -116,10 +115,6 @@ function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuer
     const parsed = parse(value);
     if (parsed === undefined) valid = false;
     else query[key] = parsed;
-  }
-  if (countrySelection !== "ALL") {
-    if (/^[A-Z]{2}$/.test(countrySelection)) query.country = countrySelection;
-    else valid = false;
   }
   read("city", (value) => value);
   read("offer_category", oneOf(EXPLORER_OFFER_CATEGORIES));
@@ -129,51 +124,26 @@ function explorerQueryFromSearchParams(params: SearchParams): ParsedExplorerQuer
   read("freshness", oneOf(EXPLORER_FRESHNESS));
   read("limit", integer(1, EXPLORER_MAX_LIMIT));
   read("offset", integer(0, Number.MAX_SAFE_INTEGER));
-  return valid ? { valid: true, query, countrySelection } : { valid: false };
+  return valid ? { valid: true, query } : { valid: false };
 }
 
-function explorerHref(query: ExplorerQuery, offset: number, countrySelection: string): string {
-  const parameters = explorerSearchParams({ ...query, offset });
-  // Preserve an explicit worldwide selection when navigating the UI. ALL is
-  // never put in the query passed to loadExplorer.
-  parameters.set("country", countrySelection);
+function explorerHref(query: ExplorerQuery, offset: number): string {
+  const parameters = explorerSearchParams({ ...query, country: "MA", offset });
   return `/explorer?${parameters.toString()}`;
 }
 
-function countryLabel(code: string): string {
-  try {
-    const name = new Intl.DisplayNames(["fr"], { type: "region" }).of(code);
-    return name && name !== code ? `${name} (${code})` : code;
-  } catch {
-    return code;
-  }
-}
-
-function Filters({ filters, query, countrySelection }: { filters: ExplorerAvailableFilters; query: ExplorerQuery; countrySelection: string }) {
+function Filters({ filters, query }: { filters: ExplorerAvailableFilters; query: ExplorerQuery }) {
   const queryWithoutPreciseType = { ...query };
   delete queryWithoutPreciseType.opportunity_type;
   const hasPreciseType = query.opportunity_type !== undefined;
-  // Presentation only: one option per persisted city_key, labelled with its countries.
-  const countryCodes = [...new Set(["MA", ...(countrySelection === "ALL" ? [] : [countrySelection]), ...filters.countries])];
-  const cities = new Map<string, string[]>();
-  for (const city of filters.cities) {
-    if (countrySelection !== "ALL" && city.country_code !== countrySelection) continue;
-    const countries = cities.get(city.city_key) ?? [];
-    if (!countries.includes(city.country_code)) countries.push(city.country_code);
-    cities.set(city.city_key, countries);
-  }
+  const cities = [...new Set(filters.cities.filter((city) => city.country_code === "MA").map((city) => city.city_key))];
   return <form className="explorer-filters" method="get" action="/explorer" aria-label="Filtres Explorer">
+    <input type="hidden" name="country" value="MA" />
     <div className="explorer-filter-grid">
-      <label>Pays
-        <select name="country" defaultValue={countrySelection}>
-          <option value="ALL">Tous les pays</option>
-          {countryCodes.map((code) => <option key={code} value={code}>{countryLabel(code)}</option>)}
-        </select>
-      </label>
       <label>Ville
         <select name="city" defaultValue={query.city ?? ""}>
-          <option value="">Toutes les villes</option>
-          {[...cities].map(([cityKey, countries]) => <option key={cityKey} value={cityKey}>{cityKey} ({countries.join(", ")})</option>)}
+          <option value="">Toutes les villes du Maroc</option>
+          {cities.map((cityKey) => <option key={cityKey} value={cityKey}>{cityKey}</option>)}
         </select>
       </label>
       <label>Type d’offre
@@ -191,7 +161,7 @@ function Filters({ filters, query, countrySelection }: { filters: ExplorerAvaila
       <label>Source
         <select name="source" defaultValue={query.source ?? ""}>
           <option value="">Toutes les sources</option>
-          {filters.sources.map((source) => <option key={source.source_id} value={source.source_id}>{source.source_id} ({source.source_type})</option>)}
+          {filters.sources.map((source) => <option key={source.source_id} value={source.source_id}>{displaySource(source.source_id)}</option>)}
         </select>
       </label>
       <label>Fraîcheur
@@ -204,7 +174,7 @@ function Filters({ filters, query, countrySelection }: { filters: ExplorerAvaila
     {query.opportunity_type !== undefined && <p id="explorer-precise-type" className="muted">
       <input type="hidden" name="opportunity_type" value={query.opportunity_type} />
       {query.offer_category !== undefined && <input type="hidden" name="offer_category" value={query.offer_category} />}
-      Filtre précis : {typeLabels[query.opportunity_type]}. <Link className="health-link" href={explorerHref(queryWithoutPreciseType, 0, countrySelection)}>Supprimer le filtre précis</Link> pour choisir une autre catégorie.
+      Filtre précis : {typeLabels[query.opportunity_type]}. <Link className="health-link" href={explorerHref(queryWithoutPreciseType, 0)}>Supprimer le filtre précis</Link> pour choisir une autre catégorie.
     </p>}
     {query.limit !== undefined && query.limit !== EXPLORER_DEFAULT_LIMIT && <input type="hidden" name="limit" value={query.limit} />}
     <div className="explorer-filter-actions">
@@ -244,7 +214,7 @@ function ExplorerCard({ item, trackedStatus }: { item: ExplorerItem; trackedStat
     <div className="explorer-meta-row">
       <strong>Sources</strong>
       {item.sources.length === 0 ? <span className="explorer-unresolved">Aucune source enregistrée</span>
-        : <ul className="explorer-chips">{item.sources.map((source) => <li key={source.source_id}>{source.source_id} ({source.source_type})</li>)}</ul>}
+        : <ul className="explorer-chips">{item.sources.map((source) => <li key={source.source_id}>{displaySource(source.source_id)}</li>)}</ul>}
     </div></details>
     <ApplicationActions opportunityId={item.opportunity_id} status={trackedStatus} />
     <div className="card-footer">
@@ -254,13 +224,13 @@ function ExplorerCard({ item, trackedStatus }: { item: ExplorerItem; trackedStat
   </article>;
 }
 
-function Results({ explorer, query, tracked, countrySelection }: { explorer: ExplorerResponse; query: ExplorerQuery; tracked: Map<number, ApplicationStatus>; countrySelection: string }) {
+function Results({ explorer, query, tracked }: { explorer: ExplorerResponse; query: ExplorerQuery; tracked: Map<number, ApplicationStatus> }) {
   const { items, total, returned, limit, offset } = explorer;
   const hasPrevious = offset > 0;
   const hasNext = offset + returned < total;
   return <section aria-labelledby="explorer-results-heading">
     <div className="section-heading">
-      <h2 id="explorer-results-heading">{total} opportunité{total > 1 ? "s" : ""} correspondante{total > 1 ? "s" : ""}</h2>
+      <h2 id="explorer-results-heading">{total} opportunité{total > 1 ? "s" : ""} au Maroc</h2>
       {returned > 0 && <p>Résultats {offset + 1}–{offset + returned} sur {total}</p>}
     </div>
     {items.length === 0 ? <div className="status-panel" role="status">
@@ -270,21 +240,18 @@ function Results({ explorer, query, tracked, countrySelection }: { explorer: Exp
       // Rendered in exactly the order the API returned: navigation, not a ranking.
       : <div className="explorer-list">{items.map((item) => <ExplorerCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
     {(hasPrevious || hasNext) && <nav className="explorer-pagination" aria-label="Pagination Explorer">
-      {hasPrevious && <Link className="health-link" href={explorerHref(query, Math.max(offset - limit, 0), countrySelection)}>Page précédente</Link>}
-      {hasNext && <Link className="health-link" href={explorerHref(query, offset + returned, countrySelection)}>Page suivante</Link>}
+      {hasPrevious && <Link className="health-link" href={explorerHref(query, Math.max(offset - limit, 0))}>Page précédente</Link>}
+      {hasNext && <Link className="health-link" href={explorerHref(query, offset + returned)}>Page suivante</Link>}
     </nav>}
   </section>;
 }
 
-function Header({ countrySelection }: { countrySelection?: string }) {
-  const scope = countrySelection === "ALL" ? "Tous les pays."
-    : countrySelection === "MA" ? "Pays sélectionné : Maroc."
-    : countrySelection ? `Pays sélectionné : ${countryLabel(countrySelection)}.` : "";
+function Header() {
   return <header className="hero">
     <div>
-      <p className="eyebrow">Exploration Data & IA</p>
-      <h1>Trouvez votre prochaine opportunité.</h1>
-      <p className="subtitle">Toutes les offres Data & IA : stages, PFE et emplois, tous niveaux. {scope} Le type de contrat est à vérifier dans l’annonce d’origine.</p>
+      <p className="eyebrow">Exploration Data & IA · Maroc</p>
+      <h1>Votre prochaine opportunité au Maroc.</h1>
+      <p className="subtitle">Stages, PFE et emplois Data & IA au Maroc, tous niveaux et secteurs. Le type de contrat est à vérifier dans l’annonce d’origine.</p>
     </div>
     <nav className="hero-links" aria-label="Navigation Explorer">
       <Link className="health-link" href="/recommendation">Mes recommandations<Icon name="arrow-right" size={16} /></Link>
@@ -304,20 +271,20 @@ export default async function ExplorerPage({ searchParams }: { searchParams: Pro
       </section>
     </main>;
   }
-  const { query, countrySelection } = parsed;
+  const { query } = parsed;
   // Read independently: tracking being unavailable must not hide the Explorer.
   const [explorer, applications] = await Promise.all([loadExplorer(query), loadApplications()]);
   const tracked = new Map<number, ApplicationStatus>(
     (applications?.items ?? []).map((application) => [application.opportunity_id, application.status]),
   );
   return <main className="page-shell">
-    <Header countrySelection={countrySelection} />
+    <Header />
     {explorer === null ? <section className="status-panel" role="status">
       <h2>Offres temporairement indisponibles</h2>
       <p>Le radar ne peut pas afficher les offres pour le moment.</p><Link className="health-link" href="/source-health">Consulter l’état des sources</Link>
     </section> : <>
-      <Filters filters={explorer.available_filters} query={query} countrySelection={countrySelection} />
-      <Results explorer={explorer} query={query} tracked={tracked} countrySelection={countrySelection} />
+      <Filters filters={explorer.available_filters} query={query} />
+      <Results explorer={explorer} query={query} tracked={tracked} />
     </>}
   </main>;
 }

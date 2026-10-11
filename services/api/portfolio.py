@@ -9,9 +9,9 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from services.api.active_opportunities import (
-    read_active_opportunity_ids,
     read_surface_snapshot,
 )
+from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.link_priority import (
     SourceObservation,
     preferred_link,
@@ -75,7 +75,7 @@ class PortfolioCurrentRunResponse(BaseModel):
     matching_run_id: int
     created_at: str
     assessment_count: int
-    #: The immutable run's count; assessment_count counts the active projection.
+    #: The immutable run's count; assessment_count counts the Morocco projection.
     snapshot_assessment_count: int | None = None
     included_count: int
     excluded_count: int
@@ -270,8 +270,8 @@ def read_portfolio_surface() -> PortfolioResponse:
                         )
                     ):
                         raise PortfolioApiReadError(PUBLIC_PORTFOLIO_ERROR)
-                active_ids = read_active_opportunity_ids(connection, ids)
-                items = [item for item in items if item.opportunity_id in active_ids]
+                catalogue_ids = read_morocco_catalogue_ids(connection, ids)
+                items = [item for item in items if item.opportunity_id in catalogue_ids]
                 bucket_counts = {bucket: 0 for bucket in BUCKETS}
                 included_count = 0
                 for item in items:

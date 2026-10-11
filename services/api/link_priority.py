@@ -22,8 +22,10 @@ from services.collector.official_links import resolve_official_offer_url
 
 
 #: Source types whose observations point at an official career page / ATS,
-#: most preferred first. `greenhouse` is the company's own ATS board.
-OFFICIAL_SOURCE_TYPES: tuple[str, ...] = ("greenhouse",)
+#: most preferred first. These adapters read the employer's own posting.
+OFFICIAL_SOURCE_TYPES: tuple[str, ...] = (
+    "greenhouse", "lever", "sqli_careers",
+)
 
 #: Source types that observe a third-party job board. They are never preferred
 #: over an official observation; today only the LinkedIn Gmail alert.

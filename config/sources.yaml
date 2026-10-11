@@ -49,3 +49,35 @@ sources:
     frequency_minutes: 360
     status: active
     detail_page_limit: 25
+
+  # Public SQLI descriptions: country is confirmed on each job's own page.
+  # The declared sitemap discovers candidates; it is not an active-job registry.
+  - id: sqli_careers
+    type: sqli_careers
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 360
+    status: active
+    organization: SQLI
+    detail_page_limit: 50
+  # Lever's documented public API permits GET collection (robots Allow: /).
+  # Each adapter selects only explicitly Moroccan locations, including alternates.
+  - id: welodata_lever
+    type: lever
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 120
+    status: active
+    organization: Welo Data
+    board_token: weloglobal
+  - id: yassir_lever
+    type: lever
+    enabled: true
+    category: jobs
+    country: MA
+    frequency_minutes: 120
+    status: active
+    organization: Yassir
+    board_token: Yassir

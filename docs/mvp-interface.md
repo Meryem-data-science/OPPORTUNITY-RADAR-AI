@@ -32,15 +32,35 @@ Le formulaire de candidature du site externe peut ensuite demander les coordonn�
 
 L’accueil présente un aperçu des offres Data & IA avec une localisation identifiée au Maroc. Le compteur et les cartes se mettent à jour avec les collectes et les contrôles de disponibilité ; les offres confirmées fermées ne sont plus comptées.
 
-La page **Offres** sélectionne **Maroc** par défaut ; les villes proposées correspondent au pays actif. Les raccourcis **Toutes les offres**, **Stages**, **PFE** et **Emplois** de l’accueil gardent ce pays. « Réinitialiser » revient à la sélection Maroc.
+L’accueil, **Offres**, **Correspondances**, **Recommandations**, **Priorités** et **Portefeuille** présentent uniquement les offres Data & IA actives dont la localisation est confirmée au **Maroc**. Les compteurs et les rangs affichés portent sur cette sélection. Le filtre de pays est fixé au Maroc ; les villes et la pagination suivent ce périmètre, même avec une ancienne URL internationale.
+
+Les scores et les traces des calculs déjà enregistrés restent inchangés. Le rang d’origine des recommandations reste disponible dans `snapshot_rank_position` ; le rang affiché est continu dans la sélection Maroc. Les candidatures déjà suivies à l’étranger gardent leur historique.
 
 La sélection couvre tous les niveaux d’expérience en Data & IA. La catégorie **Emplois — tous niveaux** utilise le type d’annonce déjà enregistré : elle inclut les postes juniors, expérimentés et de management. Les stages PFA/PFE, les stages d’été et de pré-embauche sont regroupés dans **Stages** ; PFE et Alternance restent accessibles séparément.
 
-Le contrat des emplois présents n’est pas renseigné dans les données collectées. Les CDI et CDD peuvent être consultés avec les autres emplois ; vérifier le contrat exact sur l’annonce d’origine. Une offre sans contrat précisé conserve l’étiquette **Emploi**.
+La catégorie **Emploi** regroupe les contrats disponibles, sans filtre CDI/CDD spécifique. Les nouveaux collecteurs conservent le contrat ou le type de mission lorsqu’il est fourni dans la description (par exemple CDI chez SQLI ou freelance chez Welo Data). Vérifier les modalités exactes sur l’annonce d’origine ; aucune étiquette CDI n’est inventée pour une offre dont le contrat est inconnu.
 
-Pour élargir volontairement la recherche, choisir **Tous les pays** dans le filtre de pays. Les pages suivantes conservent ce choix. Les recommandations utilisent le profil existant, dont la mobilité est déjà limitée au Maroc.
+Les recommandations utilisent le profil existant, dont la mobilité est limitée au Maroc. Une annonce sans localisation marocaine confirmée ne paraît pas dans le catalogue utilisateur. La mention « télétravail » ou « mondial » seule ne suffit pas.
 
 Le bandeau, les chiffres et les dates utilisent les données du radar. La photo est une illustration éditoriale créée pour cette interface. Une date de collecte ne prouve pas que l’annonce accepte encore les candidatures.
+
+### Sources supplémentaires
+
+Trois sources publiques sont ajoutées à la collecte automatique existante :
+
+- **SQLI · carrières** : descriptions officielles, emplois et stages/PFE dont le pays indiqué sur la fiche est Maroc. Le sitemap déclaré sert à découvrir les annonces Data/IA ou stages, avec 50 descriptions maximum par cycle.
+- **Welo Data · carrières** : annonces publiées dans le catalogue public Lever, dont les missions IA et annotation de données accessibles au Maroc.
+- **Yassir · carrières** : catalogue public Lever, avec sélection des localisations marocaines réellement indiquées. La présence de cette source ne garantit pas qu’un stage ou un poste Data/IA soit disponible à chaque cycle.
+
+La qualification Data/IA, la détection des doublons et le recalcul des analyses continuent dans le pipeline existant. Ces sources complètent Artefact, Scale AI, Stagiaires.ma, Stage.ma et les alertes LinkedIn via Gmail. Les noms affichés sont lisibles ; une source activée en échec conserve son diagnostic.
+
+Les catalogues Lever sont paginés et bornés à 2 000 annonces par entreprise. Seules les localisations marocaines explicites sont conservées, y compris lorsqu’elles apparaissent parmi plusieurs lieux possibles. Aucun compte, clé API ni candidature automatique n’est nécessaire pour ces lectures publiques.
+
+La date de modification d’un sitemap SQLI et `createdAt` de Lever ne sont pas présentés comme des dates de publication. Une annonce sans date de publication vérifiée garde cette date inconnue.
+
+Les sources qui refusent l’accès automatique ne sont pas activées : l’API SmartRecruiters interdit le robot général via `robots.txt` ; Emploi.ma, Devoteam et ALTEN ont refusé la lecture de leurs règles, et ReKrute a refusé les descriptions malgré son sitemap accessible. Le collecteur n’usurpe pas l’identité d’un robot autorisé et ne contourne pas de connexion ou CAPTCHA.
+
+Le catalogue est ciblé **Data & IA dans différents secteurs** ; les postes industriels sans rapport avec Data/IA ne sont pas ajoutés aux offres affichées. Une source ajoutée peut augmenter la couverture, sans garantir un nombre fixe d’offres ni de stages.
 
 ### Offres expirées
 
@@ -48,7 +68,7 @@ L’agent contrôle la disponibilité après chaque collecte, avant le recalcul 
 
 Une preuve de fermeture peut être le retrait du poste d’un catalogue Greenhouse complet, une réponse 404/410 sur l’annonce exacte, un message explicite de fermeture ou une date `validThrough` dépassée liée à cette annonce. La seule ancienneté d’une offre ne suffit pas. Une nouvelle collecte, y compris un ancien email LinkedIn, ne réactive plus une offre expirée ; une preuve récente d’ouverture est nécessaire.
 
-Les catalogues Greenhouse sont vérifiés à chaque cycle. Pour les autres sources, l’agent contrôle jusqu’à 50 pages par cycle, en commençant par les contrôles les plus anciens, puis revérifie après six heures. Les vérifications restantes passent dans les cycles suivants.
+Les catalogues Greenhouse sont vérifiés à chaque cycle. Les annonces Lever sont vérifiées par leur identifiant exact dans l’API publique ; une annonce publiée et validée prouve l’ouverture, une réponse 404/410 prouve son retrait. Les pages SQLI peuvent être contrôlées pour leur disparition ; la présence du bouton de candidature seule ne prouve pas que le recrutement reste ouvert sur l’ATS externe. Un ATS inaccessible reste non vérifiable. Pour les sources autres que Greenhouse, l’agent contrôle jusqu’à 50 pages par cycle, en commençant par les contrôles les plus anciens, puis revérifie après six heures. Les vérifications restantes passent dans les cycles suivants.
 
 Une panne réseau, une demande de connexion, une restriction robots ou un blocage LinkedIn laisse la disponibilité **non vérifiable**. L’agent ne déclare pas l’offre fermée sans preuve. Le cycle indique alors `PARTIAL` ; les contrôles et les collectes accessibles continuent.
 

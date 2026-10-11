@@ -44,7 +44,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     <aside id="app-sidebar" className={`app-sidebar${menuOpen ? " is-open" : ""}`}>
       <Link className="app-brand" href="/" aria-label="Opportunity Radar, accueil" onClick={() => setMenuOpen(false)}>
         <span className="app-brand-mark"><Icon name="radar" size={28} /></span>
-        <span><span className="app-brand-name">Opportunity<br />Radar<span className="app-brand-dot">.</span></span><span className="app-brand-caption">Votre veille Data & IA</span></span>
+        <span><span className="app-brand-name">Opportunity<br />Radar<span className="app-brand-dot">.</span></span><span className="app-brand-caption">Data & IA · Maroc</span></span>
       </Link>
       <nav className="app-nav" aria-label="Navigation principale">
         {navigation.map((item) => {

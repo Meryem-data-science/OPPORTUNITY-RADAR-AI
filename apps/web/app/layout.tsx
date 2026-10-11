@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Opportunity Radar AI",
-  description: "Explorez les opportunités Data et IA et suivez vos candidatures.",
+  description: "Explorez les stages, PFE et emplois Data et IA au Maroc et suivez vos candidatures.",
   applicationName: "Opportunity Radar AI",
   // `app/manifest.ts` is served at this path and linked automatically; naming
   // it here keeps the link explicit alongside the rest of the PWA metadata.

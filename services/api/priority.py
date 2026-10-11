@@ -9,9 +9,9 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from services.api.active_opportunities import (
-    read_active_opportunity_ids,
     read_surface_snapshot,
 )
+from services.api.morocco_catalogue import read_morocco_catalogue_ids
 from services.api.link_priority import (
     SourceObservation,
     preferred_link,
@@ -75,7 +75,7 @@ class PriorityCurrentRunResponse(BaseModel):
     evaluation_date: str
     created_at: str
     assessment_count: int
-    #: The immutable run's count; assessment_count counts the active projection.
+    #: The immutable run's count; assessment_count counts the Morocco projection.
     snapshot_assessment_count: int | None = None
     persistence_version: str
     input_assembly_version: str
@@ -282,8 +282,8 @@ def read_priority_surface() -> PriorityResponse:
                     or sum(counts.values()) != run.assessment_count
                 ):
                     raise PriorityApiReadError(PUBLIC_PRIORITY_ERROR)
-                active_ids = read_active_opportunity_ids(connection, ids)
-                items = [item for item in items if item.opportunity_id in active_ids]
+                catalogue_ids = read_morocco_catalogue_ids(connection, ids)
+                items = [item for item in items if item.opportunity_id in catalogue_ids]
                 counts = {category: 0 for category in CATEGORIES}
                 for item in items:
                     counts[item.priority.category or "NONE"] += 1

@@ -123,11 +123,11 @@ function ReasonGroup({ title, kind, codes, emptyMessage }: { title: string; kind
   </section>;
 }
 
-function RecommendationCard({ item, trackedStatus }: { item: RecommendationItem; trackedStatus: ApplicationStatus | null }) {
+function RecommendationCard({ item, displayRank, trackedStatus }: { item: RecommendationItem; displayRank: number; trackedStatus: ApplicationStatus | null }) {
   const { opportunity, recommendation } = item;
   return <article className="recommendation-card" data-opportunity-id={item.opportunity_id}>
     <div className="recommendation-card-header">
-      <span className="recommendation-rank">n° {item.rank_position}</span>
+      <span className="recommendation-rank">n° {displayRank}</span>
       <span className={`recommendation-badge recommendation-badge-${recommendation.disposition.toLowerCase()}`}>{dispositionLabels[recommendation.disposition]}</span>
     </div>
     <div className="opportunity-card-top"><span className="organization-avatar" aria-hidden="true">{organizationInitials(opportunity.organization)}</span><div className="opportunity-card-body"><p className="organization">{opportunity.organization}</p><h3>{opportunity.canonical_title}</h3><p className="location"><Icon name="pin" size={15} />{opportunity.location ?? "Lieu non précisé"}</p></div></div>
@@ -151,22 +151,22 @@ function RecommendationCard({ item, trackedStatus }: { item: RecommendationItem;
 
 function Ready({ recommendation, tracked }: { recommendation: RecommendationResponse; tracked: Map<number, ApplicationStatus> }) {
   const run = recommendation.current_run!;
-  // `filter` keeps the received sequence, so the persisted Phase 9 ranking and
-  // every `rank_position` survive untouched; nothing is re-scored or re-ordered.
+  // Keep the persisted order and scores. The displayed ordinal describes
+  // the visible Moroccan selection only; stored ranks remain available upstream.
   const shown = run.items.filter(isConfirmedForTarget);
   return <>
     <section aria-labelledby="recommendation-heading">
       <div className="section-heading">
         <div>
-          <h2 id="recommendation-heading">Recommandations</h2>
-          <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""}</p>
-          <p className="recommendation-target-note">Les cartes confirment la géographie et le type d’opportunité recherchés. L’adéquation globale et l’éligibilité sont détaillées pour chaque offre.</p>
+          <h2 id="recommendation-heading">Recommandations au Maroc</h2>
+          <p>{shown.length} opportunité{shown.length > 1 ? "s" : ""} confirmée{shown.length > 1 ? "s" : ""} sur {run.assessment_count} classée{run.assessment_count > 1 ? "s" : ""} au Maroc</p>
+          <p className="recommendation-target-note">Cette sélection concerne le Maroc et les types d’offres de vos préférences. L’adéquation au profil et l’éligibilité sont détaillées pour chaque offre.</p>
         </div>
         <p>{recommendation.history_count} analyse{recommendation.history_count > 1 ? "s" : ""} enregistrée{recommendation.history_count > 1 ? "s" : ""}</p>
       </div>
-      {shown.length === 0 ? <div className="status-panel" role="status"><p>Aucune opportunité confirmée pour la géographie et le type d’opportunité ciblés dans cette recommandation.</p><Link className="health-link" href="/explorer">Explorer toutes les offres</Link></div>
+      {shown.length === 0 ? <div className="status-panel" role="status"><p>Aucune offre au Maroc ne correspond encore aux types d’opportunités et aux préférences confirmés par cette analyse.</p><Link className="health-link" href="/explorer">Explorer les offres au Maroc</Link></div>
         // Rendered in exactly the order the API returned: the ranking is Phase 9's.
-        : <div className="recommendation-list">{shown.map((item) => <RecommendationCard key={item.opportunity_id} item={item} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
+        : <div className="recommendation-list">{shown.map((item, index) => <RecommendationCard key={item.opportunity_id} item={item} displayRank={index + 1} trackedStatus={tracked.get(item.opportunity_id) ?? null} />)}</div>}
     </section>
     <details className="technical-details"><summary>Détails techniques</summary><dl>
       <dt>run_id</dt><dd>{run.run_id}</dd><dt>created_at</dt><dd>{run.created_at}</dd>
@@ -195,7 +195,7 @@ export default async function RecommendationPage() {
   );
   return <main className="page-shell">
     <header className="hero">
-      <div><p className="eyebrow">Votre sélection personnalisée</p><h1>Des opportunités qui vous correspondent.</h1><p className="subtitle">Le dernier classement enregistré pour votre profil, avec ses forces et ses points à confirmer.</p></div>
+      <div><p className="eyebrow">Votre sélection personnalisée · Maroc</p><h1>Des opportunités qui vous correspondent.</h1><p className="subtitle">Les offres Data & IA au Maroc qui correspondent à vos préférences, avec leurs forces et leurs points à confirmer.</p></div>
       <Link className="health-link" href="/explorer">Explorer les offres<Icon name="arrow-right" size={16} /></Link>
     </header>
     {recommendation === null ? <section className="status-panel" role="status"><h2>Recommandations temporairement indisponibles</h2><p>Le radar ne peut pas afficher les recommandations pour le moment.</p></section>

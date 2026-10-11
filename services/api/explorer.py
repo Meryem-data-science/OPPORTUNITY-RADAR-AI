@@ -1,6 +1,6 @@
 """Read-only public surface of the Explorer Data & AI mode.
 
-Phase 11.1C exposes the persisted Data/AI corpus for exploration, independently
+The Explorer exposes the confirmed Morocco Data/AI corpus, independently
 of any profile. It is not a Recommendation: nothing here ranks by a score, reads
 a Matching, Priority or Portfolio snapshot, or knows who is asking. The only
 order is navigation order — `last_seen_at DESC, id DESC` — and every filter is a
@@ -13,9 +13,9 @@ comparison against a value an earlier phase already persisted:
     source              opportunity_sources JOIN sources
     freshness           opportunities.last_seen_at against the request clock
 
-An unknown value is never a guessed one. A dimension that is NULL, UNKNOWN or
-AMBIGUOUS keeps its posting in the listing while that dimension is not
-filtered, and never matches once it is. No classifier, resolver or extractor is
+A resolved Morocco location is mandatory for the catalogue. Other dimensions
+that are NULL, UNKNOWN or AMBIGUOUS never match an explicit filter; missing
+types or domains remain visible until that dimension is filtered. No classifier, resolver or extractor is
 reachable from this module, and nothing is written.
 """
 
@@ -28,6 +28,10 @@ from typing import Any, Callable, Sequence
 
 from pydantic import BaseModel
 
+from services.api.morocco_catalogue import (
+    CATALOGUE_QUALIFICATIONS, MOROCCO_COUNTRY_CODE,
+    MOROCCO_LOCATION_PARAMETERS, morocco_location_predicate,
+)
 from services.api.fine_classification import decode_fine_classification
 from services.api.link_priority import (
     SourceObservation,
@@ -48,7 +52,7 @@ LOGGER = get_logger("services.collector.api.explorer")
 PUBLIC_EXPLORER_ERROR = "Explorer data is temporarily unavailable."
 
 #: The Explorer universe: coarse Phase 8 qualifications that are Data/AI targets.
-EXPLORER_QUALIFICATIONS = ("CORE_TARGET", "ADJACENT_TARGET")
+EXPLORER_QUALIFICATIONS = CATALOGUE_QUALIFICATIONS
 DEFAULT_LIMIT = 24
 MAX_LIMIT = 50
 
@@ -187,8 +191,13 @@ FROM opportunities AS o
 JOIN opportunity_qualifications AS q ON q.opportunity_id = o.id
 LEFT JOIN opportunity_constraints AS k ON k.opportunity_id = o.id
 """
-_BASE_WHERE = "WHERE o.status = ? AND o.is_active = ? AND q.qualification IN (?, ?)"
-_BASE_PARAMETERS: tuple[Any, ...] = ("visible", 1, *EXPLORER_QUALIFICATIONS)
+_BASE_WHERE = (
+    "WHERE o.status = ? AND o.is_active = ? AND q.qualification IN (?, ?) "
+    f"AND {morocco_location_predicate('o.id')}"
+)
+_BASE_PARAMETERS: tuple[Any, ...] = (
+    "visible", 1, *EXPLORER_QUALIFICATIONS, *MOROCCO_LOCATION_PARAMETERS,
+)
 
 
 def _base(extra_joins: str = "") -> str:
@@ -203,25 +212,19 @@ def _filtered_from(query: ExplorerQuery, now: Callable[[], datetime]) -> tuple[s
     """
     clauses: list[str] = []
     parameters: list[Any] = list(_BASE_PARAMETERS)
-    if query.country is not None or query.city is not None:
-        # One EXISTS: a combined country+city filter must be satisfied by the
-        # same persisted resolution row, never by two unrelated ones.
-        location = [
-            "r.opportunity_id = o.id",
-            "r.resolution_status = ?",
-        ]
-        parameters.append("RESOLVED")
-        if query.country is not None:
-            location.append("r.country_code = ?")
-            parameters.append(query.country)
-        if query.city is not None:
-            location.append("r.city_key = ?")
-            parameters.append(query.city)
+    # A direct request cannot reopen another country, even when a posting
+    # happens to list both Morocco and a foreign location.
+    if query.country not in (None, MOROCCO_COUNTRY_CODE):
+        clauses.append("0 = 1")
+    if query.city is not None:
+        # The requested city must belong to the Morocco resolution itself.
+        # Another location on the same multi-location posting cannot satisfy it.
         clauses.append(
-            "EXISTS (SELECT 1 FROM opportunity_location_resolutions AS r WHERE "
-            + " AND ".join(location)
-            + ")"
+            "EXISTS (SELECT 1 FROM opportunity_location_resolutions AS r "
+            "WHERE r.opportunity_id = o.id AND r.resolution_status = ? "
+            "AND r.country_code = ? AND r.city_key = ?)"
         )
+        parameters.extend((*MOROCCO_LOCATION_PARAMETERS, query.city))
     if query.opportunity_type is not None:
         clauses.append("k.opportunity_type = ?")
         parameters.append(query.opportunity_type.value)
@@ -277,6 +280,10 @@ def _locations(
         with_rows.add(opportunity_id)
         if status != "RESOLVED" or country_code is None:
             unresolved.add(opportunity_id)
+            continue
+        # A multi-location posting can include Morocco and other countries.
+        # The public catalogue exposes only its confirmed Morocco locations.
+        if country_code != MOROCCO_COUNTRY_CODE:
             continue
         pair = (country_code, city_key)
         if pair in seen.setdefault(opportunity_id, set()):
@@ -397,13 +404,13 @@ def _available_filters(connection: Any) -> ExplorerAvailableFiltersResponse:
 
     countries = distinct(
         "r.country_code", _LOCATION_JOIN,
-        "AND r.resolution_status = ? AND r.country_code IS NOT NULL",
-        "r.country_code", "RESOLVED",
+        "AND r.resolution_status = ? AND r.country_code = ?",
+        "r.country_code", *MOROCCO_LOCATION_PARAMETERS,
     )
     cities = distinct(
         "r.country_code, r.city_key", _LOCATION_JOIN,
-        "AND r.resolution_status = ? AND r.country_code IS NOT NULL AND r.city_key IS NOT NULL",
-        "r.country_code, r.city_key", "RESOLVED",
+        "AND r.resolution_status = ? AND r.country_code = ? AND r.city_key IS NOT NULL",
+        "r.country_code, r.city_key", *MOROCCO_LOCATION_PARAMETERS,
     )
     types = distinct("k.opportunity_type", "", "AND k.opportunity_type IS NOT NULL", "k.opportunity_type")
     domains = distinct(
