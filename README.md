@@ -1,5 +1,10 @@
 # Opportunity Radar AI
 
+Pour reconnecter les alertes LinkedIn reçues dans Gmail, lancer
+**Connecter-Alertes-LinkedIn.cmd** dans sa session Windows. Le collecteur local
+utilise un client OAuth **Application de bureau**, sans domaine Internet acheté.
+La procédure est décrite dans [docs/connexion-linkedin.md](docs/connexion-linkedin.md).
+
 Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. La collecte inclut maintenant SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md).
 
 ## MVP local et sauvegarde GitHub

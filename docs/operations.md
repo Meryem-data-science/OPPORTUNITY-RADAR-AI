@@ -5,6 +5,17 @@ continuous production execution and no automatic application behavior.
 
 ## Prepare local SQLite and Gmail
 
+For the local Windows MVP, use `Connecter-Alertes-LinkedIn.cmd` to renew the
+LinkedIn-alert Gmail authorization manually. It calls
+`python -m services.collector.cli.gmail_authorize`, requests exactly
+`gmail.readonly`, and binds the Desktop OAuth callback to `127.0.0.1`.
+No purchased domain is needed for that callback. It preserves the old token
+until a renewable read-only grant is validated and stored atomically, without
+reading emails or running collection. The unattended refresh never calls this
+interactive command. See [connexion-linkedin.md](connexion-linkedin.md) for
+setup and troubleshooting. Do not use the `gmail.send` digest bootstrap to
+repair the alert collector.
+
 From the repository root:
 
 ```bash
