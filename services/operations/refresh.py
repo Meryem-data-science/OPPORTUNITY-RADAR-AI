@@ -180,8 +180,11 @@ def _gmail_client(configuration):
 def _collector(source):
     from services.collector.collectors.factory import collector_for
     from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCollector
+    from services.collector.collectors.indeed_job_alert import IndeedJobAlertCollector
     if source.type == "gmail_linkedin_alert":
         return LinkedInJobAlertCollector(source, gmail_client_factory=_gmail_client)
+    if source.type == "gmail_indeed_alert":
+        return IndeedJobAlertCollector(source, gmail_client_factory=_gmail_client)
     return collector_for(source)
 
 

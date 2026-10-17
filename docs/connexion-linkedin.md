@@ -1,16 +1,18 @@
-# Connecter les alertes LinkedIn
+# Connecter les alertes LinkedIn et Indeed
 
-Le projet récupère les annonces contenues dans les **alertes LinkedIn reçues par Gmail**. Il ne possède pas de scraper direct des pages LinkedIn et n'importe pas toutes les annonces de LinkedIn.
+Le projet récupère les annonces contenues dans les **alertes LinkedIn et Indeed reçues par Gmail**. La collecte porte sur les emails reçus, sans importer la totalité des catalogues de ces plateformes. Stage.ma et Stagiaires.ma utilisent leurs collecteurs publics existants et n'ont pas besoin de cette connexion.
 
 ## Reconnecter une configuration existante
 
-1. Dans le dossier du projet, double-cliquer sur **Connecter-Alertes-LinkedIn.cmd**.
+1. Dans le dossier du projet, double-cliquer sur **Connecter-Alertes-Emploi.cmd**. L'ancien **Connecter-Alertes-LinkedIn.cmd** reste compatible et utilise la même autorisation.
 2. Dans le navigateur Google qui s'ouvre, choisir le compte Gmail qui reçoit les alertes et autoriser la **lecture seule**.
 3. Attendre le message **« Autorisation Gmail en lecture seule enregistrée localement »** dans la fenêtre du lanceur. La page de retour dans le navigateur ne confirme pas à elle seule l'enregistrement du jeton.
 
 Le lanceur demande un nouveau consentement même si l'ancien jeton est expiré ou révoqué. Il conserve l'ancien fichier jusqu'à la réception et la validation d'une autorisation renouvelable avec le seul périmètre `gmail.readonly`. Il remplace ensuite le jeton par une écriture atomique. Aucun email n'est lu ou envoyé par ce lanceur.
 
 La collecte reprendra au **prochain cycle automatique** de l'agent si celui-ci est lancé. Le lanceur ne collecte pas les mails et ne redémarre pas le site. Utiliser `Lancer-Radar.cmd` si l'agent est arrêté. La source ne sera considérée opérationnelle qu'après une collecte réussie ; le renouvellement OAuth seul ne confirme pas la présence d'annonces.
+
+Une seule autorisation Gmail en lecture seule sert aux deux sources. Aucun second jeton Indeed n'est nécessaire lorsque la connexion actuelle est valide.
 
 ## Sans domaine acheté ni carte bancaire pour ce collecteur local
 
@@ -36,7 +38,7 @@ Cette configuration vise l'agent installé sur le PC pour l'usage personnel. Une
 
    Une configuration existante valide doit garder ses chemins actuels pour que l'agent et le lanceur utilisent le même jeton. Ne pas réutiliser le jeton du digest Gmail, qui nécessite `gmail.send`.
 
-7. Double-cliquer sur **Connecter-Alertes-LinkedIn.cmd** et terminer le consentement dans Google. Si le navigateur ne s'ouvre pas automatiquement, le lanceur affiche un lien d'autorisation. L'attente est limitée à cinq minutes ; relancer en cas d'expiration.
+7. Double-cliquer sur **Connecter-Alertes-Emploi.cmd** et terminer le consentement dans Google. Si le navigateur ne s'ouvre pas automatiquement, le lanceur affiche un lien d'autorisation. L'attente est limitée à cinq minutes ; relancer en cas d'expiration.
 
 Une application External en mode Testing utilisant Gmail impose une nouvelle autorisation après sept jours. Pour un usage personnel durable, examiner le passage en production et les exemptions de vérification ; ce changement ne garantit pas un jeton permanent. [Audience et durée d'autorisation](https://support.google.com/cloud/answer/15549945?hl=fr), [Exceptions de vérification](https://support.google.com/cloud/answer/13464323?hl=fr).
 
@@ -46,7 +48,13 @@ Ne jamais envoyer les fichiers client, jetons ou mots de passe dans le chat ou s
 
 Dans LinkedIn, créer des alertes pour **Maroc** et les métiers Data/IA, par exemple Data Analyst, Data Engineer, Data Scientist et Machine Learning. Inclure les stages/PFE et les emplois souhaités, puis activer la réception par email sur le compte Gmail autorisé. [Alertes emploi LinkedIn](https://www.linkedin.com/help/linkedin/answer/a508396).
 
-Le collecteur existant lit au maximum **50 messages** provenant de `jobalerts-noreply@linkedin.com` sur les **sept derniers jours**, puis réutilise la déduplication, la qualification Data/IA et les filtres Maroc du site. Les informations importées dépendent du contenu réel des emails. Une alerte ne garantit pas que l'annonce accepte encore des candidatures ; les contrôles de disponibilité existants restent nécessaires.
+Dans Indeed, enregistrer les recherches souhaitées avec la localisation **Maroc** ou une ville marocaine, puis activer les alertes sur le même compte Gmail. Voir le [guide officiel des alertes Indeed](https://www.indeed.com/help/job-seekers/articles/204488890-starting-stopping-and-managing-job-alerts?co=US&hl=en).
+
+Chaque source lit au maximum **50 messages des sept derniers jours**, puis réutilise la déduplication, la qualification Data/IA et les filtres Maroc du site. LinkedIn recherche les messages de `jobalerts-noreply@linkedin.com` ; Indeed utilise sa recherche configurée dans `config/sources.yaml`. Une réception d'email sur un autre compte ne suffit pas : l'alerte doit arriver dans le compte Gmail autorisé.
+
+Les informations importées dépendent du contenu réel des emails. Une localisation absente ou ambiguë ne devient pas automatiquement « Maroc » et l'annonce ne paraît alors pas dans la sélection Maroc. Un format d'alerte Indeed non reconnu est signalé comme une erreur de collecte, au lieu d'annoncer une collecte vide réussie.
+
+Une alerte ne garantit pas que l'annonce accepte encore des candidatures. Un ancien email ne réactive pas une offre confirmée fermée et la disponibilité reste à vérifier en l'absence de preuve récente.
 
 ## Si Google ou le lanceur refuse la connexion
 

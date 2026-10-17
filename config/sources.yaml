@@ -27,6 +27,16 @@ sources:
     status: active
     gmail_query: "newer_than:7d from:jobalerts-noreply@linkedin.com"
     gmail_message_limit: 50
+  # Same local read-only Gmail authorization as LinkedIn; only received alerts.
+  - id: indeed_job_alert_email
+    type: gmail_indeed_alert
+    enabled: true
+    category: jobs
+    country: null
+    frequency_minutes: 60
+    status: active
+    gmail_query: "newer_than:7d from:alert@indeed.com"
+    gmail_message_limit: 50
   - id: stagiaires_ma
     type: stagiaires_sitemap
     enabled: true

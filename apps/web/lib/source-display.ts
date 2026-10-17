@@ -4,6 +4,7 @@ const SOURCE_NAMES: Record<string, string> = {
   artefact_greenhouse: "Artefact",
   linkedin_job_alert_email: "Alertes LinkedIn",
   linkedin_gmail_alerts: "Alertes LinkedIn",
+  indeed_job_alert_email: "Alertes Indeed",
   stagiaires_ma: "Stagiaires.ma",
   stage_ma: "Stage.ma",
   sqli_careers: "SQLI · carrières",

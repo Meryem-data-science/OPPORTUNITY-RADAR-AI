@@ -54,6 +54,10 @@ Trois sources publiques sont ajoutées à la collecte automatique existante :
 
 La qualification Data/IA, la détection des doublons et le recalcul des analyses continuent dans le pipeline existant. Ces sources complètent Artefact, Scale AI, Stagiaires.ma, Stage.ma et les alertes LinkedIn via Gmail. Les noms affichés sont lisibles ; une source activée en échec conserve son diagnostic.
 
+**Les alertes Indeed via Gmail** rejoignent la collecte. LinkedIn et Indeed utilisent la même autorisation Gmail en lecture seule et lisent chacun jusqu'à 50 emails des sept derniers jours. Pour les préparer ou reconnecter Gmail, lancer **Connecter-Alertes-Emploi.cmd** dans le dossier du projet et suivre le [guide des alertes emploi](connexion-linkedin.md). L'ancien lanceur LinkedIn reste compatible. La page **Sources** indique le parcours de chaque source et fournit les liens officiels pour créer les alertes.
+
+Stage.ma lit déjà les offres publiques de la spécialité Informatique, dans la limite de 25 fiches par cycle ; Stagiaires.ma utilise son sitemap officiel avec la même borne. Les emails LinkedIn et Indeed reçus complètent cette couverture sans représenter tout leur catalogue. Les formats Indeed non reconnus sont signalés comme des échecs visibles. Une localisation absente ne suffit pas à afficher une annonce au Maroc, et un ancien email ne prouve pas que le recrutement reste ouvert.
+
 Les catalogues Lever sont paginés et bornés à 2 000 annonces par entreprise. Seules les localisations marocaines explicites sont conservées, y compris lorsqu’elles apparaissent parmi plusieurs lieux possibles. Aucun compte, clé API ni candidature automatique n’est nécessaire pour ces lectures publiques.
 
 La date de modification d’un sitemap SQLI et `createdAt` de Lever ne sont pas présentés comme des dates de publication. Une annonce sans date de publication vérifiée garde cette date inconnue.
@@ -66,7 +70,7 @@ Le catalogue est ciblé **Data & IA dans différents secteurs** ; les postes ind
 
 L’agent contrôle la disponibilité après chaque collecte, avant le recalcul des recommandations. Une fermeture confirmée masque l’annonce dans l’accueil, les offres, les correspondances, les recommandations, les priorités et le portefeuille. Les candidatures déjà enregistrées et leur historique sont conservés.
 
-Une preuve de fermeture peut être le retrait du poste d’un catalogue Greenhouse complet, une réponse 404/410 sur l’annonce exacte, un message explicite de fermeture ou une date `validThrough` dépassée liée à cette annonce. La seule ancienneté d’une offre ne suffit pas. Une nouvelle collecte, y compris un ancien email LinkedIn, ne réactive plus une offre expirée ; une preuve récente d’ouverture est nécessaire.
+Une preuve de fermeture peut être le retrait du poste d’un catalogue Greenhouse complet, une réponse 404/410 sur l’annonce exacte, un message explicite de fermeture ou une date `validThrough` dépassée liée à cette annonce. La seule ancienneté d’une offre ne suffit pas. Une nouvelle collecte, y compris un ancien email LinkedIn ou Indeed, ne réactive plus une offre expirée ; une preuve récente d’ouverture est nécessaire.
 
 Les catalogues Greenhouse sont vérifiés à chaque cycle. Les annonces Lever sont vérifiées par leur identifiant exact dans l’API publique ; une annonce publiée et validée prouve l’ouverture, une réponse 404/410 prouve son retrait. Les pages SQLI peuvent être contrôlées pour leur disparition ; la présence du bouton de candidature seule ne prouve pas que le recrutement reste ouvert sur l’ATS externe. Un ATS inaccessible reste non vérifiable. Pour les sources autres que Greenhouse, l’agent contrôle jusqu’à 50 pages par cycle, en commençant par les contrôles les plus anciens, puis revérifie après six heures. Les vérifications restantes passent dans les cycles suivants.
 
@@ -80,7 +84,7 @@ Le raccourci **Opportunity Radar AI** du dossier Démarrage Windows lance le sit
 
 Le retour d’Internet entre deux cycles ne déclenche pas immédiatement une nouvelle collecte. Les sources sont réessayées au prochain cycle, y compris après une panne réseau.
 
-La collecte contrôle les expirations puis recalcule les correspondances, recommandations, priorités et portefeuille avec le profil existant. Une autorisation Gmail indisponible fait échouer cette source sans ouvrir de fenêtre de connexion. Les sources publiques continuent.
+La collecte contrôle les expirations puis recalcule les correspondances, recommandations, priorités et portefeuille avec le profil existant. Une autorisation Gmail indisponible fait échouer les sources d'alertes concernées sans ouvrir de fenêtre de connexion. Les sources publiques continuent.
 
 ## Lancement et arrêt manuels
 

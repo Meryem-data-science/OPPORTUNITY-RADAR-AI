@@ -28,8 +28,8 @@ OFFICIAL_SOURCE_TYPES: tuple[str, ...] = (
 )
 
 #: Source types that observe a third-party job board. They are never preferred
-#: over an official observation; today only the LinkedIn Gmail alert.
-JOB_BOARD_SOURCE_TYPES: tuple[str, ...] = ("gmail_linkedin_alert",)
+#: over an official observation.
+JOB_BOARD_SOURCE_TYPES: tuple[str, ...] = ("gmail_linkedin_alert", "gmail_indeed_alert")
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,22 @@
-# Sources Maroc ajoutées le 11 octobre 2026
+# Sources du radar au Maroc
 
-## Accès vérifiés et contrat utilisé
+## Stage.ma, Stagiaires.ma et alertes emploi
+
+- **Stage.ma** : collecteur public déjà activé pour la spécialité [Informatique](https://www.stage.ma/specialites/computer-science), avec 25 fiches maximum par cycle. La couverture reste limitée à cette rubrique ; les annonces expirées ou sans employeur utilisable sont écartées.
+- **Stagiaires.ma** : collecteur public déjà activé, découverte par le sitemap officiel et 25 fiches maximum par cycle.
+- **LinkedIn** et **Indeed** : annonces extraites des alertes reçues dans le compte Gmail autorisé, au maximum 50 emails des sept derniers jours par source. La même connexion en lecture seule couvre les deux plateformes. Lancer **Connecter-Alertes-Emploi.cmd** dans le dossier du projet si l'autorisation est absente ou expirée ; l'ancien lanceur LinkedIn reste compatible. Voir le [guide de connexion et de création des alertes](connexion-linkedin.md).
+
+Ces collectes couvrent les pages et emails effectivement lus. Elles ne garantissent ni la totalité des catalogues ni un nombre fixe d'offres. Une annonce sans localisation marocaine confirmée n'apparaît pas dans la sélection Maroc. La date d'un email ne prouve pas l'ouverture du poste et ne réactive pas une offre fermée. Un format d'alerte Indeed non reconnu fait apparaître une erreur de source.
+
+La page **Sources** montre la dernière collecte enregistrée pour chacune des sources activées et conserve les diagnostics d'échec. L'ajout du collecteur Indeed ne constitue pas à lui seul une validation de la connexion Gmail ou des emails présents.
+
+Le parseur Indeed accepte les liens directs portant une clé d'annonce explicite sur `ma.indeed.com`, `www.indeed.com` ou `indeed.com`. Il retire les paramètres de suivi et conserve une URL unique par clé pour éviter les doublons entre collectes. Les redirections de suivi opaques ne sont pas ouvertes. Une carte non reconnue ou ambiguë fait échouer la source avant toute insertion partielle ; les autres sources continuent. Les annonces Indeed restent **à vérifier**, sans badge d'ouverture déduit de l'email.
+
+Le 17 octobre 2026, l'accès Gmail existant a répondu correctement, mais la recherche configurée n'a trouvé aucun email Indeed sur les sept derniers jours. Le format du parseur n'a donc pas encore été validé sur une alerte réelle de ce compte. Créer les alertes Data/IA au Maroc sur le compte Gmail autorisé pour alimenter cette source.
+
+## Sources publiques ajoutées le 11 octobre 2026
+
+### Accès vérifiés et contrat utilisé
 
 | Source | Entrée publique | Accès et sélection |
 |---|---|---|

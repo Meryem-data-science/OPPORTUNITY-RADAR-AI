@@ -1,11 +1,13 @@
 # Opportunity Radar AI
 
-Pour reconnecter les alertes LinkedIn reçues dans Gmail, lancer
-**Connecter-Alertes-LinkedIn.cmd** dans sa session Windows. Le collecteur local
+Pour connecter les alertes LinkedIn et Indeed reçues dans Gmail, lancer
+**Connecter-Alertes-Emploi.cmd** dans sa session Windows. L'ancien lanceur
+**Connecter-Alertes-LinkedIn.cmd** reste compatible. La même autorisation
+en lecture seule sert aux deux sources. Le collecteur local
 utilise un client OAuth **Application de bureau**, sans domaine Internet acheté.
 La procédure est décrite dans [docs/connexion-linkedin.md](docs/connexion-linkedin.md).
 
-Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. La collecte inclut maintenant SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md). Les badges et le filtre des offres vérifiées sont décrits dans [Disponibilité des offres](docs/disponibilite-offres.md).
+Le catalogue utilisateur est ciblé Data & IA au Maroc sur toutes les pages de recherche et de classement. Stage.ma (rubrique Informatique), Stagiaires.ma et les alertes LinkedIn sont déjà collectés ; les alertes Indeed reçues par Gmail s'ajoutent à ces sources. La collecte inclut aussi SQLI, Welo Data et Yassir ; détails et limites dans [Sources Maroc](docs/sources-maroc.md) et [Guide de l’interface](docs/mvp-interface.md). Les badges et le filtre des offres vérifiées sont décrits dans [Disponibilité des offres](docs/disponibilite-offres.md).
 
 ## MVP local et sauvegarde GitHub
 

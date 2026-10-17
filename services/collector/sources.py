@@ -67,6 +67,7 @@ class SourceConfig:
         if source_type not in {
             "greenhouse",
             "gmail_linkedin_alert",
+            "gmail_indeed_alert",
             "stagiaires_sitemap",
             "stage_ma_html",
             "sqli_careers",

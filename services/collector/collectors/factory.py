@@ -5,6 +5,7 @@ from collections.abc import Callable
 from services.collector.collectors.base import OpportunityCollector
 from services.collector.collectors.greenhouse import GreenhouseCollector
 from services.collector.collectors.linkedin_job_alert import LinkedInJobAlertCollector
+from services.collector.collectors.indeed_job_alert import IndeedJobAlertCollector
 from services.collector.collectors.lever import LeverCollector
 from services.collector.collectors.sqli import SqliCollector
 from services.collector.collectors.stage_ma import StageMaCollector
@@ -20,6 +21,7 @@ CollectorBuilder = Callable[[SourceConfig], OpportunityCollector]
 COLLECTOR_REGISTRY: dict[str, CollectorBuilder] = {
     "greenhouse": GreenhouseCollector,
     "gmail_linkedin_alert": LinkedInJobAlertCollector,
+    "gmail_indeed_alert": IndeedJobAlertCollector,
     "stagiaires_sitemap": StagiairesCollector,
     "stage_ma_html": StageMaCollector,
     "sqli_careers": SqliCollector,
