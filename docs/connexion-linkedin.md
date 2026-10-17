@@ -48,13 +48,15 @@ Ne jamais envoyer les fichiers client, jetons ou mots de passe dans le chat ou s
 
 Dans LinkedIn, créer des alertes pour **Maroc** et les métiers Data/IA, par exemple Data Analyst, Data Engineer, Data Scientist et Machine Learning. Inclure les stages/PFE et les emplois souhaités, puis activer la réception par email sur le compte Gmail autorisé. [Alertes emploi LinkedIn](https://www.linkedin.com/help/linkedin/answer/a508396).
 
-Dans Indeed, enregistrer les recherches souhaitées avec la localisation **Maroc** ou une ville marocaine, puis activer les alertes sur le même compte Gmail. Voir le [guide officiel des alertes Indeed](https://www.indeed.com/help/job-seekers/articles/204488890-starting-stopping-and-managing-job-alerts?co=US&hl=en).
+Si les offres Indeed arrivent déjà dans le compte Gmail autorisé, **aucune nouvelle activation n'est nécessaire**. Pour créer d'autres recherches, choisir la localisation **Maroc** ou une ville marocaine et activer leur réception par email sur ce compte. Voir le [guide officiel des alertes Indeed](https://www.indeed.com/help/job-seekers/articles/204488890-starting-stopping-and-managing-job-alerts?co=US&hl=en).
 
-Chaque source lit au maximum **50 messages des sept derniers jours**, puis réutilise la déduplication, la qualification Data/IA et les filtres Maroc du site. LinkedIn recherche les messages de `jobalerts-noreply@linkedin.com` ; Indeed utilise sa recherche configurée dans `config/sources.yaml`. Une réception d'email sur un autre compte ne suffit pas : l'alerte doit arriver dans le compte Gmail autorisé.
+Chaque source lit au maximum **50 messages des sept derniers jours**, puis réutilise la déduplication, la qualification Data/IA et les filtres Maroc du site. LinkedIn recherche les messages de `jobalerts-noreply@linkedin.com` ; Indeed recherche ceux de `alert@indeed.com`, `donotreply@jobalert.indeed.com` et `donotreply@match.indeed.com`, selon `config/sources.yaml`. L'alerte doit arriver dans le compte Gmail autorisé par Radar, qui peut être différent de l'adresse utilisée pour se connecter à Indeed.
 
-Les informations importées dépendent du contenu réel des emails. Une localisation absente ou ambiguë ne devient pas automatiquement « Maroc » et l'annonce ne paraît alors pas dans la sélection Maroc. Un format d'alerte Indeed non reconnu est signalé comme une erreur de collecte, au lieu d'annoncer une collecte vide réussie.
+Les informations importées dépendent du contenu réel des emails. Une localisation absente ou ambiguë ne devient pas automatiquement « Maroc » et l'annonce ne paraît alors pas dans la sélection Maroc. Un email Indeed non reconnu est écarté en entier ; les autres emails entièrement reconnus peuvent être importés. La page **Sources** conserve alors un diagnostic de collecte partielle en échec et les compteurs réels. Si aucun email ne peut être extrait, la source échoue sans nouvelle offre. Les liens dont la destination peut être lue localement sont décodés sans ouvrir le suivi ; les redirections opaques restent non prises en charge.
 
 Une alerte ne garantit pas que l'annonce accepte encore des candidatures. Un ancien email ne réactive pas une offre confirmée fermée et la disponibilité reste à vérifier en l'absence de preuve récente.
+
+Si les emails Indeed sont déjà reçus mais que la collecte reste vide, vérifier le compte Gmail autorisé, leur date et leur adresse d'expéditeur avant de modifier les alertes. Les messages de plus de sept jours ne sont pas relus par la collecte courante. Un expéditeur différent ou un format d'email non reconnu demande une adaptation du collecteur ; réactiver les alertes ne corrige pas ce cas.
 
 ## Si Google ou le lanceur refuse la connexion
 

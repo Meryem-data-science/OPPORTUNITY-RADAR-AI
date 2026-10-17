@@ -35,7 +35,7 @@ sources:
     country: null
     frequency_minutes: 60
     status: active
-    gmail_query: "newer_than:7d from:alert@indeed.com"
+    gmail_query: "newer_than:7d {from:alert@indeed.com from:donotreply@jobalert.indeed.com from:donotreply@match.indeed.com}"
     gmail_message_limit: 50
   - id: stagiaires_ma
     type: stagiaires_sitemap

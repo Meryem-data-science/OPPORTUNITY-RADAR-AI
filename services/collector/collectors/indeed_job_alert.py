@@ -9,12 +9,17 @@ from services.collector.models.opportunity import OpportunityCandidate
 from services.collector.parsers.indeed_job_alert import (
     INDEED_JOB_ALERT_SOURCE_ID,
     PARSER_VERSION,
+    IndeedJobAlertParseError,
     parse_indeed_job_alert,
 )
 from services.collector.sources import SourceConfig
 
 
 GmailClientFactory = Callable[[GmailConfiguration], GmailClient]
+
+
+class IndeedJobAlertPartialError(ValueError):
+    """Some emails were unreadable; usable candidates can still be persisted."""
 
 
 class IndeedJobAlertCollector:
@@ -40,19 +45,23 @@ class IndeedJobAlertCollector:
         self._gmail_client_factory = gmail_client_factory
         self._configuration_loader = configuration_loader
         self._logger = logger or get_logger(__name__)
+        self.collection_warning: Exception | None = None
 
     def run_metrics(self) -> dict[str, str]:
         """Expose the parser version without labelling Gmail messages as pages."""
         return {"parser_version": PARSER_VERSION}
 
     def collect(self) -> list[OpportunityCandidate]:
+        self.collection_warning = None
         client = self._gmail_client_factory(self._configuration_loader())
         messages = client.search(self.source.gmail_query, self.source.gmail_message_limit)
         parsed: list[OpportunityCandidate] = []
+        unreadable_messages = 0
         for message in messages:
-            # Layout errors propagate so the source is visibly failed instead
-            # of reporting a misleading successful collection of zero jobs.
-            parsed.extend(parse_indeed_job_alert(message))
+            try:
+                parsed.extend(parse_indeed_job_alert(message))
+            except IndeedJobAlertParseError:
+                unreadable_messages += 1
 
         unique: list[OpportunityCandidate] = []
         seen: set[str] = set()
@@ -63,6 +72,15 @@ class IndeedJobAlertCollector:
                 continue
             seen.add(candidate.source_external_id)
             unique.append(candidate)
+        if unreadable_messages:
+            warning = IndeedJobAlertPartialError(
+                f"{unreadable_messages} email(s) Indeed sur {len(messages)} non exploitables "
+                f"(format ou lien de suivi non pris en charge). "
+                f"{len(unique)} annonce(s) lisible(s). Les liens opaques ne sont pas ouverts."
+            )
+            if not unique:
+                raise warning
+            self.collection_warning = warning
         self._logger.info(
             "Indeed Gmail alert collection completed.",
             extra={
@@ -71,6 +89,7 @@ class IndeedJobAlertCollector:
                 "messages_found": len(messages),
                 "candidates_parsed": len(parsed),
                 "candidates_unique": len(unique),
+                "unreadable_messages": unreadable_messages,
             },
         )
         return unique

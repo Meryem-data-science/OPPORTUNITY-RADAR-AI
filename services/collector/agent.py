@@ -244,14 +244,17 @@ class RadarAgent:
                     },
                 )
                 continue
+            warning = getattr(collector, "collection_warning", None)
+            partial = isinstance(warning, Exception)
             self._finalize_source_run(
                 settings,
                 source,
                 attempt,
-                status=SOURCE_RUN_SUCCESS,
+                status=SOURCE_RUN_FAILED if partial else SOURCE_RUN_SUCCESS,
                 metrics=self._source_run_metrics(
                     collector, items_found=collected, new_items=persisted.created
                 ),
+                error=warning if partial else None,
             )
             results.append(
                 SourceRunSummary(
@@ -259,13 +262,14 @@ class RadarAgent:
                     collected,
                     persisted.created,
                     persisted.updated,
-                    True,
+                    not partial,
+                    type(warning).__name__ if partial else None,
                 )
             )
             self._logger.info(
-                "Radar source succeeded.",
+                "Radar source collection completed with omissions." if partial else "Radar source succeeded.",
                 extra={
-                    "event": "radar_source_succeeded",
+                    "event": "radar_source_partial" if partial else "radar_source_succeeded",
                     "source_id": source.id,
                     "items_collected": collected,
                     "items_created": persisted.created,

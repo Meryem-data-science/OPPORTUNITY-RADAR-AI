@@ -57,7 +57,8 @@ def run(source_id: str, limit: int) -> list[dict[str, str | None]]:
         # the source's type is registered to, so a new collector needs no change
         # here. It was hardcoded to Greenhouse, which quietly meant every other
         # configured source was dry-run through the wrong collector.
-        candidates = collector_for(source).collect()
+        collector = collector_for(source)
+        candidates = collector.collect()
     except (RuntimeError, ValueError) as error:
         logger.error(
             f"Source collection failed: {error}",
@@ -76,10 +77,11 @@ def run(source_id: str, limit: int) -> list[dict[str, str | None]]:
         }
         for item in returned
     ]
-    logger.info(
-        "Source collection succeeded.",
+    partial = isinstance(getattr(collector, "collection_warning", None), Exception)
+    (logger.warning if partial else logger.info)(
+        "Source collection is incomplete; some messages were unreadable." if partial else "Source collection succeeded.",
         extra={
-            "event": "source_collection_succeeded",
+            "event": "source_collection_partial" if partial else "source_collection_succeeded",
             "source_id": source.id,
             "items_found": len(candidates),
             "items_returned": len(returned),

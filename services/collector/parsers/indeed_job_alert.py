@@ -2,7 +2,8 @@
 
 Indeed documents ``alert@indeed.com`` as its alert sender:
 https://support.indeed.com/hc/en-nz/articles/204288824-I-m-not-receiving-alerts
-Only explicit job keys are used; email trackers are never followed.
+Only explicit job keys are used; CTS payloads are decoded locally and no
+tracking link is followed.
 """
 
 from __future__ import annotations
@@ -16,10 +17,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from services.collector.models.gmail_message import GmailMessageCandidate
 from services.collector.models.opportunity import OpportunityCandidate
+from services.collector.parsers.indeed_links import unwrap_indeed_url
 
 INDEED_JOB_ALERT_SOURCE_ID = "indeed_job_alert_email"
-PARSER_VERSION = "indeed-alert-email-v1"
-INDEED_ALERT_SENDERS = frozenset({"alert@indeed.com"})
+PARSER_VERSION = "indeed-alert-email-v2"
+INDEED_ALERT_SENDERS = frozenset({
+    "alert@indeed.com",
+    "donotreply@jobalert.indeed.com",
+    "donotreply@match.indeed.com",
+})
 _ALLOWED_HOSTS = frozenset({"ma.indeed.com", "www.indeed.com", "indeed.com"})
 _JOB_PATH_KEYS = {
     "/viewjob": "jk",
@@ -39,7 +45,10 @@ _UI_TEXT = re.compile(
     r"en savoir plus|learn more|save(?: job)?|enregistrer(?: l['’]offre)?|"
     r"unsubscribe|se désabonner|désabonnement|manage (?:alerts|preferences)|"
     r"gérer (?:mes |les )?(?:alertes|préférences)|job alerts?|alertes? emploi|"
-    r"indeed|nouveau|new|sponsored|sponsorisé|recrutement actif|actively hiring)"
+    r"indeed|nouveau|new|sponsored|sponsorisé|recrutement actif|actively hiring|"
+    r"vous désinscrire(?: ici)?|politique de confidentialité|privacy policy|"
+    r"conditions d['’]utilisation|terms of (?:use|service)|centre d['’]aide|"
+    r"help cent(?:er|re)|this is a bad match)"
     r"[\s.!›»→]*$",
     re.IGNORECASE,
 )
@@ -87,7 +96,9 @@ def _is_trusted_sender(sender: str | None) -> bool:
 
 def _job_identity(url: str) -> tuple[str, str] | None:
     """Accept a single explicit hexadecimal job key on an allowlisted host."""
-    value = unescape(url).strip()
+    value = unwrap_indeed_url(url)
+    if value is None:
+        return None
     if re.search(r"[\x00-\x20\x7f]", value):
         return None
     try:
@@ -317,6 +328,21 @@ def _from_html(body: str) -> tuple[list[tuple[str, str, str, str, str | None]], 
     identified_keys: set[str] = set()
     for anchor in parser.anchors:
         identity = _job_identity(anchor.attrs.get("href", ""))
+        if not identity and _visible(anchor):
+            # Observed alert templates identify their title links by these
+            # containers. An opaque title link must not disappear silently
+            # when another card in the same email happens to be decodable.
+            parent = anchor.parent
+            title_container = bool(parent and (
+                (parent.tag == "td" and "r-l" in parent.attrs.get("class", "").split())
+                or parent.tag in {"h1", "h2", "h3"}
+            ))
+            try:
+                host = urlsplit(anchor.attrs.get("href", "")).hostname
+            except ValueError:
+                host = None
+            if title_container and host in {"cts.indeed.com", "engage.indeed.com"}:
+                identified_keys.add("unsupported-job-card")
         if not identity or not _visible(anchor):
             continue
         identified_keys.add(identity[0])
@@ -368,11 +394,20 @@ def _from_text(body: str) -> tuple[list[tuple[str, str, str, str, str | None]], 
         lines = [_clean(line) for line in block.splitlines() if _clean(line)]
         if len(lines) not in {3, 4}:
             continue
-        identity = _job_identity(lines[-1].strip("<>"))
-        if not identity or not all(_content_label(line) for line in lines[:-1]):
+        if not all(_content_label(line) for line in lines[:-1]):
             continue
         title, company = lines[:2]
         if _CTA_PREFIX.search(title) or not _company(company):
+            continue
+        url = lines[-1].strip("<>")
+        identity = _job_identity(url)
+        if not identity:
+            try:
+                host = urlsplit(url).hostname
+            except ValueError:
+                host = None
+            if host in {"cts.indeed.com", "engage.indeed.com"}:
+                identified_keys.add("unsupported-job-card")
             continue
         location = _location(lines[2]) if len(lines) == 4 else None
         found.append((identity[0], identity[1], title, company, location))

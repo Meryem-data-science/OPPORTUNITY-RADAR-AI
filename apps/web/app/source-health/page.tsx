@@ -22,19 +22,21 @@ function SourceCard({ entry }: { entry: SourceHealthEntry }) {
   const name = displaySource(entry.source_id);
   const hasAnomaly = entry.anomaly_code !== null || entry.anomaly_message !== null;
   const hasError = entry.error_type !== null || entry.error_message !== null;
+  const partialCollection = entry.error_type === "IndeedJobAlertPartialError" && (entry.items_found ?? 0) > 0;
   const alertGuide = ALERT_GUIDES[entry.source_id];
   const needsGmailConnection = alertGuide && entry.error_type !== null && GMAIL_AUTH_ERRORS.has(entry.error_type);
   return <article className="source-card" data-anomaly={hasAnomaly ? "true" : "false"}>
     <div className="source-card-header">
       <span className="organization-avatar" aria-hidden="true">{organizationInitials(name)}</span>
       <div className="source-card-title"><h3>{name}</h3><span className="source-enabled">Source activée</span></div>
-      <span className="source-status" data-status={entry.status?.toLowerCase() ?? "unknown"}>{entry.status === null ? "Aucune collecte" : statusLabels[entry.status] ?? entry.status}</span>
+      <span className="source-status" data-status={entry.status?.toLowerCase() ?? "unknown"}>{partialCollection ? "Collecte partielle" : entry.status === null ? "Aucune collecte" : statusLabels[entry.status] ?? entry.status}</span>
     </div>
     <p className="source-last-run">Dernière collecte enregistrée <strong>{entry.last_run_at === null ? NEVER_RUN : <time dateTime={entry.last_run_at}>{formatDateTime(entry.last_run_at)}</time>}</strong></p>
     {entry.source_id === "stage_ma" && <p className="source-summary-note">Offres publiques de la spécialité Informatique, jusqu’à 25 fiches par collecte. <a href="https://www.stage.ma/specialites/computer-science" target="_blank" rel="noopener noreferrer">Consulter Stage.ma</a>. La couverture reste partielle ; une collecte peut ne trouver aucune offre admissible.</p>}
     {entry.source_id === "stagiaires_ma" && <p className="source-summary-note">Offres publiques de Stagiaires.ma, jusqu’à 25 fiches par collecte à partir du sitemap officiel.</p>}
     {alertGuide && <p className="source-summary-note">Annonces contenues dans les alertes reçues sur votre compte Gmail autorisé, jusqu’à 50 emails des sept derniers jours. <a href={alertGuide.url} target="_blank" rel="noopener noreferrer">{alertGuide.label}</a> pour les métiers Data/IA au Maroc. Cette collecte couvre les alertes reçues ; elle ne couvre pas tout le catalogue.</p>}
     {alertGuide && <p className="source-summary-note">La localisation doit confirmer le Maroc pour apparaître dans les offres. Un email ancien ne prouve pas que le recrutement est encore ouvert.</p>}
+    {partialCollection && <p className="source-problem" role="status">Les annonces lisibles ont été importées. Certaines alertes utilisent un format ou des liens de suivi que Radar ne peut pas lire ; le détail indique combien d’emails restent concernés.</p>}
     {needsGmailConnection && <p className="source-problem" role="status">Dans le dossier du projet, lancer <strong>Connecter-Alertes-Emploi.cmd</strong> pour autoriser Gmail en lecture seule. La même connexion sert à LinkedIn et Indeed ; la prochaine collecte indiquera si les alertes sont lisibles.</p>}
     <dl className="source-metrics">
       <div><dt>Détectées</dt><dd>{count(entry.items_found)}</dd></div>
